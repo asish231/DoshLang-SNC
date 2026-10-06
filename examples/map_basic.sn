@@ -1,0 +1,9 @@
+fn main() {
+    map<str, int> ages = {"Bob": 30, "Ann": 25}
+    print(ages["Bob"])
+    ages["Ann"] = 26
+    print(ages["Ann"])
+    print(ages.length())
+    ages["Zed"] = 1
+    print(ages["Zed"])
+}

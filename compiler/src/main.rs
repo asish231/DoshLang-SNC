@@ -64,7 +64,7 @@ enum Cmd {
         root: Option<PathBuf>,
         /// Only run tests whose name or function contains this substring
         filter: Option<String>,
-        /// Measure line coverage via LLVM instrumentation profiles
+        /// Measure statement coverage with `sn_cov_hit` counters
         #[arg(long)]
         coverage: bool,
         #[arg(short = 'O', default_value = "2")]
@@ -185,12 +185,10 @@ fn main() -> ExitCode {
             };
             match snc::test::run(&opts) {
                 Ok(run) => {
-                    let cases: Vec<snc::test::TestCase> =
-                        snc::test::discover(&opts.root).iter().map(|p| snc::test::describe(p)).collect();
-                    let pct = run
-                        .coverage
-                        .as_ref()
-                        .map(|c| snc::test::coverage_percent(c, &cases));
+                    let pct = match (run.covered_declared.as_ref(), run.covered_lines.as_ref()) {
+                        (Some(d), Some(l)) => Some(snc::test::coverage_percent(d, l)),
+                        _ => None,
+                    };
                     print!("{}", snc::test::report(&run, pct));
                     if run.failed() == 0 {
                         ExitCode::SUCCESS
@@ -247,6 +245,9 @@ fn run_compile(opts: CompileOptions) -> ExitCode {
     let emit_stdout = opts.emit_llvm && opts.output.is_none();
     match compile(&opts) {
         Ok(res) => {
+            if res.cached && std::env::var("SNC_CACHE_VERBOSE").is_ok() {
+                eprintln!("(reused cached build)");
+            }
             if emit_stdout {
                 print!("{}", res.llvm_ir);
             } else if let Some(bin) = res.binary {

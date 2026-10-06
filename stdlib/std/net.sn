@@ -1,0 +1,48 @@
+// TCP sockets driven by the runtime event loop.
+//
+// All operations are non-blocking underneath: a read or write that would
+// block parks on the reactor instead of occupying a thread, and
+// select_read() is a real readiness wait, not a polling loop.
+
+fn listen(int port) -> int {
+    return tcp_listen(port)
+}
+
+fn listen_any(int port) -> int {
+    return tcp_listen_any(port)
+}
+
+fn port(int listener) -> int {
+    return tcp_local_port(listener)
+}
+
+fn connect(str host, int port, int timeout_ms) -> int {
+    return tcp_connect(host, port, timeout_ms)
+}
+
+fn accept(int listener) -> int {
+    return tcp_accept(listener)
+}
+
+// Reads until data arrives. Returns "" when the peer closed the connection.
+fn read(int sock) -> str {
+    return tcp_read(sock)
+}
+
+fn write(int sock, str data) -> int {
+    return tcp_write(sock, data)
+}
+
+fn close(int sock) {
+    tcp_close(sock)
+}
+
+// Waits until one of `socks` has data. Returns its index, or -1 on timeout.
+// This wraps the `select_read` builtin, which takes a `list<int>` directly.
+fn wait_read(list<int> socks, int timeout_ms) -> int {
+    return select_read(socks, timeout_ms)
+}
+
+fn get(str url) -> (str, error) {
+    return http_get(url)
+}

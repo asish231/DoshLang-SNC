@@ -1,0 +1,9 @@
+extension str {
+    fn word_count() -> int {
+        return self.split(" ").length()
+    }
+}
+
+fn main() {
+    print("hello world".word_count())
+}

@@ -1,0 +1,6 @@
+fn main() {
+    int a = 1
+    mut<int> m1 = address(a)
+    mut<int> m2 = address(a)
+    print(value(m1))
+}

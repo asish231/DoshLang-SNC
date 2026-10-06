@@ -961,22 +961,38 @@ pub fn run_debug(source: &str, output: Option<&std::path::Path>) -> Result<Strin
     let out = output.map(|p| p.to_path_buf()).unwrap_or_else(|| {
         std::env::temp_dir().join(format!("snc-debug-{}", std::process::id()))
     });
-    let opts = crate::driver::CompileOptions {
-        input: std::path::PathBuf::from(source),
-        output: Some(out.clone()),
-        emit_llvm: false,
-        target: None,
-        clang: "clang".into(),
-        opt: "0".into(),
-        libs: Vec::new(),
-        coverage: false,
-    };
-    crate::driver::compile(&opts)?;
-    Ok(format!(
-        "Built {} with debug info (-O0).\nRun: lldb {}\n  (lldb) b main\n  (lldb) run\nCompile with: snc {} -o {} (debug symbols via clang -g implied at -O0)",
-        out.display(),
-        out.display(),
-        source,
+    // Full DWARF build with preserved objects, so lldb resolves SN lines.
+    crate::driver::compile_debug(
+        &std::path::PathBuf::from(source),
+        &out,
+        "clang",
+    )?;
+    // Drive one breakpoint-at-entry session: break on the SN `main`, run the
+    // program, and show where it stopped. The binary stays behind for an
+    // interactive follow-up (`lldb <out>`).
+    let session = std::process::Command::new("lldb")
+        .arg("-b")
+        .arg("-o")
+        .arg("breakpoint set --name sn_fn_main")
+        .arg("-o")
+        .arg("run")
+        .arg("-o")
+        .arg("thread backtrace")
+        .arg("-o")
+        .arg("continue")
+        .arg("-o")
+        .arg("quit")
+        .arg(&out)
+        .output()
+        .map_err(|e| format!("failed to run lldb (is it installed?): {e}"))?;
+    let mut s = format!("Built {} with DWARF (-O0).\n", out.display());
+    s.push_str(&String::from_utf8_lossy(&session.stdout));
+    if !session.status.success() {
+        s.push_str(&String::from_utf8_lossy(&session.stderr));
+    }
+    s.push_str(&format!(
+        "\nFor an interactive session: lldb {}\n  (lldb) b <file>.sn:<line>\n",
         out.display()
-    ))
+    ));
+    Ok(s)
 }

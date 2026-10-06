@@ -1,0 +1,11 @@
+fn getenv(str name) -> str? {
+    return os_getenv(name)
+}
+
+fn exit(int code) {
+    os_exit(code)
+}
+
+fn args() -> list<str> {
+    return os_args()
+}

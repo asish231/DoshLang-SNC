@@ -323,11 +323,18 @@ impl Parser {
     }
 
     /// `T`, `T: Bound`, `out T`, `in T`, or `out T: Bound`.
+    ///
+    /// `out` / `in` are contextual keywords: they only introduce a variance
+    /// here, so `str out = ""` still parses as an ordinary declaration.
     fn parse_type_param(&mut self) -> Result<TypeParam, String> {
-        let variance = if self.eat_if(TokenKind::Out) {
-            Variance::Covariant
-        } else if self.eat_if(TokenKind::In) {
-            Variance::Contravariant
+        let variance = if self.at_variance_marker() {
+            if self.peek().text == "out" {
+                self.bump();
+                Variance::Covariant
+            } else {
+                self.bump();
+                Variance::Contravariant
+            }
         } else {
             Variance::Invariant
         };
@@ -1757,6 +1764,30 @@ impl Parser {
             .get(self.pos + n)
             .map(|t| t.kind)
             .unwrap_or(TokenKind::Eof)
+    }
+
+    /// True when the next tokens form a variance annotation: `out T`, `in T`,
+    /// or the `In` keyword followed by a type parameter name. `out` stays a
+    /// plain identifier everywhere else, so `str out = ""` still parses.
+    fn at_variance_marker(&self) -> bool {
+        if self.at(TokenKind::In) {
+            return matches!(
+                self.tokens.get(self.pos + 1).map(|n| n.kind),
+                Some(TokenKind::Ident)
+            );
+        }
+        let t = self.peek();
+        if t.kind != TokenKind::Ident {
+            return false;
+        }
+        if t.text != "out" && t.text != "in" {
+            return false;
+        }
+        // A type parameter name follows, so `out`/`in` here is the marker.
+        matches!(
+            self.tokens.get(self.pos + 1).map(|n| n.kind),
+            Some(TokenKind::Ident)
+        )
     }
 
     fn bump(&mut self) -> Token {

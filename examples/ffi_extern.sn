@@ -1,0 +1,34 @@
+// Calling C libraries directly: `extern` blocks link against the system
+// libraries and marshal values to the C ABI. `str` becomes a NUL-terminated
+// `char *` in both directions.
+extern "m" {
+    fn abs(int x) -> int
+    fn labs(int x) -> int
+    fn atoi(str s) -> int
+    fn strtol(str s, ptr end, int base) -> int
+    fn sqrt(float x) -> float
+}
+
+extern "/tmp/sn_ffi_shim.o" {
+    // An out-parameter: fills `out` with 4242 and returns a status code.
+    fn shim_fill(ptr outp) -> int
+    fn shim_get(int v) -> int
+}
+
+fn main() {
+    print(abs(-42))
+    print(labs(7))
+    print(atoi("1234"))
+    print(strtol("ff", 0, 16))
+    print(cast(sqrt(2.5), int))
+
+    // Pointer access for FFI out-parameters and buffers.
+    ptr slot = ptr_alloc(8)
+    ptr_store(slot, 0, 0)
+    print(shim_fill(slot))
+    print(ptr_load(slot, 0))
+    print(shim_get(ptr_load(slot, 0)))
+    ptr_store_byte(slot, 0, 65)
+    print(ptr_load_byte(slot, 0))
+    ptr_free(slot)
+}

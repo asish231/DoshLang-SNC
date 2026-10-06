@@ -1,5 +1,5 @@
 //! `snc test` — discover, compile, run and report tests, with optional
-//! line coverage measured from LLVM instrumentation profiles.
+//! statement coverage measured from `sn_cov_hit` counters.
 
 use crate::driver::{compile, CompileOptions};
 use std::collections::BTreeMap;
@@ -31,7 +31,10 @@ pub type Coverage = BTreeMap<String, BTreeMap<u32, u64>>;
 #[derive(Default)]
 pub struct TestRun {
     pub results: Vec<TestResult>,
-    pub coverage: Option<Coverage>,
+    /// Lines the compiler instrumented, per file.
+    pub covered_declared: Option<Coverage>,
+    /// Lines that actually ran, per file.
+    pub covered_lines: Option<Coverage>,
 }
 
 impl TestRun {
@@ -39,7 +42,10 @@ impl TestRun {
         self.results.iter().filter(|r| r.passed).count()
     }
     pub fn failed(&self) -> usize {
-        self.results.iter().filter(|r| !r.passed && !r.skipped).count()
+        self.results
+            .iter()
+            .filter(|r| !r.passed && !r.skipped)
+            .count()
     }
     pub fn skipped(&self) -> usize {
         self.results.iter().filter(|r| r.skipped).count()
@@ -121,8 +127,7 @@ pub struct Options {
     pub opt: String,
     /// Only run tests whose file name or one of its functions contains this.
     pub filter: Option<String>,
-    /// Compile with source-based instrumentation so coverage can be read
-    /// from the resulting `.profraw`.
+    /// Compile with per-statement counters and collect `SN_COVERAGE_OUT`.
     pub coverage: bool,
 }
 
@@ -145,6 +150,7 @@ pub fn run(opts: &Options) -> Result<TestRun, String> {
     let _ = std::fs::remove_dir_all(&outdir);
     let _ = std::fs::create_dir_all(&outdir);
     let mut results = Vec::new();
+    let mut acc = CovAcc::default();
 
     for (i, c) in selected.iter().enumerate() {
         let stem = c.path.file_stem().and_then(|s| s.to_str()).unwrap_or("t");
@@ -156,7 +162,11 @@ pub fn run(opts: &Options) -> Result<TestRun, String> {
             target: None,
             clang: opts.clang.clone(),
             // Instrumentation conflicts with inlining-heavy optimisation.
-            opt: if opts.coverage { "0".into() } else { opts.opt.clone() },
+            opt: if opts.coverage {
+                "0".into()
+            } else {
+                opts.opt.clone()
+            },
             libs: Vec::new(),
             coverage: opts.coverage,
         };
@@ -169,11 +179,17 @@ pub fn run(opts: &Options) -> Result<TestRun, String> {
                 stdout: String::new(),
                 stderr: format!("compile error\n{e}"),
             }),
-            Ok(_) => {
+            Ok(res) => {
+                if opts.coverage {
+                    // Record every instrumented line first, so lines that never
+                    // execute still count against the total.
+                    accumulate(&mut acc, &res.cov_slots, &res.cov_files, &[]);
+                }
                 let mut cmd = Command::new(&bin);
                 if opts.coverage {
-                    cmd.env("LLVM_PROFILE_FILE", outdir.join(format!("{stem}-{i}.profraw")));
+                    cmd.env("SN_COVERAGE_OUT", outdir.join(format!("{stem}-{i}.cov")));
                 }
+                let cov_file = outdir.join(format!("{stem}-{i}.cov"));
                 let start = std::time::Instant::now();
                 let dur = match cmd.output() {
                     Ok(o) => {
@@ -204,131 +220,120 @@ pub fn run(opts: &Options) -> Result<TestRun, String> {
                         start.elapsed().as_millis()
                     }
                 };
+                if opts.coverage {
+                    accumulate(
+                        &mut acc,
+                        &res.cov_slots,
+                        &res.cov_files,
+                        &read_counts(&cov_file),
+                    );
+                }
                 let _ = dur;
                 let _ = std::fs::remove_file(&bin);
+                let _ = std::fs::remove_file(&cov_file);
             }
         }
     }
 
-    let coverage = if opts.coverage {
-        Some(merge_profiles(&outdir, &cases))
-    } else {
-        None
-    };
     let _ = std::fs::remove_dir_all(&outdir);
 
     Ok(TestRun {
         results,
-        coverage,
+        covered_declared: opts.coverage.then_some(acc.declared),
+        covered_lines: opts.coverage.then_some(acc.lines),
     })
 }
 
-/// Turn every `.profraw` in `dir` into per-source, per-line hit counts.
-fn merge_profiles(dir: &Path, cases: &[TestCase]) -> Coverage {
-    let mut cov: Coverage = BTreeMap::new();
-    let mut profraws: Vec<PathBuf> = std::fs::read_dir(dir)
-        .map(|rd| {
-            rd.flatten()
-                .map(|e| e.path())
-                .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("profraw"))
-                .collect()
+/// Accumulate the counters written by `SN_COVERAGE_OUT` into per-file,
+/// per-line hit counts.
+#[derive(Default)]
+struct CovAcc {
+    lines: Coverage,
+    /// Slots seen per test binary, kept so unused lines stay reportable.
+    declared: Coverage,
+}
+
+fn read_counts(path: &Path) -> Vec<(u64, u64)> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            let slot = it.next()?.parse::<u64>().ok()?;
+            let n = it.next()?.parse::<u64>().ok()?;
+            Some((slot, n))
         })
-        .unwrap_or_default();
-    profraws.sort();
-    for pr in &profraws {
-        let text = match profdata_show(pr) {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("coverage: {} ({e})", pr.display());
-                continue;
-            }
+        .collect()
+}
+
+fn accumulate(acc: &mut CovAcc, slots: &[(u32, u32)], files: &[String], counts: &[(u64, u64)]) {
+    for (slot, _) in slots.iter().enumerate() {
+        let (file_id, line) = slots[slot];
+        let Some(path) = files.get(file_id as usize) else {
+            continue;
         };
-        let mut file = String::new();
-        for line in text.lines() {
-            let t = line.trim();
-            if t.starts_with("Total functions")
-                || t.starts_with("Maximum function")
-                || t.starts_with("Maximum internal")
-                || t.starts_with("Instrumentation level")
-                || t.starts_with("Hash:")
-                || t.is_empty()
-            {
-                continue;
-            }
-            let Some((name, rest)) = t.split_once(':') else {
-                continue;
-            };
-            let (name, rest) = (name.trim(), rest.trim());
-            if rest.is_empty() {
-                // A file header: the path with no count after the colon.
-                file = name.to_string();
-                continue;
-            }
-            if let Ok(n) = name.parse::<u32>() {
-                if !file.is_empty() {
-                    let key = resolve_source(&file, cases);
-                    *cov.entry(key).or_default().entry(n).or_insert(0) +=
-                        rest.parse::<u64>().unwrap_or(1);
+        let entry = acc.declared.entry(path.clone()).or_default();
+        entry.entry(line).or_insert(0);
+    }
+    for (slot, n) in counts {
+        let Some((_, line)) = slots.get(*slot as usize) else {
+            continue;
+        };
+        let (file_id, line) = (slots[*slot as usize].0, *line);
+        let Some(path) = files.get(file_id as usize) else {
+            continue;
+        };
+        *acc.lines
+            .entry(path.clone())
+            .or_default()
+            .entry(line)
+            .or_insert(0) += n;
+    }
+}
+
+/// Per-file coverage summary with the lines that never ran.
+pub fn coverage_report(declared: &Coverage, lines: &Coverage) -> String {
+    let mut s = String::new();
+    let mut files: Vec<&String> = declared.keys().collect();
+    files.sort();
+    for f in files {
+        let decl = &declared[f];
+        if decl.is_empty() {
+            continue;
+        }
+        let hits = lines.get(f);
+        let hit = hits.map(|h| h.len()).unwrap_or(0);
+        let pct = hit as f64 * 100.0 / decl.len() as f64;
+        let mut missing: Vec<u32> = decl
+            .iter()
+            .filter(|(l, _)| hits.map(|h| !h.contains_key(l)).unwrap_or(true))
+            .map(|(l, _)| *l)
+            .collect();
+        missing.sort_unstable();
+        s.push_str(&format!("{:>6.1}%  {}/{}  {}\n", pct, hit, decl.len(), f));
+        if !missing.is_empty() {
+            // Collapse runs so long uncovered blocks stay readable.
+            let mut i = 0;
+            let mut runs: Vec<String> = Vec::new();
+            while i < missing.len() {
+                let start = missing[i];
+                let mut end = start;
+                while i + 1 < missing.len() && missing[i + 1] == end + 1 {
+                    i += 1;
+                    end = missing[i];
                 }
-            } else {
-                file = name.to_string();
+                if start == end {
+                    runs.push(start.to_string());
+                } else {
+                    runs.push(format!("{start}-{end}"));
+                }
+                i += 1;
             }
+            s.push_str(&format!("        uncovered: {}\n", runs.join(", ")));
         }
     }
-    // Discovered tests always appear, even if they produced no profile.
-    for c in cases {
-        cov.entry(c.path.display().to_string()).or_default();
-    }
-    cov
-}
-
-/// llvm-profdata reports the generated `.ll`; map it back to its `.sn` source.
-fn resolve_source(name: &str, cases: &[TestCase]) -> String {
-    let base = name.rsplit('/').next().unwrap_or(name);
-    let stem = base.split('-').next().unwrap_or(base);
-    for c in cases {
-        let cstem = c.path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        if !cstem.is_empty() && stem.starts_with(cstem) {
-            return c.path.display().to_string();
-        }
-    }
-    name.to_string()
-}
-
-/// Locate `llvm-profdata`: on PATH, else via the active Xcode/CLT toolchain.
-fn profdata_bin() -> Option<String> {
-    if let Ok(p) = std::env::var("LLVM_PROFDATA") {
-        if Path::new(&p).exists() {
-            return Some(p);
-        }
-    }
-    for cand in ["llvm-profdata", "llvm-profdata-18", "llvm-profdata-17"] {
-        if Command::new(cand).arg("--version").output().is_ok() {
-            return Some(cand.to_string());
-        }
-    }
-    let probe = Command::new("xcrun").arg("-f").arg("llvm-profdata").output().ok()?;
-    let path = String::from_utf8_lossy(&probe.stdout).trim().to_string();
-    if path.is_empty() || !Path::new(&path).exists() {
-        None
-    } else {
-        Some(path)
-    }
-}
-
-fn profdata_show(profraw: &Path) -> Result<String, String> {
-    let bin = profdata_bin().ok_or("llvm-profdata not found (install LLVM or Xcode CLT)")?;
-    let out = Command::new(bin)
-        .arg("show")
-        .arg("--all-functions")
-        .arg("--counts")
-        .arg(profraw)
-        .output()
-        .map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).into());
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into())
+    s
 }
 
 /// Human-readable per-test summary plus an optional coverage line.
@@ -363,26 +368,79 @@ pub fn report(run: &TestRun, cov_pct: Option<f64>) -> String {
         run.failed(),
         run.skipped()
     ));
-    if let Some(pct) = cov_pct {
-        s.push_str(&format!("coverage: {pct:.1}% of instrumented lines executed\n"));
+    if let (Some(pct), Some(declared), Some(lines)) = (
+        cov_pct,
+        run.covered_declared.as_ref(),
+        run.covered_lines.as_ref(),
+    ) {
+        s.push_str(&format!(
+            "coverage: {pct:.1}% of instrumented lines executed\n\n"
+        ));
+        s.push_str(&coverage_report(declared, lines));
     }
     s
 }
 
 /// Share of instrumented lines that actually ran.
-pub fn coverage_percent(cov: &Coverage, cases: &[TestCase]) -> f64 {
+///
+/// `declared` holds every line the compiler instrumented (so an unexecuted
+/// `if` body still counts against coverage); `lines` holds the hits.
+pub fn coverage_percent(declared: &Coverage, lines: &Coverage) -> f64 {
     let mut hit = 0usize;
     let mut total = 0usize;
-    for c in cases {
-        let key = c.path.display().to_string();
-        if let Some(lines) = cov.get(&key) {
-            hit += lines.len();
-            total += lines.len();
+    for (file, lmap) in declared {
+        total += lmap.len();
+        if let Some(hits) = lines.get(file) {
+            hit += hits.len();
         }
     }
     if total == 0 {
         0.0
     } else {
         hit as f64 * 100.0 / total as f64
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn describe_detects_functions_and_expected_failures() {
+        let path = std::env::temp_dir().join(format!("snc-describe-{}.sn", std::process::id()));
+        std::fs::write(&path, "fn alpha() {\n}\n// @expected-failure\n").unwrap();
+        let case = describe(&path);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(case.functions, vec!["alpha".to_string()]);
+        assert!(case.should_fail);
+    }
+
+    #[test]
+    fn coverage_helpers_count_lines_and_collapse_gaps() {
+        let mut declared = Coverage::new();
+        declared.insert(
+            "a.sn".to_string(),
+            BTreeMap::from([(1, 0), (2, 0), (3, 0), (4, 0), (5, 0)]),
+        );
+        let mut lines = Coverage::new();
+        lines.insert("a.sn".to_string(), BTreeMap::from([(2, 1), (4, 2)]));
+        assert!((coverage_percent(&declared, &lines) - 40.0).abs() < 1e-6);
+        let report = coverage_report(&declared, &lines);
+        assert!(report.contains("40.0%"), "{report}");
+        assert!(report.contains("uncovered: 1, 3, 5"), "{report}");
+    }
+
+    #[test]
+    fn accumulate_merges_counts_for_one_line() {
+        let mut acc = CovAcc::default();
+        accumulate(
+            &mut acc,
+            &[(0, 7), (0, 7)],
+            &["a.sn".to_string()],
+            &[(0, 2), (1, 3)],
+        );
+        assert_eq!(acc.declared["a.sn"].len(), 1);
+        assert_eq!(acc.lines["a.sn"][&7], 5);
     }
 }

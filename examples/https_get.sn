@@ -1,0 +1,10 @@
+use std.http
+
+fn main() {
+    let body, err = get("https://example.com/")
+    if (err != none) {
+        print("fail")
+        return
+    }
+    print(body.length())
+}

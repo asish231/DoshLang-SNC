@@ -1,0 +1,47 @@
+// Digests and checksums.
+//
+// Each digest function writes into a bytearray and returns it, so the result
+// can be compared byte for byte or printed with bytes.hex().
+
+fn sha256(str data) -> ptr {
+    ptr digest = bytearray_new(32)
+    digest_sha256(data, digest)
+    return digest
+}
+
+fn sha512(str data) -> ptr {
+    ptr digest = bytearray_new(64)
+    digest_sha512(data, digest)
+    return digest
+}
+
+fn md5(str data) -> ptr {
+    ptr digest = bytearray_new(16)
+    digest_md5(data, digest)
+    return digest
+}
+
+fn hmac_sha256(str key, str message) -> ptr {
+    ptr digest = bytearray_new(32)
+    digest_hmac_sha256(key, message, digest)
+    return digest
+}
+
+// CRC-32 (IEEE), returned as an unsigned 32-bit value in an int.
+fn crc32(str data) -> int {
+    return digest_crc32(data)
+}
+
+// Extends a running CRC-32 with more data.
+fn crc32_extend(int seed, str data) -> int {
+    return digest_crc32_update(seed, data)
+}
+
+// Constant-time comparison, for secrets that must not leak via timing.
+fn eq(str a, str b) -> bool {
+    return consttime_eq(a, b)
+}
+
+fn wipe(ptr buf, int n) {
+    secure_zero(buf, n)
+}

@@ -1,5 +1,32 @@
 .build/
 snc
+snc.exe
+hello
+hello.exe
 *.o
 .DS_Store
 .amazonq/rules
+
+# Rust / clang artifacts
+compiler/target/
+**/*.ll
+*.exe
+
+# Python / tool venvs (never commit)
+.codex-ssh-venv/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.env
+
+# Package publish output (lockfiles are committed)
+dist/
+packages/dist/
+*.tar.gz
+
+# Editor extension build product (regenerable; optional)
+*.vsix
+
+# Scratch
+/tmp/

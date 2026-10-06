@@ -1,0 +1,12 @@
+blueprint Box<T> {
+    T value
+
+    fn get() -> T {
+        return self.value
+    }
+}
+
+fn main() {
+    new Box<int> b(value: 42)
+    print(b.get())
+}

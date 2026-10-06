@@ -1,0 +1,8 @@
+blueprint Shape {
+    abstract fn area() -> int
+}
+
+fn main() {
+    new Shape s()
+    print(s.area())
+}

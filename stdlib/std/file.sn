@@ -1,0 +1,39 @@
+fn read(str path) -> (str, error) {
+    return file_read_ex(path)
+}
+
+fn write(str path, str data) -> error {
+    return file_write_ex(path, data)
+}
+
+fn append(str path, str data) -> error {
+    return file_append(path, data)
+}
+
+fn exists(str path) -> bool {
+    return file_exists(path)
+}
+
+fn delete(str path) -> error {
+    return file_delete(path)
+}
+
+fn copy(str src, str dst) -> error {
+    return file_copy(src, dst)
+}
+
+fn move(str src, str dst) -> error {
+    return file_move(src, dst)
+}
+
+fn mkdir(str path) -> error {
+    return file_mkdir(path)
+}
+
+fn rmdir(str path) -> error {
+    return file_rmdir(path)
+}
+
+fn list_dir(str path) -> (list<str>, error) {
+    return file_list(path)
+}

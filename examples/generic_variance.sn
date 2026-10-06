@@ -1,0 +1,56 @@
+blueprint Animal {
+    fn name() -> str {
+        return "animal"
+    }
+}
+
+blueprint Dog from Animal {
+    fn name() -> str {
+        return "dog"
+    }
+}
+
+blueprint Cat from Animal {
+    fn name() -> str {
+        return "cat"
+    }
+}
+
+blueprint Producer<out T> {
+    T item
+
+    fn get() -> T {
+        return self.item
+    }
+}
+
+blueprint Consumer<in T> {
+    T item
+
+    fn accept(T v) {
+        self.item = v
+    }
+
+    fn get() -> T {
+        return self.item
+    }
+}
+
+fn main() {
+    new Dog d()
+    new Cat c()
+
+    new Producer<Dog> pd(item: d)
+    new Producer<Cat> pc(item: c)
+
+    Producer<Animal> any_d = pd
+    Producer<Animal> any_c = pc
+    print(any_d.get().name())
+    print(any_c.get().name())
+
+    new Animal a()
+    new Consumer<Animal> ca(item: a)
+    Consumer<Dog> as_dog = ca
+    as_dog.accept(d)
+    print(as_dog.get().name())
+}

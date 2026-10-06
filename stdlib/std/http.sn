@@ -1,0 +1,18 @@
+// HTTP GET/POST and a one-shot local server.
+//
+// Environment (runtime):
+//   SN_HTTP_TIMEOUT=30       request timeout seconds (HTTPS curl + plain sockets)
+//   SN_HTTP_INSECURE=1       allow curl -k (skip TLS verify) — off by default
+//   SN_HTTP_USER_AGENT=...   override User-Agent (default snlang/0.2)
+
+fn get(str url) -> (str, error) {
+    return http_get(url)
+}
+
+fn post(str url, str body) -> (str, error) {
+    return http_post(url, body)
+}
+
+fn serve_once(int port, fn(str) -> str handler) -> error {
+    return http_serve_once(port, handler)
+}

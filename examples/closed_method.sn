@@ -1,0 +1,28 @@
+blueprint Account {
+    int balance = 0
+
+    closed fn audit() -> int {
+        return self.balance
+    }
+
+    fn deposit(int amt) {
+        self.balance = self.balance + amt
+    }
+
+    fn total() -> int {
+        return self.audit()
+    }
+}
+
+blueprint Savings from Account {
+    fn interest(int pct) -> int {
+        return (self.balance * pct) / 100
+    }
+}
+
+fn main() {
+    new Savings s()
+    s.deposit(200)
+    print(s.total())
+    print(s.interest(5))
+}

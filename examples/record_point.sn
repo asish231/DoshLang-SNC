@@ -1,0 +1,14 @@
+record Point {
+    int x
+    int y
+}
+
+fn main() {
+    Point p
+    p.x = 10
+    p.y = 20
+    Point q = p
+    q.x = 5
+    print(p.x)
+    print(q.x)
+}

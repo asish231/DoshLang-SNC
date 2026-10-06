@@ -3,9 +3,9 @@
 **Version:** 0.2  
 **Created by:** SafarNow  
 **Paradigm:** Compiled, Strongly-Typed, Object-Oriented, Concurrent  
-**Philosophy:** The speed of C, the OOP of Java, the simplicity of Go — with zero confusion.
+**Philosophy:** Easy syntax, native LLVM, opt-in null — not “as fast as C” by slogan, and not a Go/Rust clone.
 
-SNlang compiles directly to native ARM64 machine code. No semicolons. Curly braces `{}` for blocks (easy transition to Java/C++). English-readable logic. Simplified pointers. The programmer builds everything from scratch using clean, powerful primitives.
+SNlang compiles to native code through LLVM (`snc` emits IR, `clang` builds the binary). No semicolons. Curly braces `{}` for blocks. English-readable logic (`and` / `or` / `not`). The compiler lives in `compiler/` (Rust).
 
 ---
 
@@ -48,7 +48,10 @@ SNlang enforces strict typing. Every variable must declare its type.
 | Type       | Description                          | Example                  |
 |------------|--------------------------------------|--------------------------|
 | `none`     | Represents no value / null           | `return none`            |
-| `any`      | Accepts any type (use sparingly)     | `any data = 42`          |
+
+> **`any`** — MVP in v0.2: `any_box(value)`, `.as_int()`, `.as_str()`, `.type_name()`. Boxed int/str/bool tags only.
+
+> **`record`** — copy-by-value stack struct: `record Point { int x; int y }`.
 
 ---
 
@@ -389,21 +392,24 @@ fn main() {
 Explicit error handling inspired by Go. No hidden exceptions. You always deal with errors.
 
 ```text
-fn readFile(str path) -> (str, error) {
-    if (not fileExists(path)) {
-        return ("", error("File not found: " + path))
+fn readConfig(str path) -> (str, error) {
+    str data = file_read(path)
+    if (data == "") {
+        return ("", error("File missing or empty: " + path))
     }
-    return (contents, none)
+    return (data, none)
 }
 
-str data, error err = readFile("config.txt")
+str data, error err = readConfig("config.txt")
 
 if (err != none) {
-    print("Error: " + err.message)
+    print("Error: " + err.message())
 } else {
     print(data)
 }
 ```
+
+> Prefer **`use std.file`** — `read`/`write` return `(str, error)` / `error`; `exists(path) -> bool`.
 
 ### Panic (Unrecoverable Errors)
 
@@ -447,6 +453,8 @@ blueprint User {
 
 ### Object Creation
 
+Use `new Type name(field: value, …)`. Field values are assigned, then optional `fn create()` runs if defined.
+
 ```text
 new User alice(name: "Alice", email: "alice@mail.com", age: 25)
 print(alice.greet())
@@ -455,6 +463,25 @@ if (alice.isAdult()) {
     print("Access granted")
 }
 ```
+
+### OOP — what is implemented vs not
+
+SNlang has a **teaching OOP subset**, not full Java/C++ OOP:
+
+| Concept | Status |
+|---------|--------|
+| Blueprints (classes), `self`, fields, methods | ✅ |
+| Single inheritance (`from`) + `super.method()` | ✅ MVP |
+| Contracts + `follows` (compile-time interface check) | ✅ |
+| Field access: `open` / `closed` / `guarded` | ✅ enforced at compile time |
+| Optional `fn create()` after field init | ✅ |
+| Subtype polymorphism (`Child` where `Parent` expected) | ✅ MVP (`type_id` dispatch) |
+| Contract-typed variables (`Drawable x`) | ❌ |
+| Virtual / dynamic dispatch | ✅ MVP (not vtable-based) |
+| Generic blueprints (`blueprint Box<T>`) | ✅ MVP (monomorphize at `new`) |
+| Static (class) members, abstract classes | ❌ |
+| Method-level `private` / properties | ❌ |
+| Heterogeneous collections (`list<Animal>` mixed subtypes) | ❌ |
 
 ---
 
@@ -587,20 +614,26 @@ use company.database.postgres
 **Current Implementation Status:**
 - ✅ `use module.path` syntax parsing
 - ✅ Single and multiple module imports
-- ✅ Dotted module paths (`use std.math.advanced`)
-- ❌ Actual file loading and parsing (planned)
-- ❌ Symbol resolution (imported functions not yet callable)
-- ❌ Module search paths
+- ✅ Dotted module paths (`use std.math`)
+- ✅ File loading and symbol resolution (`driver.rs` walks imports)
+- ✅ Search paths: importer directory, `packages/`, `stdlib/`, path deps in `sn.toml`
+- ✅ `snc pkg init|add|list|build|publish` for local packages + lockfile (`sn.lock.toml`)
+- ✅ Remote package registry MVP (`--registry` fetches `index.json` + tarball; see `docs/PACKAGES.md`)
 
 ### Standard Library Imports
 
 ```text
-use std.io          // Input / Output
-use std.math        // Math functions
-use std.net         // Networking
-use std.file        // File operations
-use std.time        // Time and dates
-use std.json        // JSON parsing
+use std.io          // print, file_read, file_write (legacy globals)
+use std.file        // read, write, append, exists, delete, copy, move, mkdir, rmdir, list_dir
+use std.path        // join, base, dir, ext
+use std.os          // getenv, exit, args
+use std.math        // abs, min, max, pow, …
+use std.net         // HTTP client (plain HTTP sockets; HTTPS via curl)
+use std.http        // get, post, serve_once (TLS via verified curl by default)
+use std.time        // now_ms, sleep_ms, format
+use std.json        // parse, encode
+use std.string      // isEmpty, repeat
+use std.test        // assert_true, assert_eq_int, assert_eq_str, …
 ```
 
 ---
@@ -731,16 +764,86 @@ print("Welcome, " + userInput)
 
 ### File I/O
 
+**Legacy globals** (no import): `file_read(path) -> str`, `file_write(path, data) -> bool`.
+
+**`std.file`** (recommended):
+
 ```text
 use std.file
 
-file.write("output.txt", "Hello from SNlang!")
-
-str contents, error err = file.read("data.txt")
-if (err != none) {
-    print("Failed to read file")
+fn main() {
+    str data, error err = read("config.txt")
+    if (err != none) {
+        print(err.message())
+        return
+    }
+    error e = write("out.txt", data)
+    print(exists("out.txt"))
+    list<str> names, error le = list_dir(".")
 }
 ```
+
+| Function | Returns |
+|---|---|
+| `read(path)` | `(str, error)` |
+| `write(path, data)` | `error` |
+| `append(path, data)` | `error` |
+| `exists(path)` | `bool` |
+| `delete(path)` | `error` |
+| `copy(src, dst)` | `error` |
+| `move(src, dst)` | `error` |
+| `mkdir(path)` | `error` |
+| `rmdir(path)` | `error` |
+| `list_dir(path)` | `(list<str>, error)` |
+
+### Path and OS
+
+```text
+use std.path
+use std.os
+
+str p = join("dir", "file.txt")
+print(base(p))
+str? v = getenv("HOME")
+list<str> argv = args()
+```
+
+### Membership (`in`)
+
+```text
+list<int> xs = [1, 2, 3]
+if (2 in xs) { print("yes") }
+if ("lo" in "hello") { print("substring") }
+```
+
+Distinct from `for (x in xs)` — `in` is also a binary operator.
+
+### Formatter
+
+```sh
+snc fmt examples/*.sn
+```
+
+Trims trailing whitespace, normalizes brace-based indentation (4 spaces), ensures a final newline.
+
+### File I/O (legacy detail)
+
+Whole-file text only — global builtins, no import:
+
+```text
+fn main() {
+    bool ok = file_write("output.txt", "Hello from SNlang!")
+    str contents = file_read("output.txt")
+    print(contents)
+}
+```
+
+- `file_read(path) -> str` — returns `""` if the file is missing or empty (legacy; prefer `std.file.read`)
+- `file_write(path, data) -> bool` — overwrites the whole file
+
+**MVP (see README):** HTTPS via system `curl` (cert verify by default; `SN_HTTP_INSECURE=1` for `-k`), remote registry fetch + `sn.lock.toml` + `pkg publish`, async/await (blocking), goroutine pool, OOP polymorphism, generic blueprints.
+
+**Still not production-grade:** in-process OpenSSL/LibreSSL, hosted central registry, true async I/O, work-stealing scheduler, full borrow lifetimes, complete LSP/debugger, self-hosted compiler.
 
 ---
 
@@ -804,24 +907,20 @@ blueprint DigitalProduct from Product {
 fn main() {
     print("=== " + APP_NAME + " ===")
 
-    object laptop = Product("Laptop", 999.99, 1)
-    object ebook = DigitalProduct(
+    new Product laptop(name: "Laptop", price: 999.99, quantity: 1)
+    new DigitalProduct ebook(
         name: "SNlang Guide",
         price: 29.99,
         quantity: 1,
         downloadURL: "https://safarnow.com/snlang-guide"
     )
 
-    list<Product> cart = [laptop, ebook]
+    // MVP subtype polymorphism: Child may be used where Parent is expected (type_id dispatch).
+    // Homogeneous list<Product> holding mixed subclasses is still limited — call methods directly:
+    print(laptop.display())
+    print(ebook.display())
 
-    for (item in cart) {
-        print(item.display())
-    }
-
-    dec(2) total = 0.00
-    for (item in cart) {
-        total += item.totalPrice()
-    }
+    dec(2) total = laptop.totalPrice() + ebook.totalPrice()
 
     print("Total: $" + cast(total, str))
 
@@ -890,3 +989,33 @@ models.sn
 ---
 
 *SNlang — Built by SafarNow. Code should be simple, strict, and fast.*
+
+---
+
+## 25. Defer, try, null finish, closures (implemented)
+
+```text
+defer { print("on function exit") }
+
+fn divide(int a, int b) -> (int, error) { ... }
+int q = try divide(10, 2)   // early-return error; not Java exceptions
+
+str? name = none
+str shown = name otherwise "n/a"
+if (name != none) { print(name) }   // name is str in this branch
+str must = name!!                   // panic if none
+print(name?.length())               // optional chaining
+
+fn apply(fn(int) -> int f, int x) -> int { return f(x) }
+```
+
+`defer` is **function-scoped** (like Go): it runs on return / function exit, not at the end of an `if` block.
+
+`match` on `T?` / `error` must be exhaustive (`none` + another arm, or `default`).
+
+Nested `fn` and `fn(int x) -> int { ... }` lambdas are values (limited captures, copied like `spawn`). There is no goroutine scheduler and no borrow checker.
+
+## 26. Packages
+
+`sn.toml` + `snc pkg init|add|build|list`. `use foo.bar` resolves through `packages/` and `stdlib/`. See README.
+

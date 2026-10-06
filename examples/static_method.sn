@@ -1,0 +1,33 @@
+blueprint Shape {
+    int sides
+
+    fn describe() -> str {
+        return "shape with " + cast(self.sides, str) + " sides"
+    }
+
+    static fn origin() -> str {
+        return "origin"
+    }
+
+    static fn scale(int v, int by) -> int {
+        return v * by
+    }
+}
+
+blueprint Square from Shape {
+    fn describe() -> str {
+        return "square " + cast(self.sides, str)
+    }
+}
+
+fn main() {
+    print(Shape.origin())
+    print(Square.origin())
+    print(Shape.scale(6, 7))
+
+    new Square s(sides: 4)
+    print(s.describe())
+
+    new Shape t(sides: 3)
+    print(t.describe())
+}

@@ -1,6 +1,7 @@
 use crate::ast::*;
 use crate::check::CheckDb;
 use crate::check::resolve_type_ast;
+use crate::span::SourceFile;
 use crate::types::*;
 use std::collections::HashMap;
 
@@ -10,6 +11,121 @@ pub struct IrModule {
     pub has_main: bool,
     pub main_ret_void: bool,
     pub globals: Vec<String>,
+    /// When coverage is on, the `(file_id, byte_offset)` behind each counter
+    /// slot. The driver turns offsets into line numbers using the source table.
+    pub cov: Vec<(u32, u32)>,
+    /// DWARF sidecar: `DIFile` / `DISubprogram` / `DILocation` nodes for the
+    /// `.sn` sources, consumed by `snc debug` (lldb) via `emit_debug_info`.
+    pub dbg: DbgInfo,
+}
+
+/// Debug-info sidecar for a lowered module.
+///
+/// Every metadata node carries the id it was assigned from one shared
+/// counter, so the emitter only prints nodes sorted by id — the numbering in
+/// `!dbg` attachments and the node table can never disagree.
+#[derive(Default)]
+pub struct DbgInfo {
+    /// Next free metadata id. Ids 0 and 1 are the module flags.
+    next_id: u32,
+    /// `(id, body)` for `!DIFile`.
+    pub files: Vec<(u32, String)>,
+    /// Maps a `Span::file` index to its `!DIFile` id.
+    pub file_map: Vec<u32>,
+    /// `(id, scope_name, file_idx, line, llvm_name)` for `!DISubprogram`.
+    pub subs: Vec<(u32, String, u32, u32, String)>,
+    /// `(id, subprogram_id)` for `!DISubroutineType`.
+    pub tys: Vec<(u32, u32)>,
+    /// `(id, subprogram_id, file_idx, line, col)` for `!DILocation`.
+    pub lines: Vec<(u32, u32, u32, u32, u32)>,
+    /// Id of the `!DICompileUnit`.
+    pub cu: u32,
+}
+
+impl DbgInfo {
+    /// Reserve the compile-unit id up front so it never collides.
+    fn new() -> Self {
+        let mut d = DbgInfo::default();
+        d.cu = d.alloc();
+        d
+    }
+
+    fn alloc(&mut self) -> u32 {
+        // Ids 0 and 1 are taken by the Debug Info Version module flags.
+        self.next_id += 1;
+        if self.next_id < 2 {
+            self.next_id = 2;
+        }
+        self.next_id
+    }
+
+    fn file_id(&mut self, path: &str, dir: &str) -> u32 {
+        if let Some((id, _)) = self.files.iter().find(|(_, b)| b.contains(path)) {
+            return *id;
+        }
+        let id = self.alloc();
+        self.files.push((
+            id,
+            format!(
+                "!DIFile(filename: {}, directory: {})",
+                llvm_str(path),
+                llvm_str(dir)
+            ),
+        ));
+        id
+    }
+
+    /// The `!DIFile` id for a `Span::file` index.
+    pub fn file_id_of(&self, idx: u32) -> u32 {
+        self.file_map
+            .get(idx as usize)
+            .copied()
+            .or_else(|| self.files.first().map(|(id, _)| *id))
+            .unwrap_or(0)
+    }
+
+    /// Register a subprogram; returns its metadata id.
+    fn sub(&mut self, name: &str, file: u32, line: u32, llvm_name: &str) -> u32 {
+        let id = self.alloc();
+        self.subs.push((
+            id,
+            name.to_string(),
+            file,
+            line,
+            llvm_name.to_string(),
+        ));
+        let tid = self.alloc();
+        self.tys.push((tid, id));
+        id
+    }
+
+    /// Register (or reuse) a `!DILocation`, returning its metadata id.
+    fn diloc(&mut self, scope: u32, file: u32, line: u32, col: u32) -> u32 {
+        if let Some((id, _, _, _, _)) = self
+            .lines
+            .iter()
+            .find(|(_, s, f, l, c)| *s == scope && *f == file && *l == line && *c == col)
+        {
+            return *id;
+        }
+        let id = self.alloc();
+        self.lines.push((id, scope, file, line, col));
+        id
+    }
+}
+
+pub fn llvm_str(s: &str) -> String {
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\0A"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 struct Cx<'a> {
@@ -25,17 +141,92 @@ struct Cx<'a> {
     strings: &'a mut Vec<String>,
     extra_fns: &'a mut Vec<String>,
     current_bp: Option<String>,
+    /// Source file table, for resolving spans to `!dbg` line locations.
+    files: &'a [SourceFile],
+    /// `Some((file_idx, line, col))` for the statement being lowered.
+    cur_loc: Option<(u32, u32, u32)>,
+    /// Active `!DISubprogram` id; `!dbg` attachments use it as the scope.
+    cur_sub: u32,
+    dbg: &'a mut DbgInfo,
     terminated: bool,
     current_fn_ret: Type,
     defers: Vec<Vec<Stmt>>,
 }
 
-pub fn lower(programs: &[Program], db: &CheckDb) -> IrModule {
+/// Coverage instrumentation state for the current lowering pass.
+///
+/// Lowering is single-threaded, so a thread-local keeps `Cx` free of another
+/// field to thread through every helper. Each distinct source line gets one
+/// counter slot; `sn_cov_hit` bumps it at run time.
+#[derive(Default)]
+struct CovState {
+    on: bool,
+    slots: Vec<(u32, u32)>,
+    index: std::collections::HashMap<(u32, u32), u64>,
+}
+
+thread_local! {
+    static COV: std::cell::RefCell<CovState> = std::cell::RefCell::new(CovState::default());
+}
+
+/// Slot id for a source line, allocating one on first use.
+fn cov_slot(file: u32, line: u32) -> Option<u64> {
+    COV.with(|c| {
+        let mut c = c.borrow_mut();
+        if !c.on {
+            return None;
+        }
+        let key = (file, line);
+        if let Some(i) = c.index.get(&key) {
+            return Some(*i);
+        }
+        let id = c.slots.len() as u64;
+        c.slots.push(key);
+        c.index.insert(key, id);
+        Some(id)
+    })
+}
+
+/// Begin (or end) collecting coverage slots. Returns what was collected.
+pub fn cov_collect(on: bool) -> Vec<(u32, u32)> {
+    COV.with(|c| {
+        let mut c = c.borrow_mut();
+        if on {
+            c.on = true;
+            c.slots.clear();
+            c.index.clear();
+        } else {
+            c.on = false;
+            let s = std::mem::take(&mut c.slots);
+            c.index.clear();
+            return s;
+        }
+        Vec::new()
+    })
+}
+
+pub fn lower(programs: &[Program], db: &CheckDb, files: &[SourceFile]) -> IrModule {
     let mut strings = Vec::new();
     let mut functions = Vec::new();
     let mut extra = Vec::new();
     let mut has_main = false;
     let mut main_ret_void = true;
+    let mut dbg = DbgInfo::new();
+    let root_dir = files
+        .first()
+        .and_then(|f| {
+            std::path::Path::new(&f.path)
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+        })
+        .unwrap_or_default();
+    for f in files {
+        let id = dbg.file_id(&f.path, &root_dir);
+        while dbg.file_map.len() <= f.id as usize {
+            dbg.file_map.push(id);
+        }
+        dbg.file_map[f.id as usize] = id;
+    }
     for p in programs {
         for item in &p.items {
             match item {
@@ -49,14 +240,30 @@ pub fn lower(programs: &[Program], db: &CheckDb) -> IrModule {
                         has_main = true;
                         main_ret_void = f.ret.is_none();
                     }
-                    functions.push(lower_fn(f, db, None, &mut strings, &mut extra));
+                    functions.push(lower_fn(
+                        f,
+                        db,
+                        None,
+                        &mut strings,
+                        &mut extra,
+                        files,
+                        &mut dbg,
+                    ));
                 }
                 Item::Blueprint(b) => {
                     if !b.type_params.is_empty() {
                         continue;
                     }
                     for m in &b.methods {
-                        functions.push(lower_fn(m, db, Some(b.name.clone()), &mut strings, &mut extra));
+                        functions.push(lower_fn(
+                            m,
+                            db,
+                            Some(b.name.clone()),
+                            &mut strings,
+                            &mut extra,
+                            files,
+                            &mut dbg,
+                        ));
                     }
                 }
                 Item::Extension(e) => {
@@ -67,7 +274,16 @@ pub fn lower(programs: &[Program], db: &CheckDb) -> IrModule {
                         _ => ("ext", Type::Int),
                     };
                     for m in &e.methods {
-                        functions.push(lower_ext_fn(m, db, key, &self_ty, &mut strings, &mut extra));
+                        functions.push(lower_ext_fn(
+                            m,
+                            db,
+                            key,
+                            &self_ty,
+                            &mut strings,
+                            &mut extra,
+                            files,
+                            &mut dbg,
+                        ));
                     }
                 }
                 _ => {}
@@ -76,7 +292,15 @@ pub fn lower(programs: &[Program], db: &CheckDb) -> IrModule {
     }
     for inst in db.instantiated.values() {
         for m in &inst.methods {
-            functions.push(lower_fn(m, db, Some(inst.name.clone()), &mut strings, &mut extra));
+            functions.push(lower_fn(
+                m,
+                db,
+                Some(inst.name.clone()),
+                &mut strings,
+                &mut extra,
+                files,
+                &mut dbg,
+            ));
         }
     }
     functions.extend(extra);
@@ -93,6 +317,8 @@ pub fn lower(programs: &[Program], db: &CheckDb) -> IrModule {
         has_main,
         main_ret_void,
         globals,
+        cov: cov_collect(false),
+        dbg,
     }
 }
 
@@ -180,6 +406,8 @@ fn lower_fn(
     bp: Option<String>,
     strings: &mut Vec<String>,
     extra: &mut Vec<String>,
+    files: &[SourceFile],
+    dbg: &mut DbgInfo,
 ) -> String {
     let llvm_name = if let Some(b) = &bp {
         format!("sn_m_{}_{}", b, f.name)
@@ -187,6 +415,16 @@ fn lower_fn(
         format!("sn_fn_{}", f.name)
     };
     let ret_ty = f.ret.as_ref().map(|t| resolve_type_ast(t, db)).unwrap_or(Type::Void);
+    // Register a DISubprogram so `!dbg` locations resolve to this function.
+    let decl_line = files
+        .get(f.span.file as usize)
+        .map(|sf| sf.loc(f.span.start as usize).0)
+        .unwrap_or(1);
+    let scope_name = match &bp {
+        Some(b) => format!("{b}.{}", f.name),
+        None => f.name.clone(),
+    };
+    let sub_id = dbg.sub(&scope_name, f.span.file, decl_line, &llvm_name);
     let mut cx = Cx {
         db,
         buf: String::new(),
@@ -198,6 +436,10 @@ fn lower_fn(
         strings,
         extra_fns: extra,
         current_bp: bp.clone(),
+        files,
+        cur_loc: None,
+        cur_sub: sub_id,
+        dbg,
         terminated: false,
         current_fn_ret: ret_ty.clone(),
         defers: Vec::new(),
@@ -211,8 +453,11 @@ fn lower_fn(
         params_ll.push(format!("{} %p_{}", llty(&t), p.name));
     }
     let rty = llty_ret(&ret_ty);
+    // The `!dbg` attachment links the function to its DISubprogram; without
+    // it LLVM emits no DWARF for the body even when every instruction has a
+    // location.
     cx.raw(&format!(
-        "define {rty} @{llvm_name}({}) {{",
+        "define {rty} @{llvm_name}({}) !dbg !{sub_id} {{",
         params_ll.join(", ")
     ));
     cx.raw("entry:");
@@ -254,12 +499,75 @@ fn lower_fn(
 }
 
 impl Cx<'_> {
+    /// Resolve a statement to `(file_idx, line, col)`, or `None` when the
+    /// span is outside the loaded file table.
+    fn stmt_loc(&self, s: &Stmt) -> Option<(u32, u32, u32)> {
+        let span = match s {
+            Stmt::Expr(e) => &e.span,
+            Stmt::Decl { span, .. }
+            | Stmt::Assign { span, .. }
+            | Stmt::If { span, .. }
+            | Stmt::While { span, .. }
+            | Stmt::ForCount { span, .. }
+            | Stmt::ForIn { span, .. }
+            | Stmt::Match { span, .. }
+            | Stmt::Return { span, .. }
+            | Stmt::Stop(span)
+            | Stmt::Skip(span)
+            | Stmt::SpawnBlock { span, .. }
+            | Stmt::SpawnExpr { span, .. }
+            | Stmt::LockBlock { span, .. }
+            | Stmt::New { span, .. }
+            | Stmt::GoroutineBlock { span, .. }
+            | Stmt::Defer { span, .. } => span,
+            Stmt::NestedFn(_) => return None,
+        };
+        let f = self.files.get(span.file as usize)?;
+        let (line, col) = f.loc(span.start as usize);
+        Some((span.file, line, col))
+    }
+
+    /// Bump the coverage counter for this statement's line.
+    fn cov_stmt(&mut self, s: &Stmt) {
+        let span = match s {
+            Stmt::Expr(e) => &e.span,
+            Stmt::Decl { span, .. }
+            | Stmt::Assign { span, .. }
+            | Stmt::If { span, .. }
+            | Stmt::While { span, .. }
+            | Stmt::ForCount { span, .. }
+            | Stmt::ForIn { span, .. }
+            | Stmt::Match { span, .. }
+            | Stmt::Return { span, .. }
+            | Stmt::Stop(span)
+            | Stmt::Skip(span)
+            | Stmt::SpawnBlock { span, .. }
+            | Stmt::SpawnExpr { span, .. }
+            | Stmt::LockBlock { span, .. }
+            | Stmt::New { span, .. }
+            | Stmt::GoroutineBlock { span, .. }
+            | Stmt::Defer { span, .. } => span,
+            Stmt::NestedFn(_) => return,
+        };
+        // Keyed by byte offset: `Cx` has no source-line table, and the driver
+        // resolves offsets to lines once lowering finishes.
+        let Some(slot) = cov_slot(span.file, span.start) else {
+            return;
+        };
+        // The runtime keeps one counter per slot; nothing to allocate here.
+        self.line(&format!("call void @sn_cov_hit(i64 {slot})"));
+    }
+
     fn line(&mut self, s: &str) {
         if self.terminated {
             return;
         }
         self.buf.push_str("  ");
         self.buf.push_str(s);
+        if let Some((file, ln, col)) = self.cur_loc {
+            let id = self.dbg.diloc(self.cur_sub, file, ln, col);
+            self.buf.push_str(&format!(", !dbg !{id}"));
+        }
         self.buf.push('\n');
         if s.starts_with("ret ") || s.starts_with("br ") {
             self.terminated = true;
@@ -293,6 +601,8 @@ impl Cx<'_> {
     }
 
     fn stmt(&mut self, s: &Stmt) {
+        self.cur_loc = self.stmt_loc(s);
+        self.cov_stmt(s);
         match s {
             Stmt::Expr(e) => {
                 self.expr(e);
@@ -870,6 +1180,8 @@ impl Cx<'_> {
             .collect();
         let mut nested = Vec::new();
         let buf = {
+            let (cf, cl, _) = self.cur_loc.unwrap_or((0, 1, 1));
+            let child_sub = self.dbg.sub("<closure>", cf, cl, &fname);
             let mut child = Cx {
                 db: self.db,
                 buf: String::new(),
@@ -881,11 +1193,15 @@ impl Cx<'_> {
                 strings: self.strings,
                 extra_fns: &mut nested,
                 current_bp: self.current_bp.clone(),
+                files: self.files,
+                cur_loc: None,
+                cur_sub: child_sub,
+                dbg: self.dbg,
                 terminated: false,
                 current_fn_ret: Type::Void,
                 defers: Vec::new(),
             };
-            child.raw(&format!("define void @{fname}(ptr %env) {{"));
+            child.raw(&format!("define void @{fname}(ptr %env) !dbg !{child_sub} {{"));
             child.raw("entry:");
             for (i, (n, t)) in cap_tys.iter().enumerate() {
                 let slot = child.t();
@@ -3350,6 +3666,8 @@ impl Cx<'_> {
             .collect();
         let mut nested = Vec::new();
         let buf = {
+            let (cf, cl, _) = self.cur_loc.unwrap_or((0, 1, 1));
+            let child_sub = self.dbg.sub(&format!("<lambda {id}>"), cf, cl, &fname);
             let mut child = Cx {
                 db: self.db,
                 buf: String::new(),
@@ -3361,6 +3679,10 @@ impl Cx<'_> {
                 strings: self.strings,
                 extra_fns: &mut nested,
                 current_bp: self.current_bp.clone(),
+                files: self.files,
+                cur_loc: None,
+                cur_sub: child_sub,
+                dbg: self.dbg,
                 terminated: false,
                 current_fn_ret: ret.clone(),
                 defers: Vec::new(),
@@ -3371,7 +3693,7 @@ impl Cx<'_> {
                 pll.push(format!("{} %p_{}", llty(&t), p.name));
             }
             child.raw(&format!(
-                "define {} @{fname}({}) {{",
+                "define {} @{fname}({}) !dbg !{child_sub} {{",
                 llty_ret(ret),
                 pll.join(", ")
             ));
@@ -3430,9 +3752,21 @@ fn lower_ext_fn(
     self_ty: &Type,
     strings: &mut Vec<String>,
     extra: &mut Vec<String>,
+    files: &[SourceFile],
+    dbg: &mut DbgInfo,
 ) -> String {
     let llvm_name = format!("sn_ext_{}_{}", ext_key, f.name);
     let ret_ty = f.ret.as_ref().map(|t| resolve_type_ast(t, db)).unwrap_or(Type::Void);
+    let decl_line = files
+        .get(f.span.file as usize)
+        .map(|sf| sf.loc(f.span.start as usize).0)
+        .unwrap_or(1);
+    let sub_id = dbg.sub(
+        &format!("{ext_key}.{}", f.name),
+        f.span.file,
+        decl_line,
+        &llvm_name,
+    );
     let mut cx = Cx {
         db,
         buf: String::new(),
@@ -3444,6 +3778,10 @@ fn lower_ext_fn(
         strings,
         extra_fns: extra,
         current_bp: None,
+        files,
+        cur_loc: None,
+        cur_sub: sub_id,
+        dbg,
         terminated: false,
         current_fn_ret: ret_ty.clone(),
         defers: Vec::new(),
@@ -3455,7 +3793,7 @@ fn lower_ext_fn(
     }
     let rty = llty_ret(&ret_ty);
     cx.raw(&format!(
-        "define {rty} @{llvm_name}({}) {{",
+        "define {rty} @{llvm_name}({}) !dbg !{sub_id} {{",
         params_ll.join(", ")
     ));
     cx.raw("entry:");

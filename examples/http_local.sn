@@ -1,0 +1,22 @@
+use std.http
+use std.time
+
+fn hello(str path) -> str {
+    return "hello {path}"
+}
+
+fn main() {
+    spawn {
+        error e = serve_once(18765, hello)
+        if (e != none) {
+            print(e.message())
+        }
+    }
+    sleep_ms(80)
+    let body, err = get("http://127.0.0.1:18765/sn")
+    if (err != none) {
+        print(err.message())
+    } else {
+        print(body)
+    }
+}

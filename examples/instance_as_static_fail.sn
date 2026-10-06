@@ -1,0 +1,9 @@
+blueprint Config {
+    fn build() -> int {
+        return 1
+    }
+}
+
+fn main() {
+    print(Config.build())
+}

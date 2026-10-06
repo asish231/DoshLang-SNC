@@ -1,6 +1,7 @@
 pub mod lsp;
 pub mod fmt;
 pub mod ast;
+pub mod cache;
 pub mod check;
 pub mod diag;
 pub mod driver;

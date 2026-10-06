@@ -1,0 +1,7 @@
+fn parse(str s) -> (json, error) {
+    return json_parse(s)
+}
+
+fn encode(json v) -> str {
+    return json_encode(v)
+}

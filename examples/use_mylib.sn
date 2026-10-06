@@ -1,0 +1,5 @@
+use mylib.calc
+
+fn main() {
+    print(b())
+}

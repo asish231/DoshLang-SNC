@@ -1,0 +1,23 @@
+use std.db
+
+// Real SQLite through the FFI: create, insert, query.
+fn main() {
+    ptr db = db_open(":memory:")
+    print(db_exec(db, "CREATE TABLE people(name TEXT, age INTEGER)") == 0)
+    print(db_exec(db, "INSERT INTO people VALUES ('ada', 36), ('grace', 45)"))
+    print(db_exec(db, "INSERT INTO people VALUES ('alan', 41)"))
+
+    ptr stmt = db_prepare(db, "SELECT name, age FROM people ORDER BY name")
+    while (db_step(stmt) == 100) {
+        print(db_column_text(stmt, 0))
+        print(db_column_int(stmt, 1))
+    }
+    db_finalize(stmt)
+
+    ptr count = db_prepare(db, "SELECT count(*) FROM people")
+    db_step(count)
+    print(db_column_int(count, 0))
+    db_finalize(count)
+
+    db_close(db)
+}

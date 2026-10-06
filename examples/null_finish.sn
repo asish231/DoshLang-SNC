@@ -1,0 +1,19 @@
+fn main() {
+    str? name = none
+    match (name) {
+        none {
+            print("missing")
+        }
+        default {
+            print("has")
+        }
+    }
+    name = "Ada"
+    if (name != none) {
+        print(name)
+    }
+    str? other = none
+    print(other otherwise "fallback")
+    str forced = name!!
+    print(forced)
+}

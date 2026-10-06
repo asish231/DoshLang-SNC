@@ -1,0 +1,6 @@
+use std.time
+
+fn main() {
+    int ms = await sleep_async(5)
+    print(ms)
+}

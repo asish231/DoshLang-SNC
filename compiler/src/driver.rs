@@ -1,4 +1,5 @@
 use crate::ast::Program;
+use crate::cache;
 use crate::check::check_programs;
 use crate::diag::Diagnostics;
 use crate::ir::lower;
@@ -19,14 +20,34 @@ pub struct CompileOptions {
     /// Extra link flags from `extern "lib"` blocks (`-l<name>`) plus any
     /// user-supplied libraries.
     pub libs: Vec<String>,
-    /// Build with source-based LLVM instrumentation so line coverage can be
-    /// measured from the resulting `.profraw`.
+    /// Emit per-statement `sn_cov_hit` counters. The test runner collects the
+    /// resulting `SN_COVERAGE_OUT` dump and maps slots back to source lines.
     pub coverage: bool,
 }
 
 pub struct CompileResult {
     pub llvm_ir: String,
     pub binary: Option<PathBuf>,
+    /// Coverage counter slots as `(file_id, line)`, when `coverage` was on.
+    pub cov_slots: Vec<(u32, u32)>,
+    /// `file_id -> source path`, so slot file ids can be resolved.
+    pub cov_files: Vec<String>,
+    /// True when the IR/binary came from the incremental build cache.
+    pub cached: bool,
+}
+
+/// Resolve raw `(file, byte_offset)` slots into `(file, line)` pairs.
+fn resolve_cov_slots(slots: &[(u32, u32)], files: &[SourceFile]) -> Vec<(u32, u32)> {
+    slots
+        .iter()
+        .map(|(f, off)| {
+            let line = files
+                .get(*f as usize)
+                .map(|sf| sf.loc(*off as usize).0)
+                .unwrap_or(0);
+            (*f, line)
+        })
+        .collect()
 }
 
 /// Expand a friendly target name into a full LLVM triple.
@@ -81,6 +102,23 @@ pub fn output_path(output: &Option<std::path::PathBuf>, triple: &str) -> Option<
     Some(name)
 }
 
+/// Resolve the final binary path: an explicit `--output`, with `.exe` added
+/// for Windows targets, else a stem-based name in the working directory.
+fn output_binary(output: &Option<PathBuf>, triple: &str, input: &Path) -> PathBuf {
+    if let Some(o) = output_path(output, triple) {
+        return o;
+    }
+    let stem = input
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("a");
+    if triple.contains("windows") {
+        PathBuf::from(format!("{stem}.exe"))
+    } else {
+        PathBuf::from(stem)
+    }
+}
+
 pub fn default_triple() -> String {
     if cfg!(target_os = "macos") {
         if cfg!(target_arch = "aarch64") {
@@ -117,42 +155,84 @@ pub fn compile(opts: &CompileOptions) -> Result<CompileResult, String> {
     if !diag.is_empty() {
         return Err(diag.render(&files));
     }
-    let ir = lower(&programs, &db);
+    let cov_files: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
+    let _ = crate::ir::cov_collect(opts.coverage);
+    let ir = lower(&programs, &db, &files);
     let triple = match &opts.target {
         Some(t) => resolve_target(t)?,
         None => default_triple(),
     };
     let llvm_ir = emit_llvm(&ir, &triple);
+    // Unique link libraries in declaration order; part of the cache key.
+    let link_libs = link_libraries(&db, &opts.libs);
+    let runtime = runtime_c_path();
+    let runtime_bytes = fs::read(&runtime).unwrap_or_default();
+    let fp = cache::fingerprint(
+        &files,
+        &triple,
+        &opts.opt,
+        &link_libs,
+        opts.coverage,
+        &opts.clang,
+        &runtime_bytes,
+    );
+    if cache::cache_enabled() {
+        if let Some(hit) = cache::get(&fp, !opts.emit_llvm) {
+            if opts.emit_llvm {
+                if let Some(out) = &opts.output {
+                    fs::write(out, &hit.llvm_ir).map_err(|e| e.to_string())?;
+                }
+                return Ok(CompileResult {
+                    llvm_ir: hit.llvm_ir,
+                    binary: None,
+                    cov_slots: resolve_cov_slots(&ir.cov, &files),
+                    cov_files: cov_files.clone(),
+                    cached: true,
+                });
+            }
+            if !ir.has_main {
+                return Err("no fn main() found; use --emit-llvm to dump IR\n".into());
+            }
+            let out_bin = output_binary(&opts.output, &triple, &opts.input);
+            let bytes = hit
+                .binary
+                .ok_or_else(|| "build cache entry is missing its binary".to_string())?;
+            fs::write(&out_bin, &bytes).map_err(|e| e.to_string())?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&out_bin, fs::Permissions::from_mode(0o755));
+            }
+            return Ok(CompileResult {
+                llvm_ir: hit.llvm_ir,
+                binary: Some(out_bin),
+                cov_slots: resolve_cov_slots(&ir.cov, &files),
+                cov_files: cov_files.clone(),
+                cached: true,
+            });
+        }
+    }
     if opts.emit_llvm {
         if let Some(out) = &opts.output {
             fs::write(out, &llvm_ir).map_err(|e| e.to_string())?;
         }
+        if cache::cache_enabled() {
+            cache::put(&fp, &llvm_ir, None);
+        }
         return Ok(CompileResult {
             llvm_ir,
             binary: None,
+            cov_slots: resolve_cov_slots(&ir.cov, &files),
+            cov_files: cov_files.clone(),
+            cached: false,
         });
     }
     if !ir.has_main {
         return Err("no fn main() found; use --emit-llvm to dump IR\n".into());
     }
-    let out_bin = match opts.output.as_ref() {
-        Some(o) => output_path(&opts.output, &triple).unwrap_or_else(|| o.clone()),
-        None => {
-            let stem = opts
-                .input
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("a");
-            if triple.contains("windows") {
-                PathBuf::from(format!("{stem}.exe"))
-            } else {
-                PathBuf::from(stem)
-            }
-        }
-    };
+    let out_bin = output_binary(&opts.output, &triple, &opts.input);
     let tmp = tempfile_ll(&opts.input);
     fs::write(&tmp, &llvm_ir).map_err(|e| e.to_string())?;
-    let runtime = runtime_c_path();
     let mut cmd = Command::new(&opts.clang);
     cmd.arg(&tmp)
         .arg(&runtime)
@@ -165,45 +245,11 @@ pub fn compile(opts: &CompileOptions) -> Result<CompileResult, String> {
     } else {
         cmd.arg("-lws2_32");
     }
-    // Link the libraries named by `extern` blocks. Duplicates are collapsed so
-    // repeated declarations do not produce repeated flags.
-    let mut seen = std::collections::HashSet::new();
-    for lib in db.extern_libs.iter().chain(opts.libs.iter()) {
-        if lib.is_empty() || !seen.insert(lib.clone()) {
-            continue;
-        }
-        if lib.starts_with('-') {
-            cmd.arg(lib);
-        } else if lib.ends_with(".a") || lib.ends_with(".so") || lib.ends_with(".dll.a") {
-            cmd.arg(lib);
-        } else if lib.ends_with(".dylib") || lib.ends_with(".so.1") || lib.contains('/')
-            || lib.contains(".dylib.")
-        {
-            // Explicit file: record an rpath so the loader finds its
-            // dependencies at run time.
-            cmd.arg(lib);
-            if let Some(dir) = Path::new(&lib).parent() {
-                let dir = dir.to_string_lossy().to_string();
-                if !dir.is_empty() && seen.insert(format!("rpath:{dir}")) {
-                    if triple.contains("darwin") {
-                        cmd.arg(format!("-Wl,-rpath,{dir}"));
-                    } else {
-                        cmd.arg(format!("-Wl,-rpath,{dir}"));
-                    }
-                }
-            }
-        } else {
-            cmd.arg(format!("-l{lib}"));
-        }
-    }
+    // Link the libraries named by `extern` blocks (`link_libs` is already
+    // deduplicated in declaration order).
+    push_link_args(&mut cmd, &link_libs);
     if opts.opt == "0" {
         cmd.arg("-g");
-    }
-    if opts.coverage {
-        // Source-based coverage: counters are emitted per line and written
-        // to $LLVM_PROFILE_FILE when the program exits.
-        cmd.arg("-fprofile-instr-generate")
-            .arg("-fcoverage-mapping");
     }
     if opts.target.is_some() {
         // Pass the resolved triple, not the raw preset the user typed.
@@ -218,9 +264,17 @@ pub fn compile(opts: &CompileOptions) -> Result<CompileResult, String> {
             String::from_utf8_lossy(&status.stderr)
         ));
     }
+    if cache::cache_enabled() {
+        if let Ok(bytes) = fs::read(&out_bin) {
+            cache::put(&fp, &llvm_ir, Some(&bytes));
+        }
+    }
     Ok(CompileResult {
         llvm_ir,
         binary: Some(out_bin),
+        cov_slots: resolve_cov_slots(&ir.cov, &files),
+        cov_files: cov_files.clone(),
+        cached: false,
     })
 }
 
@@ -232,6 +286,23 @@ fn tempfile_ll(input: &Path) -> PathBuf {
     std::env::temp_dir().join(format!("{stem}-{}.ll", std::process::id()))
 }
 
+/// Unique link libraries in declaration order, collapsing the `extern`
+/// blocks and the caller's extra `-L` flags.
+fn link_libraries(
+    db: &crate::check::CheckDb,
+    extra: &[String],
+) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for lib in db.extern_libs.iter().chain(extra.iter()) {
+        if lib.is_empty() || !seen.insert(lib.clone()) {
+            continue;
+        }
+        out.push(lib.clone());
+    }
+    out
+}
+
 fn runtime_c_path() -> PathBuf {
     let here = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runtime.c");
     if here.exists() {
@@ -239,6 +310,116 @@ fn runtime_c_path() -> PathBuf {
     } else {
         PathBuf::from("compiler/runtime.c")
     }
+}
+
+/// Translate a deduplicated library list into clang arguments, recording an
+/// rpath for explicit files so the loader finds them at run time.
+fn push_link_args(cmd: &mut Command, libs: &[String]) {
+    let mut seen = std::collections::HashSet::new();
+    for lib in libs {
+        if lib.starts_with('-')
+            || lib.ends_with(".a")
+            || lib.ends_with(".so")
+            || lib.ends_with(".dll.a")
+        {
+            cmd.arg(lib);
+        } else if lib.ends_with(".dylib") || lib.ends_with(".so.1") || lib.contains('/')
+            || lib.contains(".dylib.")
+        {
+            cmd.arg(lib);
+            if let Some(dir) = Path::new(&lib).parent() {
+                let dir = dir.to_string_lossy().to_string();
+                if !dir.is_empty() && seen.insert(format!("rpath:{dir}")) {
+                    cmd.arg(format!("-Wl,-rpath,{dir}"));
+                }
+            }
+        } else {
+            cmd.arg(format!("-l{lib}"));
+        }
+    }
+}
+
+/// Build with full DWARF and preserved object files for `snc debug`.
+///
+/// Unlike `compile`, the intermediates are kept (in a per-pid directory next
+/// to the output) so `dsymutil` can assemble a dSYM on macOS and lldb can
+/// resolve SN source lines.
+pub fn compile_debug(input: &Path, output: &Path, clang: &str) -> Result<(), String> {
+    let mut files = Vec::new();
+    let mut programs = Vec::new();
+    let mut loaded = std::collections::HashSet::new();
+    load_recursive(
+        input,
+        &mut files,
+        &mut programs,
+        &mut loaded,
+        input.parent().unwrap_or(Path::new(".")),
+    )?;
+    let mut diag = Diagnostics::default();
+    let db = check_programs(&programs, &mut diag);
+    if !diag.is_empty() {
+        return Err(diag.render(&files));
+    }
+    let _ = crate::ir::cov_collect(false);
+    let ir = lower(&programs, &db, &files);
+    if !ir.has_main {
+        return Err("no fn main() found\n".into());
+    }
+    let llvm_ir = emit_llvm(&ir, &default_triple());
+    let workdir = output
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let stem = output
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("snc-debug");
+    let workdir = workdir.join(format!(".{stem}-dbg-{}", std::process::id()));
+    fs::create_dir_all(&workdir).map_err(|e| e.to_string())?;
+    let ll = workdir.join("sn.ll");
+    let sn_o = workdir.join("sn.o");
+    let rt_o = workdir.join("rt.o");
+    fs::write(&ll, &llvm_ir).map_err(|e| e.to_string())?;
+    let runtime = runtime_c_path();
+
+    let run = |mut cmd: Command, what: &str| -> Result<(), String> {
+        let status = cmd.output().map_err(|e| format!("failed to run {what}: {e}"))?;
+        if !status.status.success() {
+            return Err(format!(
+                "{what} failed:\n{}\n{}",
+                String::from_utf8_lossy(&status.stdout),
+                String::from_utf8_lossy(&status.stderr)
+            ));
+        }
+        Ok(())
+    };
+
+    let mut cc = Command::new(clang);
+    cc.arg("-c").arg(&ll).arg("-O0").arg("-g").arg("-o").arg(&sn_o).arg("-Wno-override-module");
+    run(cc, "clang -c sn.ll")?;
+
+    let mut cc = Command::new(clang);
+    cc.arg("-c")
+        .arg(&runtime)
+        .arg("-O0")
+        .arg("-g")
+        .arg("-o")
+        .arg(&rt_o);
+    run(cc, "clang -c runtime.c")?;
+
+    let mut link = Command::new(clang);
+    link.arg(&sn_o).arg(&rt_o).arg("-O0").arg("-g").arg("-o").arg(output);
+    link.arg("-pthread");
+    push_link_args(&mut link, &link_libraries(&db, &[]));
+    run(link, "clang link")?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut dsym = Command::new("dsymutil");
+        dsym.arg(output);
+        run(dsym, "dsymutil")?;
+    }
+    Ok(())
 }
 
 fn load_recursive(
@@ -279,4 +460,19 @@ fn load_recursive(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::span::SourceFile;
+
+    #[test]
+    fn coverage_slots_resolve_byte_offsets_to_lines() {
+        let files = vec![SourceFile::new(0, "a.sn".to_string(), "aa\nbbb\n".to_string())];
+        assert_eq!(
+            resolve_cov_slots(&[(0, 0), (0, 3)], &files),
+            vec![(0, 1), (0, 2)]
+        );
+    }
 }

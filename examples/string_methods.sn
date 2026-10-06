@@ -1,0 +1,14 @@
+fn main() {
+    str s = "Hello World"
+    print(s.length())
+    print(s.slice(0, 5))
+    print(s.contains("World"))
+    print(s.upper())
+    print(s.lower())
+    print(s.replace("World", "SNlang"))
+    list<str> parts = s.split(" ")
+    print(parts[0])
+    print(parts[1])
+    str name = "Ada"
+    print("hi {name}")
+}

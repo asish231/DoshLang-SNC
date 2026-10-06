@@ -700,3 +700,58 @@ fn cross_compile_targets() {
         let _ = std::fs::remove_file(&bin);
     }
 }
+
+#[test]
+fn test_runner_reports_statement_coverage() {
+    let root = repo_root();
+    let out = Command::new(snc_bin())
+        .arg("test")
+        .arg("--root")
+        .arg("examples")
+        .arg("std_test")
+        .arg("--coverage")
+        .current_dir(&root)
+        .output()
+        .expect("run snc test");
+    assert!(
+        out.status.success(),
+        "snc test failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("1 passed, 0 failed"), "{stdout}");
+    assert!(stdout.contains("coverage:"), "{stdout}");
+    assert!(stdout.contains("std_test.sn"), "{stdout}");
+}
+
+#[test]
+fn debug_drives_lldb_with_sn_source_lines() {
+    // lldb only ships with Xcode/CLT; elsewhere there is nothing to drive.
+    let has_lldb = Command::new("lldb")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !has_lldb {
+        return;
+    }
+    let root = repo_root();
+    let bin = std::env::temp_dir().join(format!("snc-dbg-{}", std::process::id()));
+    let out = Command::new(snc_bin())
+        .arg("debug")
+        .arg("examples/hello_world.sn")
+        .arg("-o")
+        .arg(&bin)
+        .current_dir(&root)
+        .output()
+        .expect("run snc debug");
+    let _ = std::fs::remove_file(&bin);
+    assert!(
+        out.status.success(),
+        "snc debug failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("sn_fn_main"), "{stdout}");
+    assert!(stdout.contains("hello_world.sn:2"), "{stdout}");
+}

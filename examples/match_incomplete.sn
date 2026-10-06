@@ -1,0 +1,8 @@
+fn main() {
+    str? x = none
+    match (x) {
+        none {
+            print("only none")
+        }
+    }
+}

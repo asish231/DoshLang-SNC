@@ -1,0 +1,43 @@
+use std.net
+
+// A single-connection echo server driven entirely by the event loop:
+// select_read blocks on readiness (no polling), accept/read/write park on
+// the reactor rather than holding a thread.
+fn serve_once(int listener) -> str {
+    list<int> watched = [listener]
+    int ready = select_read(watched, 5000)
+    if (ready < 0) {
+        return "timeout"
+    }
+    int conn = accept(listener)
+    if (conn < 0) {
+        return "accept-failed"
+    }
+    str msg = read(conn)
+    write(conn, "echo:" + msg)
+    close(conn)
+    return "served:" + msg
+}
+
+fn main() {
+    int listener = listen(0)
+    int port = port(listener)
+
+    chan<str> result
+    spawn {
+        result.send(serve_once(listener))
+    }
+
+    int conn = connect("127.0.0.1", port, 5000)
+    print(conn > 0)
+    write(conn, "ping")
+    print(read(conn))
+    close(conn)
+
+    print(result.receive())
+    close(listener)
+
+    // A quiet wait must time out rather than block forever.
+    list<int> idle = [-1]
+    print(select_read(idle, 50) == -1)
+}

@@ -1,0 +1,22 @@
+blueprint Animal {
+    str species
+
+    fn describe() -> str {
+        return self.species
+    }
+}
+
+blueprint Dog from Animal {
+    str breed
+
+    fn bark() {
+        print("Woof")
+    }
+}
+
+fn main() {
+    new Dog d(species: "Canine", breed: "Lab")
+    print(d.describe())
+    d.bark()
+    print(d.breed)
+}

@@ -1,0 +1,16 @@
+contract Drawable {
+    fn draw()
+}
+
+blueprint Circle follows Drawable {
+    int radius
+
+    fn draw() {
+        print(self.radius)
+    }
+}
+
+fn main() {
+    new Circle c(radius: 5)
+    c.draw()
+}

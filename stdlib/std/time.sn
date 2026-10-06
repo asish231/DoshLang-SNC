@@ -1,0 +1,11 @@
+fn now_ms() -> int {
+    return time_now_ms()
+}
+
+fn sleep_ms(int ms) {
+    time_sleep_ms(ms)
+}
+
+fn format(int ms) -> str {
+    return time_format(ms)
+}

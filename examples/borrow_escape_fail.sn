@@ -1,0 +1,9 @@
+fn escaped() -> ref<int> {
+    int local = 5
+    ref<int> r = address(local)
+    return r
+}
+
+fn main() {
+    print(1)
+}

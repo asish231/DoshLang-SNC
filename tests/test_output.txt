@@ -1,3 +1,0 @@
-./snc examples/math.sn > /var/folders/lg/lqmkmfnd66g__t253psjt5gm0000gn/T//snc_math.s
-cc /var/folders/lg/lqmkmfnd66g__t253psjt5gm0000gn/T//snc_math.s -o /var/folders/lg/lqmkmfnd66g__t253psjt5gm0000gn/T//snc_math
-.//var/folders/lg/lqmkmfnd66g__t253psjt5gm0000gn/T//snc_math

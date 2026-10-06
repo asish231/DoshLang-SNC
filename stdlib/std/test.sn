@@ -1,0 +1,31 @@
+// Minimal test helpers. Fail with panic on assertion errors.
+
+fn assert_true(bool cond) {
+    if (not cond) {
+        panic("assert_true failed")
+    }
+}
+
+fn assert_false(bool cond) {
+    if (cond) {
+        panic("assert_false failed")
+    }
+}
+
+fn assert_eq_int(int a, int b) {
+    if (a != b) {
+        panic("assert_eq_int failed")
+    }
+}
+
+fn assert_eq_str(str a, str b) {
+    if (a != b) {
+        panic("assert_eq_str failed")
+    }
+}
+
+fn assert_neq_int(int a, int b) {
+    if (a == b) {
+        panic("assert_neq_int failed")
+    }
+}

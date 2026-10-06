@@ -1,0 +1,5 @@
+name = "snlang"
+version = "0.2.0"
+
+[deps]
+mylib = { path = "packages/mylib" }

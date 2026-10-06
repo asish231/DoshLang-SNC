@@ -1,0 +1,12 @@
+blueprint Bank {
+    closed int secret
+
+    fn get() -> int {
+        return self.secret
+    }
+}
+
+fn main() {
+    new Bank b(secret: 9)
+    print(b.secret)
+}

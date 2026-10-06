@@ -1,0 +1,15 @@
+fn apply(fn(int) -> int f, int x) -> int {
+    return f(x)
+}
+
+fn main() {
+    fn add1(int n) -> int {
+        return n + 1
+    }
+    print(add1(41))
+    int y = apply(fn(int n) -> int { return n * 2 }, 21)
+    print(y)
+    spawn {
+        print(7)
+    }
+}

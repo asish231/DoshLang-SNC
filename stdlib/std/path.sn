@@ -1,0 +1,15 @@
+fn join(str a, str b) -> str {
+    return path_join(a, b)
+}
+
+fn base(str p) -> str {
+    return path_base(p)
+}
+
+fn dir(str p) -> str {
+    return path_dir(p)
+}
+
+fn ext(str p) -> str {
+    return path_ext(p)
+}

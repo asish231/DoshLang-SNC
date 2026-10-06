@@ -1,0 +1,37 @@
+// bytearray: a growable mutable byte buffer with search and slicing.
+fn main() {
+    ptr b = bytearray_new(0)
+    bytearray_append_str(b, "hello")
+    bytearray_push(b, 33)
+    print(bytearray_len(b))
+    print(bytearray_get(b, 0))
+    print(bytearray_get(b, 5))
+
+    print(bytearray_find(b, 101))
+    print(bytearray_find(b, 122))
+    print(bytearray_rfind(b, 108))
+
+    ptr part = bytearray_slice(b, 1, 3)
+    print(bytearray_len(part))
+    bytearray_set(part, 0, 69)
+    print(bytearray_get(part, 0))
+
+    bytearray_fill(b, 65, 4)
+    print(bytearray_len(b))
+    print(bytearray_get(b, 3))
+
+    bytearray_truncate(b, 2)
+    print(bytearray_len(b))
+
+    bytearray_clear(b)
+    print(bytearray_len(b))
+
+    ptr big = bytearray_new(0)
+    int i = 0
+    while (i < 300) {
+        bytearray_push(big, i % 256)
+        i = i + 1
+    }
+    print(bytearray_len(big))
+    print(bytearray_get(big, 299))
+}

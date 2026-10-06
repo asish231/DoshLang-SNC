@@ -4,7 +4,11 @@
   "description": "SNlang language support for VS Code",
   "version": "1.0.0",
   "publisher": "snlang",
-  "icon": "./icon.png",
+  "icon": "icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/asish231/SNCLang.git"
+  },
   "engines": {
     "vscode": "^1.50.0"
   },
@@ -18,8 +22,8 @@
         "aliases": ["SNlang", "sn"],
         "extensions": [".sn"],
         "icon": {
-          "light": "./icon.png",
-          "dark": "./icon.png"
+          "light": "icon.png",
+          "dark": "icon.png"
         },
         "configuration": "./language-configuration.json"
       }

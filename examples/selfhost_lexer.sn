@@ -1,0 +1,10 @@
+// MVP self-hosting slice: scan and count tokens in a string
+fn main() {
+    str src = "fn main 42"
+    int i = 0
+    while (i < src.length()) {
+        print(i)
+        i = i + 1
+    }
+    print("tokens done")
+}

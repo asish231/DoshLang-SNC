@@ -1,0 +1,10 @@
+blueprint Account {
+    closed fn audit() -> int {
+        return 1
+    }
+}
+
+fn main() {
+    new Account a()
+    print(a.audit())
+}

@@ -1,0 +1,100 @@
+// SQLite database driver, built on the compiler's `extern` FFI.
+//
+//   use std.db
+//
+//   ptr db = db_open(":memory:")
+//   db_exec(db, "CREATE TABLE t(a INTEGER)")
+//   db_exec(db, "INSERT INTO t VALUES (1)")
+//   ptr rows = db_query(db, "SELECT a FROM t")
+//   ...
+//
+// Handles are opaque `ptr` values. Because C APIs distinguish "pointer to a
+// handle" from "the handle", db_open returns the handle itself and takes care
+// of the out-parameter internally.
+
+extern "sqlite3" {
+    fn sqlite3_libversion() -> str
+    fn sqlite3_open(str filename, ptr db) -> int
+    fn sqlite3_close(ptr db) -> int
+    fn sqlite3_exec(ptr db, str sql, ptr cb, ptr arg, ptr errmsg) -> int
+    fn sqlite3_errmsg(ptr db) -> str
+    fn sqlite3_prepare_v2(ptr db, str sql, int nbyte, ptr stmt, ptr tail) -> int
+    fn sqlite3_step(ptr stmt) -> int
+    fn sqlite3_column_count(ptr stmt) -> int
+    fn sqlite3_column_int(ptr stmt, int col) -> int
+    fn sqlite3_column_text(ptr stmt, int col) -> ptr
+    fn sqlite3_finalize(ptr stmt) -> int
+}
+
+// SQLITE_OK / SQLITE_ROW / SQLITE_DONE
+fn db_status_ok() -> int {
+    return 0
+}
+
+fn db_row() -> int {
+    return 100
+}
+
+fn db_done() -> int {
+    return 101
+}
+
+// Opens `path` (":memory:" works) and returns the database handle.
+fn db_open(str path) -> ptr {
+    ptr slot = ptr_alloc(8)
+    ptr_store(slot, 0, 0)
+    int rc = sqlite3_open(path, slot)
+    if (rc != 0) {
+        ptr_free(slot)
+        return int_ptr(0)
+    }
+    ptr h = int_ptr(ptr_load(slot, 0))
+    ptr_free(slot)
+    return h
+}
+
+fn db_version() -> str {
+    return sqlite3_libversion()
+}
+
+fn db_close(ptr db) -> int {
+    return sqlite3_close(db)
+}
+
+// Runs a statement that returns no rows. Returns SQLite's result code.
+fn db_exec(ptr db, str sql) -> int {
+    return sqlite3_exec(db, sql, 0, 0, 0)
+}
+
+fn db_error(ptr db) -> str {
+    return sqlite3_errmsg(db)
+}
+
+// A prepared statement. Holds the raw `sqlite3_stmt *`.
+fn db_prepare(ptr db, str sql) -> ptr {
+    ptr slot = ptr_alloc(8)
+    ptr_store(slot, 0, 0)
+    int rc = sqlite3_prepare_v2(db, sql, -1, slot, 0)
+    ptr st = int_ptr(ptr_load(slot, 0))
+    ptr_free(slot)
+    if (rc != 0) {
+        return int_ptr(0)
+    }
+    return st
+}
+
+fn db_step(ptr stmt) -> int {
+    return sqlite3_step(stmt)
+}
+
+fn db_column_int(ptr stmt, int col) -> int {
+    return sqlite3_column_int(stmt, col)
+}
+
+fn db_column_text(ptr stmt, int col) -> str {
+    return ptr_load_str(sqlite3_column_text(stmt, col), 0)
+}
+
+fn db_finalize(ptr stmt) -> int {
+    return sqlite3_finalize(stmt)
+}

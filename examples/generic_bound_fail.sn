@@ -1,0 +1,12 @@
+contract Printable {
+    fn show() -> str
+}
+
+blueprint Holder<T: Printable> {
+    T item
+}
+
+fn main() {
+    new Holder<int> h(item: 1)
+    print(1)
+}

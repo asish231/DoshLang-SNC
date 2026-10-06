@@ -1,0 +1,10 @@
+blueprint Config {
+    static fn build() -> int {
+        return 1
+    }
+}
+
+fn main() {
+    new Config c()
+    print(c.build())
+}

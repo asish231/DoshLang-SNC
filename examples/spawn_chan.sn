@@ -1,0 +1,10 @@
+fn main() {
+    chan<int> numbers
+    spawn {
+        numbers.send(1)
+        numbers.send(2)
+        numbers.close()
+    }
+    print(numbers.receive())
+    print(numbers.receive())
+}

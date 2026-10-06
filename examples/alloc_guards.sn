@@ -1,0 +1,36 @@
+// Manual alloc/free is guarded: double frees and use-after-free reads are
+// reported instead of corrupting the allocator.
+fn main() {
+    ptr a = ptr_alloc(16)
+    print("size=")
+    print(alloc_size(a))
+
+    ptr_store(a, 0, 1234)
+    ptr_store(a, 8, 5678)
+    print("live after writes=")
+    print(check_live(a))
+    print("values=")
+    print(ptr_load(a, 0))
+    print(ptr_load(a, 8))
+
+    // First free succeeds.
+    print("free ok=")
+    print(free_checked(a) == 0)
+
+    // The block stays quarantined so the header is still readable.
+    print("use after free detected=")
+    print(check_live(a) == 0)
+
+    // The second free is refused rather than executed.
+    print("double free rejected=")
+    print(free_checked(a) == -1)
+    print("reported=")
+    print(alloc_freed_count() > 0)
+
+    // Many allocations are all tracked and released cleanly.
+    ptr live = ptr_alloc(8)
+    print("live count grew=")
+    print(alloc_live_count() >= 1)
+    print("new block is live=")
+    print(check_live(live))
+}

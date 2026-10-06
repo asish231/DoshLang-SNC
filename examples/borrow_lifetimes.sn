@@ -1,0 +1,23 @@
+// Borrow lifetimes: a location has at most one live borrow, `mut<T>` is
+// exclusive, and a borrow of a local cannot escape the function.
+fn read_a(int a, int b) -> int {
+    ref<int> ra = address(a)
+    mut<int> mb = address(b)
+    return value(ra) + value(mb)
+}
+
+fn main() {
+    int a = 1
+    int b = 2
+    print(read_a(a, b))
+
+    // Two disjoint borrows coexist.
+    ref<int> ra = address(a)
+    mut<int> mb = address(b)
+    print(value(ra))
+    print(value(mb))
+
+    // The owner is still usable through its own name.
+    print(a)
+    print(b)
+}

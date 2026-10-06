@@ -1,0 +1,33 @@
+blueprint Animal {
+    abstract fn speak() -> str
+
+    fn legs() -> int {
+        return 4
+    }
+}
+
+blueprint Dog from Animal {
+    fn speak() -> str {
+        return "woof"
+    }
+}
+
+blueprint Bird from Animal {
+    fn speak() -> str {
+        return "tweet"
+    }
+
+    fn legs() -> int {
+        return 2
+    }
+}
+
+fn main() {
+    new Dog d()
+    print(d.speak())
+    print(d.legs())
+
+    new Bird b()
+    print(b.speak())
+    print(b.legs())
+}

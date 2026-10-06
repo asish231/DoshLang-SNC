@@ -1,0 +1,46 @@
+// Reference cycles defeat plain reference counting: two nodes holding each
+// other keep both refcounts above zero forever. The mark-sweep collector
+// reclaims them, while data that is still reachable survives untouched.
+blueprint Node {
+    Node next
+    int value = 0
+}
+
+fn build_cycle(int n) {
+    new Node head()
+    int i = 1
+    while (i < n) {
+        new Node cur()
+        cur.value = i
+        cur.next = head
+        head = cur
+        i = i + 1
+    }
+}
+
+fn main() {
+    gc_set_threshold(1024)
+
+    // A cycle of 500 nodes: unreachable once build_cycle returns.
+    build_cycle(500)
+    gc_collect()
+    print("cycle reclaimed: ")
+    print(gc_count() < 10)
+
+    // A chain still referenced from main must survive and stay intact.
+    new Node live()
+    int i = 1
+    while (i < 50) {
+        new Node cur()
+        cur.value = i
+        cur.next = live
+        live = cur
+        i = i + 1
+    }
+    gc_collect()
+    print("live data kept: ")
+    print(gc_count() >= 50)
+
+    print("live head value: ")
+    print(live.value)
+}

@@ -1,8 +1,16 @@
-use crate::ir::IrModule;
+use crate::ir::{llvm_str, IrModule};
 
 pub fn emit_llvm(module: &IrModule, triple: &str) -> String {
     let mut s = String::new();
     s.push_str(&format!("target triple = \"{triple}\"\n\n"));
+    if !module.dbg.subs.is_empty() {
+        // Without the Debug Info Version module flag LLVM discards `!dbg`.
+        s.push_str(
+            "\n!llvm.module.flags = !{!0, !1}\n\
+             !0 = !{i32 2, !\"Debug Info Version\", i32 3}\n\
+             !1 = !{i32 2, !\"Dwarf Version\", i32 5}\n",
+        );
+    }
     s.push_str(DECLS);
     s.push('\n');
     for (i, lit) in module.strings.iter().enumerate() {
@@ -32,7 +40,78 @@ pub fn emit_llvm(module: &IrModule, triple: &str) -> String {
         s.push_str("  ret i32 0\n");
         s.push_str("}\n");
     }
+    s.push_str(&emit_debug_info(module));
     s
+}
+
+/// Emit `!llvm.dbg.cu` plus every `DIFile` / `DISubprogram` /
+/// `!DISubroutineType` / `!DILocation` referenced by the `!dbg` attachments
+/// already written into the body.
+///
+/// Ids come from the shared counter in `DbgInfo`, so this only prints each
+/// node under the id it was allocated — the numbering in the body and the
+/// table can never disagree.
+fn emit_debug_info(module: &IrModule) -> String {
+    let d = &module.dbg;
+    if d.subs.is_empty() || d.files.is_empty() {
+        return String::new();
+    }
+    let mut nodes: Vec<(u32, String)> = Vec::new();
+    nodes.extend(d.files.iter().map(|(id, b)| (*id, b.clone())));
+
+    let ty_of: std::collections::HashMap<u32, u32> =
+        d.tys.iter().map(|(tid, sid)| (*sid, *tid)).collect();
+
+    // A DICompileUnit needs a DIFile; reuse file 0 for the module.
+    let cu_file = d.files[0].0;
+    let cu_id = d.cu;
+    nodes.push((
+        cu_id,
+        format!(
+            "distinct !DICompileUnit(language: DW_LANG_C_plus_plus, file: !{cu_file}, producer: \"snc\", isOptimized: false, emissionKind: FullDebug)"
+        ),
+    ));
+
+    // Subroutine types reference a shared null type list, exactly like clang.
+    // It takes the first free id after every other node was allocated.
+    let max_used = nodes
+        .iter()
+        .map(|(id, _)| *id)
+        .chain(d.tys.iter().map(|(tid, _)| *tid))
+        .chain(d.subs.iter().map(|(id, _, _, _, _)| *id))
+        .chain(d.lines.iter().map(|(id, _, _, _, _)| *id))
+        .max()
+        .unwrap_or(2);
+    let null_ty = max_used + 1;
+    nodes.push((null_ty, "!{null}".to_string()));
+    for (tid, _) in &d.tys {
+        nodes.push((*tid, format!("!DISubroutineType(types: !{null_ty})")));
+    }
+    for (id, name, file, line, llvm_name) in &d.subs {
+        let f = d.file_id_of(*file);
+        let ty = ty_of.get(id).copied().unwrap_or(*id);
+        nodes.push((
+            *id,
+            format!(
+                "distinct !DISubprogram(name: {}, linkageName: {}, scope: !{cu_id}, file: !{f}, line: {line}, scopeLine: {line}, type: !{ty}, flags: DIFlagPrototyped, spFlags: DISPFlagDefinition | DISPFlagLocalToUnit | DISPFlagOptimized, unit: !{cu_id})",
+                llvm_str(name),
+                llvm_str(llvm_name)
+            ),
+        ));
+    }
+    for (id, scope, _file, line, col) in &d.lines {
+        nodes.push((
+            *id,
+            format!("!DILocation(line: {line}, column: {col}, scope: !{scope})"),
+        ));
+    }
+    nodes.sort_by_key(|(id, _)| *id);
+
+    let mut out = format!("\n!llvm.dbg.cu = !{{!{cu_id}}}\n");
+    for (id, body) in nodes {
+        out.push_str(&format!("!{id} = {body}\n"));
+    }
+    out
 }
 
 fn llvm_escape(s: &str) -> (String, usize) {
@@ -53,6 +132,7 @@ fn llvm_escape(s: &str) -> (String, usize) {
 }
 
 const DECLS: &str = r#"
+declare void @sn_cov_hit(i64)
 declare ptr @sn_str_new(ptr, i64)
 declare ptr @sn_str_from_cstr(ptr)
 declare i64 @sn_str_len(ptr)

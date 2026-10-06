@@ -1,0 +1,11 @@
+fn main() {
+    lock counterLock
+    int counter = 0
+    lock(counterLock) {
+        counter += 1
+    }
+    lock(counterLock) {
+        counter += 1
+    }
+    print(counter)
+}

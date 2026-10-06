@@ -1,0 +1,14 @@
+blueprint Point {
+    int x
+    int y
+
+    fn sum() -> int {
+        return self.x + self.y
+    }
+}
+
+fn main() {
+    new Point p(x: 10, y: 20)
+    print(p.sum())
+    print(p.x)
+}

@@ -1,0 +1,13 @@
+fn main() {
+    list<int> xs = [1, 2, 3, 4, 5]
+    print(3 in xs)
+    print(9 in xs)
+
+    list<str> names = ["Ada", "Grace", "Alan"]
+    print("Grace" in names)
+    print("Bob" in names)
+
+    str msg = "hello world"
+    print("world" in msg)
+    print("xyz" in msg)
+}

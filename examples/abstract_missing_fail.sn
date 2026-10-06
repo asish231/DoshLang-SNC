@@ -1,0 +1,11 @@
+blueprint Shape {
+    abstract fn area() -> int
+}
+
+blueprint Blob from Shape {
+}
+
+fn main() {
+    new Blob b()
+    print(b.area())
+}

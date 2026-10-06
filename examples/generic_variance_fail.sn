@@ -1,0 +1,26 @@
+blueprint Animal {
+    fn name() -> str {
+        return "animal"
+    }
+}
+
+blueprint Dog from Animal {
+    fn name() -> str {
+        return "dog"
+    }
+}
+
+blueprint Box<T> {
+    T item
+
+    fn get() -> T {
+        return self.item
+    }
+}
+
+fn main() {
+    new Dog d()
+    new Box<Dog> b(item: d)
+    Box<Animal> wide = b
+    print(wide.get().name())
+}

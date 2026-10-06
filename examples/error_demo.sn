@@ -1,0 +1,18 @@
+fn divide(int a, int b) -> (int, error) {
+    if (b == 0) {
+        return (0, error("division by zero"))
+    }
+    return (a / b, none)
+}
+
+fn main() {
+    int q = 0
+    error err = none
+    q, err = divide(10, 2)
+    print(q)
+    if (err != none) {
+        print(err.message())
+    } else {
+        print("ok")
+    }
+}

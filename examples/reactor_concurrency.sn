@@ -1,0 +1,22 @@
+use std.time
+
+fn main() {
+    int t0 = time_now_ms()
+
+    future a = sleep_async(300)
+    future b = sleep_async(300)
+    future c = sleep_async(300)
+    int issued = time_now_ms() - t0
+
+    await a
+    await b
+    await c
+    int elapsed = time_now_ms() - t0
+
+    // Issuing futures must not block: the reactor owns the timers.
+    print(issued < 50)
+    // Three overlapping 300 ms timers must overlap on one reactor thread,
+    // so the wall clock is ~300 ms, not the ~900 ms of three blocking sleeps.
+    print(elapsed < 600)
+    print(elapsed >= 295)
+}

@@ -1,0 +1,16 @@
+fn divide(int a, int b) -> (int, error) {
+    if (b == 0) {
+        return (0, error("division by zero"))
+    }
+    return (a / b, none)
+}
+
+fn main() {
+    defer {
+        print("done")
+    }
+    int q = try divide(20, 4)
+    print(q)
+    int r = try divide(9, 3)
+    print(r)
+}

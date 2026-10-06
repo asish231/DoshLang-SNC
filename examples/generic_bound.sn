@@ -1,0 +1,34 @@
+contract Printable {
+    fn show() -> str
+}
+
+blueprint Dog follows Printable {
+    fn show() -> str {
+        return "dog"
+    }
+}
+
+blueprint Cat follows Printable {
+    fn show() -> str {
+        return "cat"
+    }
+}
+
+blueprint Holder<T: Printable> {
+    T item
+
+    fn render() -> str {
+        return self.item.show()
+    }
+}
+
+fn main() {
+    new Dog d()
+    new Cat c()
+
+    new Holder<Dog> hd(item: d)
+    new Holder<Cat> hc(item: c)
+
+    print(hd.render())
+    print(hc.render())
+}

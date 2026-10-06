@@ -1,0 +1,44 @@
+use std.file
+
+fn main() {
+    str path = "snc_file_full.txt"
+    str copy_path = "snc_file_full_copy.txt"
+    error e = delete(copy_path)
+    e = delete(path)
+
+    e = write(path, "hello")
+    if (e != none) {
+        print("write failed")
+        return
+    }
+
+    let data, err = read(path)
+    if (err != none) {
+        print("read failed")
+        return
+    }
+    print(data)
+
+    e = append(path, " world")
+    if (e != none) {
+        print("append failed")
+        return
+    }
+
+    data, err = read(path)
+    print(data)
+
+    print(exists(path))
+    print(exists("missing-snc-file-xyz.sn"))
+
+    e = copy(path, copy_path)
+    if (e != none) {
+        print("copy failed")
+        return
+    }
+    data, err = read(copy_path)
+    print(data)
+
+    e = delete(copy_path)
+    e = delete(path)
+}

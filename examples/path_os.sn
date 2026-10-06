@@ -1,0 +1,24 @@
+use std.path
+use std.os
+
+fn main() {
+    str p = join("examples", "hello_world.sn")
+    print(base(p))
+    print(dir(p))
+    print(ext(p))
+
+    str? home = getenv("HOME")
+    if (home != none) {
+        print("HOME set")
+    } else {
+        str? user = getenv("USER")
+        if (user != none) {
+            print("USER set")
+        } else {
+            print("no env")
+        }
+    }
+
+    list<str> a = args()
+    print(a.length())
+}

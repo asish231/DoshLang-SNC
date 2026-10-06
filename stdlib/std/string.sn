@@ -4,3 +4,14 @@ fn isEmpty(str s) -> bool {
     }
     return false
 }
+
+fn repeat(str s, int n) -> str {
+    str out = ""
+    int i = 0
+    while (i < n) {
+        out = out + s
+        i += 1
+    }
+    return out
+}
+

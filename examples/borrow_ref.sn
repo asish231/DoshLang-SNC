@@ -1,0 +1,5 @@
+fn main() {
+    int x = 99
+    ref<int> r = address(x)
+    print(value(r))
+}

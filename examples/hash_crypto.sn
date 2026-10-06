@@ -1,0 +1,39 @@
+// Cryptographic digests, HMAC and CRC, verified against the published
+// FIPS/RFC test vectors.
+fn hex(ptr buf, int n) -> str {
+    str acc = ""
+    str digits = "0123456789abcdef"
+    int i = 0
+    while (i < n) {
+        int v = bytearray_get(buf, i)
+        acc = acc + digits[v / 16] + digits[v % 16]
+        i = i + 1
+    }
+    return acc
+}
+
+fn main() {
+    ptr h32 = bytearray_new(32)
+    sha256("abc", h32)
+    print(hex(h32, 32))
+
+    ptr e = bytearray_new(32)
+    sha256("", e)
+    print(hex(e, 32))
+
+    ptr m = bytearray_new(16)
+    md5("abc", m)
+    print(hex(m, 16))
+
+    ptr h5 = bytearray_new(64)
+    sha512("abc", h5)
+    print(hex(h5, 64))
+
+    ptr mac = bytearray_new(32)
+    hmac_sha256("key", "The quick brown fox jumps over the lazy dog", mac)
+    print(hex(mac, 32))
+
+    print(crc32("123456789"))
+    print(consttime_eq("secret", "secret"))
+    print(consttime_eq("secret", "secre7"))
+}

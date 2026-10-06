@@ -1,0 +1,87 @@
+// Mutable byte buffers.
+//
+//   ptr buf = bytes_new(0)
+//   bytes_append_str(buf, "abc")
+//   bytes_push(buf, 33)
+//   bytes_get(buf, 1)
+
+fn buffer(int capacity) -> ptr {
+    return bytearray_new(capacity)
+}
+
+fn len(ptr b) -> int {
+    return bytearray_len(b)
+}
+
+fn reserve(ptr b, int n) {
+    bytearray_reserve(b, n)
+}
+
+fn push(ptr b, int value) -> int {
+    return bytearray_push(b, value)
+}
+
+fn get(ptr b, int i) -> int {
+    return bytearray_get(b, i)
+}
+
+fn set(ptr b, int i, int v) {
+    bytearray_set(b, i, v)
+}
+
+fn append_str(ptr b, str s) {
+    bytearray_append_str(b, s)
+}
+
+fn append_bytes(ptr b, str s) {
+    bytearray_append_bytes(b, s)
+}
+
+fn slice(ptr b, int start, int n) -> ptr {
+    return bytearray_slice(b, start, n)
+}
+
+fn write_at(ptr b, int off, str s) -> int {
+    return bytearray_write_at(b, off, s)
+}
+
+fn find(ptr b, int value) -> int {
+    return bytearray_find(b, value, 0)
+}
+
+fn search(ptr b, int value, int start) -> int {
+    return bytearray_find(b, value, start)
+}
+
+fn rfind(ptr b, int value) -> int {
+    return bytearray_rfind(b, value)
+}
+
+fn truncate(ptr b, int n) {
+    bytearray_truncate(b, n)
+}
+
+fn clear(ptr b) {
+    bytearray_clear(b)
+}
+
+fn fill(ptr b, int value, int n) {
+    bytearray_fill(b, value, n)
+}
+
+fn raw(ptr b) -> ptr {
+    return bytearray_data(b)
+}
+
+fn hex(ptr b) -> str {
+    str acc = ""
+    str digits = "0123456789abcdef"
+    int n = bytearray_len(b)
+    int i = 0
+    while (i < n) {
+        int v = bytearray_get(b, i)
+        acc = acc + digits[v / 16] + digits[v % 16]
+        i = i + 1
+    }
+    return acc
+}
