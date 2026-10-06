@@ -1680,17 +1680,45 @@ impl Parser {
 
     fn parse_string_expr(&mut self, tok: Token) -> Result<Expr, String> {
         let s = tok.text;
-        if !s.contains('{') {
+        let chars: Vec<char> = s.chars().collect();
+        let mut has_unescaped_brace = false;
+        let mut idx = 0;
+        while idx < chars.len() {
+            if chars[idx] == '\\' && idx + 1 < chars.len() && (chars[idx + 1] == '{' || chars[idx + 1] == '}') {
+                idx += 2;
+            } else if chars[idx] == '{' {
+                has_unescaped_brace = true;
+                break;
+            } else {
+                idx += 1;
+            }
+        }
+        if !has_unescaped_brace {
+            let mut cleaned = String::new();
+            let mut idx = 0;
+            while idx < chars.len() {
+                if chars[idx] == '\\' && idx + 1 < chars.len() && (chars[idx + 1] == '{' || chars[idx + 1] == '}') {
+                    cleaned.push(chars[idx + 1]);
+                    idx += 2;
+                } else {
+                    cleaned.push(chars[idx]);
+                    idx += 1;
+                }
+            }
             return Ok(Expr {
-                kind: ExprKind::Str(s),
+                kind: ExprKind::Str(cleaned),
                 span: tok.span,
             });
         }
         let mut parts = Vec::new();
         let mut buf = String::new();
-        let chars: Vec<char> = s.chars().collect();
         let mut i = 0;
         while i < chars.len() {
+            if chars[i] == '\\' && i + 1 < chars.len() && (chars[i + 1] == '{' || chars[i + 1] == '}') {
+                buf.push(chars[i + 1]);
+                i += 2;
+                continue;
+            }
             if chars[i] == '{' {
                 if !buf.is_empty() {
                     parts.push(InterpPart::Lit(std::mem::take(&mut buf)));
@@ -1699,12 +1727,17 @@ impl Parser {
                 let start = i;
                 let mut depth = 1;
                 while i < chars.len() && depth > 0 {
-                    if chars[i] == '{' {
+                    if chars[i] == '\\' && i + 1 < chars.len() && (chars[i + 1] == '{' || chars[i + 1] == '}') {
+                        i += 2;
+                    } else if chars[i] == '{' {
                         depth += 1;
+                        i += 1;
                     } else if chars[i] == '}' {
                         depth -= 1;
-                    }
-                    if depth > 0 {
+                        if depth > 0 {
+                            i += 1;
+                        }
+                    } else {
                         i += 1;
                     }
                 }

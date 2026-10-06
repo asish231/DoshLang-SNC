@@ -1,0 +1,7 @@
+fn main() {
+    str name = "Ada"
+    str s1 = "literal: \{abc\}"
+    str s2 = "interpolated: {name} and literal: \{xyz\}"
+    print(s1)
+    print(s2)
+}

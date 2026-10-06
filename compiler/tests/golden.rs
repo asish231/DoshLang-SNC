@@ -486,6 +486,14 @@ fn subprocess_exec() {
 }
 
 #[test]
+fn escaped_braces() {
+    assert_out(
+        "examples/escaped_braces.sn",
+        "literal: {abc}\ninterpolated: Ada and literal: {xyz}\n",
+    );
+}
+
+#[test]
 fn std_test_helpers() {
     assert_out("examples/std_test.sn", "all tests passed\n");
 }

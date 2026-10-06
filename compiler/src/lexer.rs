@@ -296,16 +296,22 @@ impl<'a> Lexer<'a> {
                     return Err(self.err(start, "unterminated string"));
                 }
                 let e = self.bytes[self.pos];
-                out.push(match e {
-                    b'n' => '\n',
-                    b't' => '\t',
-                    b'r' => '\r',
-                    b'\\' => '\\',
-                    b'"' => '"',
-                    b'{' => '{',
-                    b'}' => '}',
-                    other => other as char,
-                });
+                match e {
+                    b'n' => out.push('\n'),
+                    b't' => out.push('\t'),
+                    b'r' => out.push('\r'),
+                    b'\\' => out.push('\\'),
+                    b'"' => out.push('"'),
+                    b'{' => {
+                        out.push('\\');
+                        out.push('{');
+                    }
+                    b'}' => {
+                        out.push('\\');
+                        out.push('}');
+                    }
+                    other => out.push(other as char),
+                }
                 self.pos += 1;
                 continue;
             }
