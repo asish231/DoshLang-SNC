@@ -1,0 +1,83 @@
+use std.web
+use backend.common
+use backend.db
+use backend.middleware
+use backend.auth
+use backend.projects
+use backend.sandbox
+use backend.ai
+use backend.telemetry
+
+fn main() {
+    print("==================================================")
+    print("  SNlang Modular Enterprise Web Server v0.2.0    ")
+    print("  Reactor Multiplexing + SQLite WAL Persistence   ")
+    print("==================================================")
+
+    // 1. Initialize Relational Persistence Engine
+    bool db_ok = init_database()
+    if (not db_ok) {
+        print("[FATAL] Failed to initialize SQLite database engine.")
+        return
+    }
+    print("[INIT] Relational database and audit logs verified.")
+
+    // 2. Instantiate Application Core
+    App app = App.create()
+    app.enable_cors("*", false)
+    app.middleware(request_logger)
+
+    // 3. Mount Sub-Router: /api/auth
+    Router auth_router = Router.create()
+    auth_router.post("/register", handle_auth_register)
+    auth_router.post("/login", handle_auth_login)
+    auth_router.post("/logout", handle_auth_logout)
+    auth_router.get("/me", handle_auth_me)
+    auth_router.post("/profile", handle_profile_update)
+    app.mount("/api/auth", auth_router)
+
+    // 4. Mount Sub-Router: /api/projects (User Code Persistence)
+    Router proj_router = Router.create()
+    proj_router.post("/", handle_project_create)
+    proj_router.get("/", handle_project_list)
+    proj_router.get("/:id", handle_project_get)
+    proj_router.delete("/:id", handle_project_delete)
+    app.mount("/api/projects", proj_router)
+
+    // 5. Mount Sub-Router: /api/sandbox
+    Router sb_router = Router.create()
+    sb_router.post("/run", handle_sandbox_run)
+    sb_router.get("/history", handle_sandbox_history)
+    app.mount("/api/sandbox", sb_router)
+
+    // 6. Mount Sub-Router: /api/ai
+    Router ai_router = Router.create()
+    ai_router.post("/chat", handle_ai_chat)
+    ai_router.post("/stream", handle_ai_stream)
+    ai_router.post("/sessions", handle_ai_create_session)
+    ai_router.get("/sessions", handle_ai_sessions_list)
+    ai_router.get("/sessions/:id", handle_ai_session_detail)
+    ai_router.delete("/sessions/:id", handle_ai_session_delete)
+    ai_router.post("/stress_test", handle_ai_stress_test)
+    app.mount("/api/ai", ai_router)
+
+    // 7. Mount Sub-Router: /api (Telemetry, Audit & DSA)
+    Router api_router = Router.create()
+    api_router.get("/healthz", handle_healthz)
+    api_router.get("/readyz", handle_readyz)
+    api_router.get("/status", handle_status)
+    api_router.get("/features", handle_features)
+    api_router.get("/telemetry", handle_telemetry)
+    api_router.get("/audit", handle_audit_logs)
+    api_router.get("/courses", handle_courses)
+    api_router.get("/dsa", handle_dsa_list)
+    api_router.get("/dsa/:id", handle_dsa_detail)
+    app.mount("/api", api_router)
+
+    // 8. Static Asset Pipeline
+    app.serve_static("/", "examples/website/public")
+
+    int port = 8090
+    print("[SERVER] Listening on http://localhost:" + cast(port, str))
+    app.listen(port)
+}

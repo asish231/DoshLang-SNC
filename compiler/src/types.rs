@@ -227,6 +227,9 @@ impl Type {
             return a.assignable_from(b, bps);
         }
         if let (Type::Map(k1, v1), Type::Map(k2, v2)) = (self, other) {
+            if matches!(**k2, Type::Any) && matches!(**v2, Type::Any) {
+                return true;
+            }
             let k_ok = k1 == k2
                 || (k1.is_fixed_int() && (**k2 == Type::Int || k2.is_fixed_int()))
                 || k1.assignable_from(k2, bps);
@@ -235,7 +238,10 @@ impl Type {
                 || v1.assignable_from(v2, bps);
             return k_ok && v_ok;
         }
-        // implicit widening: u8 -> int, u8 -> u16, i8 -> i32, int -> float, etc.
+        // implicit widening: u8 -> int, u8 -> u16, i8 -> i32, int -> float, dec -> float, etc.
+        if matches!(self, Type::Float) && matches!(other, Type::Dec(_)) {
+            return true;
+        }
         if (self.int_min_max().is_some() || matches!(self, Type::Int | Type::Float))
             && (other.int_min_max().is_some() || matches!(other, Type::Int))
         {

@@ -1,0 +1,188 @@
+use std.web
+use std.db
+use std.json
+use std.time
+use common
+use db
+use middleware
+
+fn handle_auth_register(Request req) -> Response {
+    let doc, err = parse(req.body)
+    if (err != none) {
+        return Response.bad_request("Invalid JSON request body")
+    }
+
+    str username = doc.get("username").as_str()
+    str email = doc.get("email").as_str()
+    str password = doc.get("password").as_str()
+
+    if (username.length() == 0 or password.length() == 0) {
+        return Response.bad_request("Username and password are required")
+    }
+    if (email.length() == 0) {
+        email = username + "@sn.dev"
+    }
+
+    ptr db = get_db()
+    ptr check_stmt = db_prepare(db, "SELECT count(*) FROM users WHERE username = '" + sql_escape(username) + "' OR email = '" + sql_escape(email) + "'")
+    int exists_count = 0
+    if (db_step(check_stmt) == 100) {
+        exists_count = db_column_int(check_stmt, 0)
+    }
+    db_finalize(check_stmt)
+
+    if (exists_count > 0) {
+        db_close(db)
+        return Response.bad_request("Username or email already registered")
+    }
+
+    str salt = generate_token(username)
+    str pass_hash = hash_password(password, salt)
+    int now = now_ms()
+
+    str ins = "INSERT INTO users (username, email, password_hash, salt, role, created_at) VALUES ('" + sql_escape(username) + "', '" + sql_escape(email) + "', '" + pass_hash + "', '" + salt + "', 'student', " + cast(now, str) + ");"
+    db_exec(db, ins)
+
+    // Retrieve inserted user ID
+    ptr uid_stmt = db_prepare(db, "SELECT id FROM users WHERE username = '" + sql_escape(username) + "'")
+    int new_uid = 0
+    if (db_step(uid_stmt) == 100) {
+        new_uid = db_column_int(uid_stmt, 0)
+    }
+    db_finalize(uid_stmt)
+
+    // Create default profile
+    if (new_uid > 0) {
+        str ins_p = "INSERT INTO user_profiles (user_id, bio, github_url, tier, updated_at) VALUES (" + cast(new_uid, str) + ", 'SNlang Student', '', 'standard', " + cast(now, str) + ");"
+        db_exec(db, ins_p)
+    }
+
+    db_close(db)
+    log_audit_event("USER_REGISTER", username, "Registered new student account with SHA-256 salt")
+
+    return Response.created("\{\"status\":\"success\",\"message\":\"User registered successfully. Cryptographic salt and SHA-256 hash stored.\",\"username\":\"" + json_escape(username) + "\"\}")
+}
+
+fn handle_auth_login(Request req) -> Response {
+    let doc, err = parse(req.body)
+    if (err != none) {
+        return Response.bad_request("Invalid JSON request body")
+    }
+
+    str login_id = doc.get("username").as_str()
+    str password = doc.get("password").as_str()
+
+    if (login_id.length() == 0 or password.length() == 0) {
+        return Response.bad_request("Username and password are required")
+    }
+
+    ptr db = get_db()
+    str q = "SELECT id, username, email, password_hash, salt, role FROM users WHERE username = '" + sql_escape(login_id) + "' OR email = '" + sql_escape(login_id) + "'"
+    ptr stmt = db_prepare(db, q)
+
+    if (db_step(stmt) != 100) {
+        db_finalize(stmt)
+        db_close(db)
+        log_audit_event("LOGIN_FAILED", login_id, "User not found")
+        return Response.unauthorized("Invalid credentials")
+    }
+
+    int uid = db_column_int(stmt, 0)
+    str uname = db_column_text(stmt, 1)
+    str uemail = db_column_text(stmt, 2)
+    str expected_hash = db_column_text(stmt, 3)
+    str salt = db_column_text(stmt, 4)
+    str urole = db_column_text(stmt, 5)
+    db_finalize(stmt)
+
+    str computed_hash = hash_password(password, salt)
+    if (computed_hash != expected_hash) {
+        db_close(db)
+        log_audit_event("LOGIN_FAILED", uname, "Password mismatch")
+        return Response.unauthorized("Invalid credentials")
+    }
+
+    // Generate cryptographic token
+    str token = generate_token(uname)
+    int now = now_ms()
+    int expires = now + 86400000 // 24 hours
+
+    str ins_sess = "INSERT INTO sessions (token, user_id, username, role, created_at, expires_at) VALUES ('" + token + "', " + cast(uid, str) + ", '" + sql_escape(uname) + "', '" + sql_escape(urole) + "', " + cast(now, str) + ", " + cast(expires, str) + ");"
+    db_exec(db, ins_sess)
+    db_close(db)
+
+    log_audit_event("LOGIN_SUCCESS", uname, "Issued session token")
+
+    Response resp = Response.ok("\{\"status\":\"success\",\"token\":\"" + token + "\",\"user\":\{\"id\":" + cast(uid, str) + ",\"username\":\"" + json_escape(uname) + "\",\"email\":\"" + json_escape(uemail) + "\",\"role\":\"" + json_escape(urole) + "\"\}\}")
+    resp.set_cookie("session_token", token, 86400, "/", false, false)
+    return resp
+}
+
+fn handle_auth_logout(Request req) -> Response {
+    str token = extract_session_token(req)
+
+    if (token.length() > 0) {
+        ptr db = get_db()
+        db_exec(db, "DELETE FROM sessions WHERE token = '" + sql_escape(token) + "'")
+        db_close(db)
+        log_audit_event("LOGOUT", token.slice(0, 16), "Session invalidated")
+    }
+
+    Response resp = Response.ok("\{\"status\":\"success\",\"message\":\"Logged out successfully\"\}")
+    resp.set_cookie("session_token", "", 0, "/", false, false)
+    return resp
+}
+
+fn handle_auth_me(Request req) -> Response {
+    str token = extract_session_token(req)
+    let ok, uid, uname, role = verify_session_record(token)
+    if (not ok) {
+        return Response.unauthorized("Session expired or invalid")
+    }
+
+    ptr db = get_db()
+    str q = "SELECT u.email, p.bio, p.github_url, p.tier FROM users u LEFT JOIN user_profiles p ON u.id = p.user_id WHERE u.id = " + cast(uid, str)
+    ptr stmt = db_prepare(db, q)
+
+    str uemail = ""
+    str ubio = ""
+    str ugit = ""
+    str utier = "standard"
+
+    if (db_step(stmt) == 100) {
+        uemail = db_column_text(stmt, 0)
+        ubio = db_column_text(stmt, 1)
+        ugit = db_column_text(stmt, 2)
+        utier = db_column_text(stmt, 3)
+    }
+    db_finalize(stmt)
+    db_close(db)
+
+    str res = "\{\"authenticated\":true,\"user\":\{\"id\":" + cast(uid, str) + ",\"username\":\"" + json_escape(uname) + "\",\"email\":\"" + json_escape(uemail) + "\",\"role\":\"" + json_escape(role) + "\",\"bio\":\"" + json_escape(ubio) + "\",\"github\":\"" + json_escape(ugit) + "\",\"tier\":\"" + json_escape(utier) + "\"\},\"token\":\"" + token + "\"\}\}"
+    return Response.ok(res)
+}
+
+fn handle_profile_update(Request req) -> Response {
+    str token = extract_session_token(req)
+    let ok, uid, uname, role = verify_session_record(token)
+    if (not ok) {
+        return Response.unauthorized("Authentication required")
+    }
+
+    let doc, err = parse(req.body)
+    if (err != none) {
+        return Response.bad_request("Invalid JSON request")
+    }
+
+    str bio = doc.get("bio").as_str()
+    str github = doc.get("github").as_str()
+    int now = now_ms()
+
+    ptr db = get_db()
+    str up = "INSERT OR REPLACE INTO user_profiles (user_id, bio, github_url, tier, updated_at) VALUES (" + cast(uid, str) + ", '" + sql_escape(bio) + "', '" + sql_escape(github) + "', 'student', " + cast(now, str) + ");"
+    db_exec(db, up)
+    db_close(db)
+
+    log_audit_event("PROFILE_UPDATE", uname, "Profile metadata updated")
+    return Response.ok("\{\"status\":\"success\",\"message\":\"Profile updated successfully\"\}")
+}

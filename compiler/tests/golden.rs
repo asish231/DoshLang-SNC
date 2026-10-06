@@ -146,6 +146,14 @@ fn use_std_math() {
 }
 
 #[test]
+fn use_std_web() {
+    assert_out(
+        "examples/use_std_web.sn",
+        "true\n200\n{\"status\":\"operational\"}\n200\n{\"echo\":\"ping\"}\n204\ntrue\ntrue\n200\n{\"id\":\"42\"}\n302\n/home\n",
+    );
+}
+
+#[test]
 fn lock_counter() {
     assert_out("examples/lock_counter.sn", "2\n");
 }

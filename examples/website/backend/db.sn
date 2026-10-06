@@ -1,0 +1,125 @@
+use std.db
+use std.time
+use common
+
+fn get_db() -> ptr {
+    return db_open("examples/website/app.db")
+}
+
+fn log_audit_event(str event_type, str actor, str details) {
+    ptr db = get_db()
+    if (ptr_int(db) != 0) {
+        str ins = "INSERT INTO audit_logs (event_type, actor, details, timestamp) VALUES ('" + sql_escape(event_type) + "', '" + sql_escape(actor) + "', '" + sql_escape(details) + "', " + cast(now_ms(), str) + ");"
+        db_exec(db, ins)
+        db_close(db)
+    }
+}
+
+fn run_migrations(ptr db) -> int {
+    // Migration Tracking Table
+    db_exec(db, "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL);")
+
+    ptr v_stmt = db_prepare(db, "SELECT coalesce(max(version), 0) FROM schema_migrations;")
+    int cur_ver = 0
+    if (db_step(v_stmt) == 100) {
+        cur_ver = db_column_int(v_stmt, 0)
+    }
+    db_finalize(v_stmt)
+
+    int now = now_ms()
+
+    // Migration 1: Core Relational Schema
+    if (cur_ver < 1) {
+        db_exec(db, "CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, salt TEXT NOT NULL, role TEXT NOT NULL, created_at INTEGER NOT NULL);")
+        db_exec(db, "CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY NOT NULL, user_id INTEGER NOT NULL, username TEXT NOT NULL, role TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);")
+        db_exec(db, "CREATE TABLE IF NOT EXISTS user_profiles (user_id INTEGER PRIMARY KEY, bio TEXT NOT NULL, github_url TEXT NOT NULL, tier TEXT NOT NULL, updated_at INTEGER NOT NULL);")
+        db_exec(db, "CREATE TABLE IF NOT EXISTS projects (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, title TEXT NOT NULL, description TEXT NOT NULL, code TEXT NOT NULL, is_public INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);")
+        db_exec(db, "CREATE TABLE IF NOT EXISTS chat_sessions (id TEXT PRIMARY KEY NOT NULL, user_id INTEGER NOT NULL, title TEXT NOT NULL, created_at INTEGER NOT NULL);")
+        db_exec(db, "CREATE TABLE IF NOT EXISTS chat_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, timestamp INTEGER NOT NULL);")
+        db_exec(db, "CREATE TABLE IF NOT EXISTS sandbox_history (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, code TEXT NOT NULL, output TEXT NOT NULL, exit_code INTEGER NOT NULL, duration_ms INTEGER NOT NULL, timestamp INTEGER NOT NULL);")
+        db_exec(db, "CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT NOT NULL, actor TEXT NOT NULL, details TEXT NOT NULL, timestamp INTEGER NOT NULL);")
+        db_exec(db, "INSERT INTO schema_migrations (version, name, applied_at) VALUES (1, 'V1__initial_enterprise_schema', " + cast(now, str) + ");")
+        cur_ver = 1
+    }
+
+    // Migration 2: High Performance B-Tree Indexes
+    if (cur_ver < 2) {
+        db_exec(db, "CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);")
+        db_exec(db, "CREATE INDEX IF NOT EXISTS idx_chat_msg_session ON chat_messages(session_id);")
+        db_exec(db, "CREATE INDEX IF NOT EXISTS idx_projects_uid ON projects(user_id);")
+        db_exec(db, "CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_logs(timestamp);")
+        db_exec(db, "INSERT INTO schema_migrations (version, name, applied_at) VALUES (2, 'V2__btree_performance_indexes', " + cast(now, str) + ");")
+        cur_ver = 2
+    }
+
+    // Migration 3: Distributed Rate Limiting & Telemetry Config
+    if (cur_ver < 3) {
+        db_exec(db, "CREATE TABLE IF NOT EXISTS rate_limits (key TEXT PRIMARY KEY NOT NULL, count INTEGER NOT NULL, window_start INTEGER NOT NULL);")
+        db_exec(db, "CREATE TABLE IF NOT EXISTS system_telemetry (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL, updated_at INTEGER NOT NULL);")
+        db_exec(db, "INSERT INTO schema_migrations (version, name, applied_at) VALUES (3, 'V3__rate_limiting_and_telemetry', " + cast(now, str) + ");")
+        cur_ver = 3
+    }
+
+    return cur_ver
+}
+
+fn db_health_check() -> (bool, int, str, int) {
+    int t0 = now_ms()
+    ptr db = get_db()
+    if (ptr_int(db) == 0) {
+        return (false, -1, "OFFLINE", 0)
+    }
+
+    ptr pragma_stmt = db_prepare(db, "PRAGMA journal_mode;")
+    str mode = "UNKNOWN"
+    if (db_step(pragma_stmt) == 100) {
+        mode = db_column_text(pragma_stmt, 0)
+    }
+    db_finalize(pragma_stmt)
+
+    ptr v_stmt = db_prepare(db, "SELECT max(version) FROM schema_migrations;")
+    int ver = 0
+    if (db_step(v_stmt) == 100) {
+        ver = db_column_int(v_stmt, 0)
+    }
+    db_finalize(v_stmt)
+    db_close(db)
+
+    int latency = now_ms() - t0
+    return (true, latency, mode, ver)
+}
+
+fn init_database() -> bool {
+    ptr db = get_db()
+    if (ptr_int(db) == 0) {
+        return false
+    }
+    db_exec(db, "PRAGMA journal_mode = WAL;")
+    db_exec(db, "PRAGMA synchronous = NORMAL;")
+    db_exec(db, "PRAGMA foreign_keys = ON;")
+
+    int active_ver = run_migrations(db)
+
+    // Seed default admin if missing
+    ptr stmt = db_prepare(db, "SELECT count(*) FROM users WHERE username = 'admin'")
+    int admin_count = 0
+    if (db_step(stmt) == 100) {
+        admin_count = db_column_int(stmt, 0)
+    }
+    db_finalize(stmt)
+
+    if (admin_count == 0) {
+        str salt = "admin_salt_enterprise_99"
+        str h = hash_password("admin123", salt)
+        int now = now_ms()
+        str ins = "INSERT INTO users (username, email, password_hash, salt, role, created_at) VALUES ('admin', 'admin@sn.dev', '" + h + "', '" + salt + "', 'admin', " + cast(now, str) + ");"
+        db_exec(db, ins)
+        
+        str ins_prof = "INSERT INTO user_profiles (user_id, bio, github_url, tier, updated_at) VALUES (1, 'Lead Systems Architect & Compiler Engineer', 'https://github.com/snlang', 'enterprise', " + cast(now, str) + ");"
+        db_exec(db, ins_prof)
+    }
+
+    db_close(db)
+    log_audit_event("SERVER_STARTUP", "SYSTEM", "Automated migration engine active. Version: V" + cast(active_ver, str) + " (WAL Mode)")
+    return true
+}

@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Plan &amp; Price — &lt;/Brain&gt;</title>
+  <link rel="stylesheet" href="/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+</head>
+<body class="grid-bg">
+
+  <!-- Minimalist Navbar -->
+  <header class="navbar">
+    <div class="container nav-container">
+      <a href="/index.html" class="brand-logo">&lt;/Brain&gt;</a>
+      
+      <nav class="nav-links">
+        <a href="/index.html" class="nav-link">Home</a>
+        <a href="/course.html" class="nav-link">Course</a>
+        <a href="/mentor.html" class="nav-link">Mentor</a>
+        <a href="/about.html" class="nav-link">About us</a>
+        <a href="/pricing.html" class="nav-link active">Plan &amp; Price</a>
+      </nav>
+
+      <div class="nav-actions">
+        <a href="/login.html" class="btn btn-outline btn-nav">Log In</a>
+        <a href="/apply.html" class="btn btn-primary btn-nav">Join For Free</a>
+      </div>
+
+      <button class="mobile-toggle" aria-label="Toggle Navigation">
+        <span></span>
+        <span></span>
+        <span></span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Pricing Section -->
+  <section class="section">
+    <div class="container">
+      <div class="section-header">
+        <span class="section-tag">Simple &amp; Transparent</span>
+        <h1 class="section-title">Plans &amp; Pricing</h1>
+        <p class="section-desc">Invest in your career with clear, honest pricing. All plans include full access to the SNlang compiler toolchain and core curriculum.</p>
+      </div>
+
+      <!-- Pricing Cards -->
+      <div class="pricing-grid">
+        
+        <!-- Starter Plan -->
+        <div class="pricing-card">
+          <div>
+            <div class="pricing-name">Free Starter</div>
+            <p style="font-size: 14px; color: var(--text-muted);">For self-paced learners exploring software engineering.</p>
+            <div class="pricing-price">$0 <span class="pricing-period">/ forever</span></div>
+            <ul class="pricing-features">
+              <li>
+                <svg width="18" height="18" viewBox="0 0 20 20" fill="none"><path d="M16.7 5.3L7.5 14.5L3.3 10.3" stroke="#10b981" stroke-width="2.2" stroke-linecap="round"/></svg>
+                Access to foundational tracks
+              </li>
+              <li>
+                <svg width="18" height="18" viewBox="0 0 20 20" fill="none"><path d="M16.7 5.3L7.5 14.5L3.3 10.3" stroke="#10b981" stroke-width="2.2" stroke-linecap="round"/></svg>
+                Community Discord access
+              </li>
+              <li>
+                <svg width="18" height="18" viewBox="0 0 20 20" fill="none"><path d="M16.7 5.3L7.5 14.5L3.3 10.3" stroke="#10b981" stroke-width="2.2" stroke-linecap="round"/></svg>
+                Browser playground environment
+              </li>
+              <li style="color: var(--text-light);">
+                <svg width="18" height="18" viewBox="0 0 20 20" fill="none"><path d="M5 5L15 15M15 5L5 15" stroke="#9ca3af" stroke-width="1.8"/></svg>
+                No staff code reviews
+              </li>
+            </ul>
+          </div>
+          <a href="/apply.html?plan=free" class="btn btn-outline btn-block">Join Free Course</a>
+        </div>
+
+        <!-- Pro Plan (Featured) -->
+        <div class="pricing-card featured">
+          <div class="pricing-badge">Most Popular</div>
+          <div>
+            <div class="pricing-name">Pro Engineer</div>
+            <p style="font-size: 14px; color: var(--text-muted);">For developers building production systems and career portfolios.</p>
+            <div class="pricing-price">$29 <span class="pricing-period">/ month</span></div>
+            <ul class="pricing-features">
+              <li>
+                <svg width="18" height="18" viewBox="0 0 20 20" fill="none"><path d="M16.7 5.3L7.5 14.5L3.3 10.3" stroke="#10b981" stroke-width="2.2" stroke-linecap="round"/></svg>
+                All 6 intensive tracks included
+              </li>
+              <li>
+                <svg width="18" height="18" viewBox="0 0 20 20" fill="none"><path d="M16.7 5.3L7.5 14.5L3.3 10.3" stroke="#10b981" stroke-width="2.2" stroke-linecap="round"/></svg>
+                Unlimited automated code reviews
+              </li>
+              <li>
+                <svg width="18" height="18" viewBox="0 0 20 20" fill="none"><path d="M16.7 5.3L7.5 14.5L3.3 10.3" stroke="#10b981" stroke-width="2.2" stroke-linecap="round"/></svg>
+                Full repo templates &amp; architectures
+              </li>
+              <li>
+                <svg width="18" height="18" viewBox="0 0 20 20" fill="none"><path d="M16.7 5.3L7.5 14.5L3.3 10.3" stroke="#10b981" stroke-width="2.2" stroke-linecap="round"/></svg>
+                Verified certificate of completion
+              </li>
+            </ul>
+          </div>
+          <a href="/apply.html?plan=pro" class="btn btn-primary btn-block">Get Started with Pro</a>
+        </div>
+
+        <!-- Master Fellowship Plan -->
+        <div class="pricing-card">
+          <div>
+            <div class="pricing-name">Fellowship Mentorship</div>
+            <p style="font-size: 14px; color: var(--text-muted);">For ambitious engineers seeking 1:1 guidance from FAANG staff engineers.</p>
+            <div class="pricing-price">$79 <span class="pricing-period">/ month</span></div>
+            <ul class="pricing-features">
+              <li>
+                <svg width="18" height="18" viewBox="0 0 20 20" fill="none"><path d="M16.7 5.3L7.5 14.5L3.3 10.3" stroke="#10b981" stroke-width="2.2" stroke-linecap="round"/></svg>
+                Everything in Pro Engineer
+              </li>
+              <li>
+                <svg width="18" height="18" viewBox="0 0 20 20" fill="none"><path d="M16.7 5.3L7.5 14.5L3.3 10.3" stroke="#10b981" stroke-width="2.2" stroke-linecap="round"/></svg>
+                Weekly 1:1 mentor video sessions
+              </li>
+              <li>
+                <svg width="18" height="18" viewBox="0 0 20 20" fill="none"><path d="M16.7 5.3L7.5 14.5L3.3 10.3" stroke="#10b981" stroke-width="2.2" stroke-linecap="round"/></svg>
+                System design mock interviews
+              </li>
+              <li>
+                <svg width="18" height="18" viewBox="0 0 20 20" fill="none"><path d="M16.7 5.3L7.5 14.5L3.3 10.3" stroke="#10b981" stroke-width="2.2" stroke-linecap="round"/></svg>
+                Direct employer referrals &amp; recommendations
+              </li>
+            </ul>
+          </div>
+          <a href="/apply.html?plan=fellowship" class="btn btn-outline btn-block">Apply for Fellowship</a>
+        </div>
+
+      </div>
+
+      <!-- FAQ Section -->
+      <div style="max-width: 720px; margin: 80px auto 0;">
+        <h2 style="font-size: 26px; font-weight: 800; text-align: center; margin-bottom: 36px;">Frequently Asked Questions</h2>
+        
+        <div class="card" style="margin-bottom: 16px;">
+          <h4 style="font-size: 16px; font-weight: 700; margin-bottom: 8px;">Can I switch or cancel my plan anytime?</h4>
+          <p style="font-size: 14px; color: var(--text-secondary);">Yes, absolutely. There are no lock-in contracts or cancellation penalties. You can upgrade, downgrade, or cancel directly from your profile settings.</p>
+        </div>
+
+        <div class="card" style="margin-bottom: 16px;">
+          <h4 style="font-size: 16px; font-weight: 700; margin-bottom: 8px;">Do I need prior systems programming knowledge?</h4>
+          <p style="font-size: 14px; color: var(--text-secondary);">Our tracks start from first principles. If you've written basic code in any language, our curriculum will guide you through networking, memory management, and compilers step-by-step.</p>
+        </div>
+
+        <div class="card">
+          <h4 style="font-size: 16px; font-weight: 700; margin-bottom: 8px;">Is there a free trial for the Pro tier?</h4>
+          <p style="font-size: 14px; color: var(--text-secondary);">Yes, every new student gets a 14-day risk-free trial of all Pro features upon application approval.</p>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-top">
+        <div class="footer-brand">
+          <a href="/index.html" class="brand-logo">&lt;/Brain&gt;</a>
+          <p>Learn to code your dreams and design your future with native compiler speed and industry mentorship.</p>
+        </div>
+        <div>
+          <h4 class="footer-title">Navigation</h4>
+          <ul class="footer-links">
+            <li><a href="/index.html">Home</a></li>
+            <li><a href="/course.html">Course Catalog</a></li>
+            <li><a href="/mentor.html">Our Mentors</a></li>
+            <li><a href="/about.html">About Us</a></li>
+            <li><a href="/pricing.html">Plan &amp; Price</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4 class="footer-title">Tracks</h4>
+          <ul class="footer-links">
+            <li><a href="/course.html">Node.js Systems</a></li>
+            <li><a href="/course.html">Python Microservices</a></li>
+            <li><a href="/course.html">Swift Native iOS</a></li>
+            <li><a href="/course.html">SQL Architecture</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4 class="footer-title">Get Started</h4>
+          <ul class="footer-links">
+            <li><a href="/apply.html">Join For Free</a></li>
+            <li><a href="/login.html">Student Login</a></li>
+            <li><a href="/pricing.html">Pricing Tiers</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <div>&copy; 2026 Brain Learning Platform. Powered by SNlang Native Reactor Engine.</div>
+        <div>Clean Minimalist Precision — Zero Gradients</div>
+      </div>
+    </div>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>

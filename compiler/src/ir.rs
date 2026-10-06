@@ -144,6 +144,7 @@ pub fn llvm_str(s: &str) -> String {
 struct Cx<'a> {
     db: &'a CheckDb,
     buf: String,
+    allocas: Vec<String>,
     tmp: u32,
     lbl: u32,
     locals: HashMap<String, (String, Type)>,
@@ -462,6 +463,7 @@ fn lower_fn(
     let mut cx = Cx {
         db,
         buf: String::new(),
+        allocas: Vec::new(),
         tmp: 0,
         lbl: 0,
         locals: HashMap::new(),
@@ -487,16 +489,8 @@ fn lower_fn(
         params_ll.push(format!("{} %p_{}", llty(&t), p.name));
     }
     let rty = llty_ret(&ret_ty);
-    // The `!dbg` attachment links the function to its DISubprogram; without
-    // it LLVM emits no DWARF for the body even when every instruction has a
-    // location.
-    cx.raw(&format!(
-        "define {rty} @{llvm_name}({}) !dbg !{sub_id} {{",
-        params_ll.join(", ")
-    ));
-    cx.raw("entry:");
     if bp.is_some() && !f.is_static {
-        cx.line("%v_self = alloca ptr");
+        cx.emit_alloca("%v_self = alloca ptr");
         cx.line("store ptr %p_self, ptr %v_self");
         cx.locals
             .insert("self".into(), ("%v_self".into(), Type::Blueprint(bp.clone().unwrap())));
@@ -506,10 +500,10 @@ fn lower_fn(
         let an = format!("%v_{}", p.name);
         if let Type::Record(rn) = &t {
             let sz = db.records.get(rn).map(|r| r.size).unwrap_or(8);
-            cx.line(&format!("{an} = alloca i8, i64 {sz}"));
+            cx.emit_alloca(&format!("{an} = alloca i8, i64 {sz}"));
             cx.line(&format!("call void @sn_record_copy(ptr {an}, ptr %p_{}, i64 {sz})", p.name));
         } else {
-            cx.line(&format!("{an} = alloca {}", llty(&t)));
+            cx.emit_alloca(&format!("{an} = alloca {}", llty(&t)));
             cx.line(&format!("store {} %p_{}, ptr {an}", llty(&t), p.name));
         }
         cx.locals.insert(p.name.clone(), (an, t));
@@ -528,8 +522,17 @@ fn lower_fn(
     } else {
         cx.line("ret i64 0");
     }
-    cx.raw("}");
-    cx.buf
+    let mut out = format!(
+        "define {rty} @{llvm_name}({}) !dbg !{sub_id} {{\nentry:\n",
+        params_ll.join(", ")
+    );
+    for a in &cx.allocas {
+        out.push_str(a);
+        out.push('\n');
+    }
+    out.push_str(&cx.buf);
+    out.push_str("}\n\n");
+    out
 }
 
 impl Cx<'_> {
@@ -648,6 +651,15 @@ impl Cx<'_> {
         self.line(&format!("call void asm sideeffect \"{}\", {}()", esc, constr));
     }
 
+    fn emit_alloca(&mut self, s: &str) {
+        let mut line = format!("  {s}");
+        if let Some((file, ln, col)) = self.cur_loc {
+            let id = self.dbg.diloc(self.cur_sub, file, ln, col);
+            line.push_str(&format!(", !dbg !{id}"));
+        }
+        self.allocas.push(line);
+    }
+
     fn t(&mut self) -> String {
         self.tmp += 1;
         format!("%t{}", self.tmp)
@@ -686,9 +698,9 @@ impl Cx<'_> {
                         match &t {
                             Type::Record(rn) => {
                                 let sz = self.db.records.get(rn).map(|r| r.size).unwrap_or(8);
-                                self.line(&format!("{an} = alloca i8, i64 {sz}"));
+                                self.emit_alloca(&format!("{an} = alloca i8, i64 {sz}"));
                             }
-                            _ => self.line(&format!("{an} = alloca {}", llty(&t))),
+                            _ => self.emit_alloca(&format!("{an} = alloca {}", llty(&t))),
                         }
                         self.locals.insert(name.clone(), (an.clone(), t.clone()));
                         if !self.loops.is_empty() {
@@ -734,9 +746,9 @@ impl Cx<'_> {
                                 "{el} = extractvalue {} {vr}, {i}",
                                 tuple_ll(&ts)
                             ));
-                            let an = format!("%v_{n}");
+                            let an = format!("%v_{}_{}", n, self.l("lv"));
                             let et = ts[i].clone();
-                            self.line(&format!("{an} = alloca {}", llty(&et)));
+                            self.emit_alloca(&format!("{an} = alloca {}", llty(&et)));
                             self.line(&format!("store {} {el}, ptr {an}", llty(&et)));
                             self.locals.insert(n.clone(), (an, et));
                         }
@@ -912,7 +924,7 @@ impl Cx<'_> {
                 let n = self.t();
                 self.line(&format!("{n} = call i64 @sn_list_len(ptr {it})"));
                 let ixn = format!("%v__i_{}", self.l("fi"));
-                self.line(&format!("{ixn} = alloca i64"));
+                self.emit_alloca(&format!("{ixn} = alloca i64"));
                 self.line(&format!("store i64 0, ptr {ixn}"));
                 let elem_ty = match &ity {
                     Type::List(e) => *e.clone(),
@@ -924,7 +936,7 @@ impl Cx<'_> {
                     _ => Type::Int,
                 };
                 let an = format!("%v_{}_{}", name, self.l("lv"));
-                self.line(&format!("{an} = alloca {}", llty(&elem_ty)));
+                self.emit_alloca(&format!("{an} = alloca {}", llty(&elem_ty)));
                 self.locals.insert(name.clone(), (an.clone(), elem_ty.clone()));
                 self.loop_locals.insert(name.clone());
                 let h = self.l("ih");
@@ -1032,7 +1044,7 @@ impl Cx<'_> {
                                     self.line(&format!("{fp} = getelementptr inbounds i8, ptr {v}, i64 {b_offset}"));
                                     self.line(&format!("{fval} = load {}, ptr {fp}", llty(&b_ty)));
                                     let an = format!("%v_{}_{}", b_name, self.l("lv"));
-                                    self.line(&format!("{an} = alloca {}", llty(&b_ty)));
+                                    self.emit_alloca(&format!("{an} = alloca {}", llty(&b_ty)));
                                     self.line(&format!("store {} {fval}, ptr {an}", llty(&b_ty)));
                                     self.locals.insert(b_name, (an, b_ty));
                                 }
@@ -1213,7 +1225,7 @@ impl Cx<'_> {
                     }
                 }
                 let an = format!("%v_{name}");
-                self.line(&format!("{an} = alloca ptr"));
+                self.emit_alloca(&format!("{an} = alloca ptr"));
                 self.line(&format!("store ptr {obj}, ptr {an}"));
                 self.locals
                     .insert(name.clone(), (an, Type::Blueprint(resolved.clone())));
@@ -1222,8 +1234,10 @@ impl Cx<'_> {
                     // anything after the loop.
                     self.loop_locals.insert(name.clone());
                 }
-                if self.db.funcs.contains_key(&format!("{resolved}::create")) {
-                    self.line(&format!("call void @sn_m_{resolved}_create(ptr {obj})"));
+                if let Some(sig) = self.db.funcs.get(&format!("{resolved}::create")) {
+                    if !sig.is_static {
+                        self.line(&format!("call void @sn_m_{resolved}_create(ptr {obj})"));
+                    }
                 }
             }
             Stmt::Defer { body, .. } => {
@@ -1236,7 +1250,7 @@ impl Cx<'_> {
                 let ret = f.ret.as_ref().map(ast_to_type).unwrap_or(Type::Void);
                 let clos = self.lower_closure(&f.params, &ret, &f.body);
                 let an = format!("%v_{}_{}", f.name, self.l("lv"));
-                self.line(&format!("{an} = alloca ptr"));
+                self.emit_alloca(&format!("{an} = alloca ptr"));
                 self.line(&format!("store ptr {clos}, ptr {an}"));
                 let ty = Type::Fn {
                     params: f.params.iter().map(|p| resolve_type_ast(&p.ty, self.db)).collect(),
@@ -1331,11 +1345,12 @@ impl Cx<'_> {
             let mut child = Cx {
                 db: self.db,
                 buf: String::new(),
+                allocas: Vec::new(),
                 tmp: 0,
                 lbl: 0,
                 locals: HashMap::new(),
                 loops: Vec::new(),
-        loop_locals: std::collections::HashSet::new(),
+                loop_locals: std::collections::HashSet::new(),
                 strings: self.strings,
                 extra_fns: &mut nested,
                 current_bp: self.current_bp.clone(),
@@ -1347,8 +1362,6 @@ impl Cx<'_> {
                 current_fn_ret: Type::Void,
                 defers: Vec::new(),
             };
-            child.raw(&format!("define void @{fname}(ptr %env) !dbg !{child_sub} {{"));
-            child.raw("entry:");
             for (i, (n, t)) in cap_tys.iter().enumerate() {
                 let slot = child.t();
                 child.line(&format!(
@@ -1356,7 +1369,7 @@ impl Cx<'_> {
                     i * 8
                 ));
                 let an = format!("%v_{n}");
-                child.line(&format!("{an} = alloca {}", llty(t)));
+                child.emit_alloca(&format!("{an} = alloca {}", llty(t)));
                 let v = child.t();
                 child.line(&format!("{v} = load {}, ptr {slot}", llty(t)));
                 child.line(&format!("store {} {v}, ptr {an}", llty(t)));
@@ -1366,8 +1379,14 @@ impl Cx<'_> {
                 child.stmt(s);
             }
             child.line("ret void");
-            child.raw("}");
-            child.buf
+            let mut out = format!("define void @{fname}(ptr %env) !dbg !{child_sub} {{\nentry:\n");
+            for a in &child.allocas {
+                out.push_str(a);
+                out.push('\n');
+            }
+            out.push_str(&child.buf);
+            out.push_str("}\n\n");
+            out
         };
         self.extra_fns.push(buf);
         self.extra_fns.extend(nested);
@@ -1553,7 +1572,11 @@ impl Cx<'_> {
                 let (kt, vt) = if let Some((k, v)) = entries.first() {
                     (self.lookup_ty(k), self.lookup_ty(v))
                 } else {
-                    (Type::Str, Type::Int)
+                    let want = self.lookup_ty(e);
+                    match want {
+                        Type::Map(k, v) => (*k, *v),
+                        _ => (Type::Str, Type::Int),
+                    }
                 };
                 let kk = if kt.is_ptr() { 1 } else { 0 };
                 let vk = if vt.is_ptr() { 1 } else { 0 };
@@ -1731,6 +1754,8 @@ impl Cx<'_> {
                 let (l, lt) = self.expr(lhs);
                 let (r, rt2) = self.expr(rhs);
                 if lt == Type::Float || rt2 == Type::Float {
+                    let (l, _) = self.coerce(l, &lt, &Type::Float);
+                    let (r, _) = self.coerce(r, &rt2, &Type::Float);
                     let pred = match op {
                         BinOp::Eq => "oeq",
                         BinOp::Ne => "one",
@@ -1809,6 +1834,10 @@ impl Cx<'_> {
                     Type::Str => {
                         self.line(&format!("{d} = call i64 @sn_str_contains(ptr {r}, ptr {l})"));
                     }
+                    Type::Map(_, _) => {
+                        let kb = self.as_bits(l, &lt);
+                        self.line(&format!("{d} = call i64 @sn_map_has(ptr {r}, i64 {kb})"));
+                    }
                     _ => {
                         self.line(&format!(
                             "{d} = call i64 @sn_list_contains_i64(ptr {r}, i64 {l})"
@@ -1820,14 +1849,16 @@ impl Cx<'_> {
             }
             arith => {
                 let (l, lt) = self.expr(lhs);
-                let (r, _) = self.expr(rhs);
-                let t = if lt == Type::Float {
-                    lt.clone()
+                let (r, rt) = self.expr(rhs);
+                let t = if lt == Type::Float || rt == Type::Float {
+                    Type::Float
                 } else if want.int_min_max().is_some() || *want == Type::Int {
                     want.clone()
                 } else {
                     lt.clone()
                 };
+                let (l, _) = if t == Type::Float { self.coerce(l, &lt, &t) } else { (l, lt) };
+                let (r, _) = if t == Type::Float { self.coerce(r, &rt, &t) } else { (r, rt) };
                 (self.arith_op(arith, l, r, &t), t)
             }
         }
@@ -2141,8 +2172,8 @@ impl Cx<'_> {
             "file_read_ex" => {
                 let body = self.t();
                 let err = self.t();
-                self.line(&format!("{body} = alloca ptr"));
-                self.line(&format!("{err} = alloca ptr"));
+                self.emit_alloca(&format!("{body} = alloca ptr"));
+                self.emit_alloca(&format!("{err} = alloca ptr"));
                 self.line(&format!(
                     "call void @sn_file_read_ex(ptr {}, ptr {body}, ptr {err})",
                     vs[0].0
@@ -2183,8 +2214,8 @@ impl Cx<'_> {
             "file_list" => {
                 let body = self.t();
                 let err = self.t();
-                self.line(&format!("{body} = alloca ptr"));
-                self.line(&format!("{err} = alloca ptr"));
+                self.emit_alloca(&format!("{body} = alloca ptr"));
+                self.emit_alloca(&format!("{err} = alloca ptr"));
                 self.line(&format!(
                     "call void @sn_file_list(ptr {}, ptr {body}, ptr {err})",
                     vs[0].0
@@ -2231,9 +2262,9 @@ impl Cx<'_> {
                 let code_slot = self.t();
                 let out_slot = self.t();
                 let err_slot = self.t();
-                self.line(&format!("{code_slot} = alloca i64"));
-                self.line(&format!("{out_slot} = alloca ptr"));
-                self.line(&format!("{err_slot} = alloca ptr"));
+                self.emit_alloca(&format!("{code_slot} = alloca i64"));
+                self.emit_alloca(&format!("{out_slot} = alloca ptr"));
+                self.emit_alloca(&format!("{err_slot} = alloca ptr"));
                 self.line(&format!(
                     "call void @sn_os_system(ptr {}, ptr {code_slot}, ptr {out_slot}, ptr {err_slot})",
                     vs[0].0
@@ -2250,9 +2281,9 @@ impl Cx<'_> {
                 let code_slot = self.t();
                 let out_slot = self.t();
                 let err_slot = self.t();
-                self.line(&format!("{code_slot} = alloca i64"));
-                self.line(&format!("{out_slot} = alloca ptr"));
-                self.line(&format!("{err_slot} = alloca ptr"));
+                self.emit_alloca(&format!("{code_slot} = alloca i64"));
+                self.emit_alloca(&format!("{out_slot} = alloca ptr"));
+                self.emit_alloca(&format!("{err_slot} = alloca ptr"));
                 self.line(&format!(
                     "call void @sn_os_exec(ptr {}, ptr {}, ptr {code_slot}, ptr {out_slot}, ptr {err_slot})",
                     vs[0].0, vs[1].0
@@ -2277,8 +2308,8 @@ impl Cx<'_> {
             "json_parse" => {
                 let body = self.t();
                 let err = self.t();
-                self.line(&format!("{body} = alloca ptr"));
-                self.line(&format!("{err} = alloca ptr"));
+                self.emit_alloca(&format!("{body} = alloca ptr"));
+                self.emit_alloca(&format!("{err} = alloca ptr"));
                 self.line(&format!(
                     "call void @sn_json_parse(ptr {}, ptr {body}, ptr {err})",
                     vs[0].0
@@ -2357,7 +2388,7 @@ impl Cx<'_> {
                 }
                 let n = chan_vs.len();
                 let arr = self.t();
-                self.line(&format!("{arr} = alloca [{n} x ptr]"));
+                self.emit_alloca(&format!("{arr} = alloca [{n} x ptr]"));
                 for (i, v) in chan_vs.iter().enumerate() {
                     let slot = self.t();
                     self.line(&format!(
@@ -3002,7 +3033,7 @@ impl Cx<'_> {
                 span: inner.span,
             };
             let an = format!("%v_optbase_{}", self.l("ob"));
-            self.line(&format!("{an} = alloca ptr"));
+            self.emit_alloca(&format!("{an} = alloca ptr"));
             self.line(&format!("store ptr {b}, ptr {an}"));
             self.locals
                 .insert("__optbase".into(), (an, self.lookup_ty(inner)));
@@ -3118,6 +3149,12 @@ impl Cx<'_> {
                 let r = self.t();
                 self.line(&format!("{r} = call ptr @sn_map_values(ptr {b})"));
                 (r, Type::List(v.clone()))
+            }
+            (Type::Map(_, _), "contains") | (Type::Map(_, _), "has") => {
+                let kb = self.as_bits(vs[0].0.clone(), &vs[0].1);
+                let r = self.t();
+                self.line(&format!("{r} = call i64 @sn_map_has(ptr {b}, i64 {kb})"));
+                (r, Type::Bool)
             }
             (Type::Chan(_), "send") => {
                 let bits = self.as_bits(vs[0].0.clone(), &vs[0].1);
@@ -3591,10 +3628,23 @@ impl Cx<'_> {
     }
 
     fn coerce(&mut self, v: String, from: &Type, to: &Type) -> (String, Type) {
-        if from != to && *to == Type::Float && (from.int_min_max().is_some() || *from == Type::Int) {
-            let r = self.t();
-            self.line(&format!("{r} = sitofp i64 {v} to double"));
-            return (r, to.clone());
+        if from != to && *to == Type::Float {
+            if let Type::Dec(s) = from {
+                let mut p = 1.0f64;
+                for _ in 0..*s {
+                    p *= 10.0;
+                }
+                let raw_fp = self.t();
+                self.line(&format!("{raw_fp} = sitofp i64 {v} to double"));
+                let r = self.t();
+                self.line(&format!("{r} = fdiv double {raw_fp}, {p:?}"));
+                return (r, to.clone());
+            }
+            if from.int_min_max().is_some() || *from == Type::Int {
+                let r = self.t();
+                self.line(&format!("{r} = sitofp i64 {v} to double"));
+                return (r, to.clone());
+            }
         }
         if to.assignable_from(from, &self.db.blueprints) && from != to {
             if matches!(to, Type::Optional(inner) if !inner.is_ptr() && from != &Type::None) {
@@ -3838,8 +3888,8 @@ impl Cx<'_> {
         };
         let ob = self.t();
         let oe = self.t();
-        self.line(&format!("{ob} = alloca ptr"));
-        self.line(&format!("{oe} = alloca ptr"));
+        self.emit_alloca(&format!("{ob} = alloca ptr"));
+        self.emit_alloca(&format!("{oe} = alloca ptr"));
         self.line(&format!(
             "call void @sn_http_request(ptr {m}, ptr {}, ptr {body_arg}, ptr {ob}, ptr {oe})",
             vs[0].0
@@ -3969,11 +4019,12 @@ impl Cx<'_> {
             let mut child = Cx {
                 db: self.db,
                 buf: String::new(),
+                allocas: Vec::new(),
                 tmp: 0,
                 lbl: 0,
                 locals: HashMap::new(),
                 loops: Vec::new(),
-        loop_locals: std::collections::HashSet::new(),
+                loop_locals: std::collections::HashSet::new(),
                 strings: self.strings,
                 extra_fns: &mut nested,
                 current_bp: self.current_bp.clone(),
@@ -3990,12 +4041,6 @@ impl Cx<'_> {
                 let t = resolve_type_ast(&p.ty, self.db);
                 pll.push(format!("{} %p_{}", llty(&t), p.name));
             }
-            child.raw(&format!(
-                "define {} @{fname}({}) !dbg !{child_sub} {{",
-                llty_ret(ret),
-                pll.join(", ")
-            ));
-            child.raw("entry:");
             for (i, (n, t)) in cap_tys.iter().enumerate() {
                 let slot = child.t();
                 child.line(&format!(
@@ -4003,7 +4048,7 @@ impl Cx<'_> {
                     i * 8
                 ));
                 let an = format!("%v_{n}");
-                child.line(&format!("{an} = alloca {}", llty(t)));
+                child.emit_alloca(&format!("{an} = alloca {}", llty(t)));
                 let v = child.t();
                 child.line(&format!("{v} = load {}, ptr {slot}", llty(t)));
                 child.line(&format!("store {} {v}, ptr {an}", llty(t)));
@@ -4012,7 +4057,7 @@ impl Cx<'_> {
             for p in params {
                 let t = resolve_type_ast(&p.ty, self.db);
                 let an = format!("%v_{}", p.name);
-                child.line(&format!("{an} = alloca {}", llty(&t)));
+                child.emit_alloca(&format!("{an} = alloca {}", llty(&t)));
                 child.line(&format!("store {} %p_{}, ptr {an}", llty(&t), p.name));
                 child.locals.insert(p.name.clone(), (an, t));
             }
@@ -4030,8 +4075,18 @@ impl Cx<'_> {
             } else {
                 child.line("ret i64 0");
             }
-            child.raw("}");
-            child.buf
+            let mut out = format!(
+                "define {} @{fname}({}) !dbg !{child_sub} {{\nentry:\n",
+                llty_ret(ret),
+                pll.join(", ")
+            );
+            for a in &child.allocas {
+                out.push_str(a);
+                out.push('\n');
+            }
+            out.push_str(&child.buf);
+            out.push_str("}\n\n");
+            out
         };
         self.extra_fns.push(buf);
         self.extra_fns.extend(nested);
@@ -4068,6 +4123,7 @@ fn lower_ext_fn(
     let mut cx = Cx {
         db,
         buf: String::new(),
+        allocas: Vec::new(),
         tmp: 0,
         lbl: 0,
         locals: HashMap::new(),
@@ -4090,11 +4146,6 @@ fn lower_ext_fn(
         params_ll.push(format!("{} %p_{}", llty(&t), p.name));
     }
     let rty = llty_ret(&ret_ty);
-    cx.raw(&format!(
-        "define {rty} @{llvm_name}({}) !dbg !{sub_id} {{",
-        params_ll.join(", ")
-    ));
-    cx.raw("entry:");
     cx.locals
         .insert("self".into(), ("%p_self".into(), self_ty.clone()));
     for p in &f.params {
@@ -4102,10 +4153,10 @@ fn lower_ext_fn(
         let an = format!("%v_{}", p.name);
         if let Type::Record(rn) = &t {
             let sz = db.records.get(rn).map(|r| r.size).unwrap_or(8);
-            cx.line(&format!("{an} = alloca i8, i64 {sz}"));
+            cx.emit_alloca(&format!("{an} = alloca i8, i64 {sz}"));
             cx.line(&format!("call void @sn_record_copy(ptr {an}, ptr %p_{}, i64 {sz})", p.name));
         } else {
-            cx.line(&format!("{an} = alloca {}", llty(&t)));
+            cx.emit_alloca(&format!("{an} = alloca {}", llty(&t)));
             cx.line(&format!("store {} %p_{}, ptr {an}", llty(&t), p.name));
         }
         cx.locals.insert(p.name.clone(), (an, t));
@@ -4125,8 +4176,17 @@ fn lower_ext_fn(
     } else if !cx.terminated {
         cx.line("ret i64 0");
     }
-    cx.raw("}");
-    cx.buf
+    let mut out = format!(
+        "define {rty} @{llvm_name}({}) !dbg !{sub_id} {{\nentry:\n",
+        params_ll.join(", ")
+    );
+    for a in &cx.allocas {
+        out.push_str(a);
+        out.push('\n');
+    }
+    out.push_str(&cx.buf);
+    out.push_str("}\n\n");
+    out
 }
 
 fn ll_field_ty(t: &Type) -> (&'static str, bool) {
@@ -4264,6 +4324,7 @@ fn walk_stmt(s: &Stmt, out: &mut Vec<String>) {
 fn walk_expr(e: &Expr, out: &mut Vec<String>) {
     match &e.kind {
         ExprKind::Ident(n) => out.push(n.clone()),
+        ExprKind::Self_ => out.push("self".into()),
         ExprKind::Binary { lhs, rhs, .. } => {
             walk_expr(lhs, out);
             walk_expr(rhs, out);

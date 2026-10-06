@@ -1,0 +1,140 @@
+use std.web
+use std.db
+use std.time
+use common
+use db
+
+fn request_logger(Request req) -> Response {
+    print("[HTTP] " + req.method + " " + req.path)
+    return Response.next()
+}
+
+fn extract_session_token(Request req) -> str {
+    str token = req.bearer_token()
+    if (token.length() == 0) {
+        token = req.cookie("session_token")
+    }
+    return token
+}
+
+fn verify_session_record(str token) -> (bool, int, str, str) {
+    if (token.length() == 0) {
+        return (false, 0, "", "")
+    }
+
+    ptr db = get_db()
+    str q = "SELECT s.user_id, s.username, s.role FROM sessions s WHERE s.token = '" + sql_escape(token) + "' AND s.expires_at > " + cast(now_ms(), str)
+    ptr stmt = db_prepare(db, q)
+
+    if (db_step(stmt) != 100) {
+        db_finalize(stmt)
+        db_close(db)
+        return (false, 0, "", "")
+    }
+
+    int uid = db_column_int(stmt, 0)
+    str uname = db_column_text(stmt, 1)
+    str urole = db_column_text(stmt, 2)
+    db_finalize(stmt)
+    db_close(db)
+
+    return (true, uid, uname, urole)
+}
+
+fn auth_guard(Request req) -> Response {
+    str token = extract_session_token(req)
+    let ok, uid, uname, role = verify_session_record(token)
+    if (not ok) {
+        return Response.unauthorized("Authentication required: valid session token needed")
+    }
+    return Response.next()
+}
+
+fn admin_guard(Request req) -> Response {
+    str token = extract_session_token(req)
+    let ok, uid, uname, role = verify_session_record(token)
+    if (not ok) {
+        return Response.unauthorized("Authentication required")
+    }
+    if (role != "admin") {
+        return Response.forbidden("Administrative privileges required")
+    }
+    return Response.next()
+}
+
+// Enterprise Sliding-Window Rate Limiter
+fn check_rate_limit(str client_key, int max_burst, int window_ms) -> (bool, int, int) {
+    ptr db = get_db()
+    if (ptr_int(db) == 0) {
+        return (true, 0, 0)
+    }
+
+    int now = now_ms()
+    str q = "SELECT count, window_start FROM rate_limits WHERE key = '" + sql_escape(client_key) + "';"
+    ptr stmt = db_prepare(db, q)
+
+    int cur_count = 0
+    int win_start = 0
+    bool found = false
+
+    if (db_step(stmt) == 100) {
+        found = true
+        cur_count = db_column_int(stmt, 0)
+        win_start = db_column_int(stmt, 1)
+    }
+    db_finalize(stmt)
+
+    if (not found or (now - win_start) > window_ms) {
+        // Reset or new window
+        str up = "INSERT OR REPLACE INTO rate_limits (key, count, window_start) VALUES ('" + sql_escape(client_key) + "', 1, " + cast(now, str) + ");"
+        db_exec(db, up)
+        db_close(db)
+        return (true, 1, max_burst - 1)
+    }
+
+    if (cur_count >= max_burst) {
+        db_close(db)
+        return (false, cur_count, 0)
+    }
+
+    int next_count = cur_count + 1
+    str inc = "UPDATE rate_limits SET count = " + cast(next_count, str) + " WHERE key = '" + sql_escape(client_key) + "';"
+    db_exec(db, inc)
+    db_close(db)
+
+    return (true, next_count, max_burst - next_count)
+}
+
+fn rate_limit_guard(Request req, str category, int max_per_min) -> Response {
+    str client_id = req.header("x-forwarded-for")
+    if (client_id.length() == 0) {
+        client_id = req.header("user-agent")
+    }
+    if (client_id.length() == 0) {
+        client_id = "default_client"
+    }
+
+    str key = category + ":" + client_id
+    let allowed, cur_usage, remaining = check_rate_limit(key, max_per_min, 60000)
+
+    if (not allowed) {
+        str prob = rfc7807_error(429, "Too Many Requests", "Rate limit exceeded for " + category + ". Limit is " + cast(max_per_min, str) + " req/min.")
+        Response resp = Response.make(429, "application/problem+json", prob)
+        resp.headers["Retry-After"] = "30"
+        resp.headers["X-RateLimit-Limit"] = cast(max_per_min, str)
+        resp.headers["X-RateLimit-Remaining"] = "0"
+        return resp
+    }
+
+    return Response.next()
+}
+
+// Enterprise Security Headers
+fn attach_security_headers(Response res) -> Response {
+    res.headers["X-Content-Type-Options"] = "nosniff"
+    res.headers["X-Frame-Options"] = "SAMEORIGIN"
+    res.headers["X-XSS-Protection"] = "1; mode=block"
+    res.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    res.headers["Server"] = "SNlang-Reactor/0.3.0"
+    return res
+}

@@ -1,0 +1,53 @@
+use std.crypto
+use std.bytes
+use std.time
+
+fn json_escape(str s) -> str {
+    str res = s.replace("\\", "\\\\")
+    res = res.replace("\"", "\\\"")
+    res = res.replace("\n", "\\n")
+    res = res.replace("\r", "\\r")
+    res = res.replace("\t", "\\t")
+    return res
+}
+
+fn sql_escape(str s) -> str {
+    return s.replace("'", "''")
+}
+
+fn hash_password(str pass, str salt) -> str {
+    ptr d = sha256(pass + ":" + salt)
+    return hex(d)
+}
+
+fn generate_token(str seed) -> str {
+    str raw = cast(now_ms(), str) + ":" + seed + ":sn_auth_entropy_v2"
+    ptr d = sha256(raw)
+    return hex(d)
+}
+
+fn validate_username(str u) -> bool {
+    if (u.length() < 3 or u.length() > 32) {
+        return false
+    }
+    return true
+}
+
+fn validate_password(str p) -> bool {
+    if (p.length() < 6) {
+        return false
+    }
+    return true
+}
+
+fn validate_email(str e) -> bool {
+    if (not e.contains("@") or not e.contains(".")) {
+        return false
+    }
+    return true
+}
+
+// RFC 7807 Problem Details for HTTP APIs
+fn rfc7807_error(int status, str title, str detail) -> str {
+    return "\{\"type\":\"https://snlang.dev/errors/http-" + cast(status, str) + "\",\"title\":\"" + json_escape(title) + "\",\"status\":" + cast(status, str) + ",\"detail\":\"" + json_escape(detail) + "\",\"timestamp\":" + cast(now_ms(), str) + "\}"
+}

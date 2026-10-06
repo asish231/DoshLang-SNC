@@ -1333,7 +1333,10 @@ impl Checker<'_> {
                         }
                     }
                     if let Type::Map(k_ty, v_ty) = &decl_ty {
-                        if let Some(Expr { kind: ExprKind::Map(entries), .. }) = value.as_ref() {
+                        if let Some(Expr { kind: ExprKind::Map(entries), span }) = value.as_ref() {
+                            if entries.is_empty() {
+                                self.set_ty(*span, decl_ty.clone());
+                            }
                             for (k_el, v_el) in entries {
                                 Self::check_int_literal_range(k_ty, Some(k_el), k_el.span, self.diag);
                                 Self::check_int_literal_range(v_ty, Some(v_el), v_el.span, self.diag);
@@ -1436,6 +1439,9 @@ impl Checker<'_> {
                     }
                     if let Type::Map(k_ty, v_ty) = &tt {
                         if let ExprKind::Map(entries) = &value.kind {
+                            if entries.is_empty() {
+                                self.set_ty(value.span, tt.clone());
+                            }
                             for (k_el, v_el) in entries {
                                 Self::check_int_literal_range(k_ty, Some(k_el), k_el.span, self.diag);
                                 Self::check_int_literal_range(v_ty, Some(v_el), v_el.span, self.diag);
@@ -2102,10 +2108,17 @@ impl Checker<'_> {
                     kt = Some(kty);
                     vt = Some(vty);
                 }
-                Type::Map(
-                    Box::new(kt.unwrap_or(Type::Str)),
-                    Box::new(vt.unwrap_or(Type::Int)),
-                )
+                if entries.is_empty() {
+                    Type::Map(
+                        Box::new(Type::Any),
+                        Box::new(Type::Any),
+                    )
+                } else {
+                    Type::Map(
+                        Box::new(kt.unwrap_or(Type::Str)),
+                        Box::new(vt.unwrap_or(Type::Int)),
+                    )
+                }
             }
             ExprKind::Tuple(xs) => Type::Tuple(xs.iter().map(|x| self.check_expr(x)).collect()),
             ExprKind::Cast { expr, ty } => {
@@ -2260,7 +2273,9 @@ impl Checker<'_> {
                 Type::Bool
             }
             BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge => {
-                if lt != rt && !(lt.int_min_max().is_some() && rt.int_min_max().is_some()) {
+                let float_mix = (lt == Type::Float && (matches!(rt, Type::Dec(_) | Type::Int) || rt.int_min_max().is_some()))
+                    || (rt == Type::Float && (matches!(lt, Type::Dec(_) | Type::Int) || lt.int_min_max().is_some()));
+                if lt != rt && !(lt.int_min_max().is_some() && rt.int_min_max().is_some()) && !float_mix {
                     self.diag.error(lhs.span, "comparison type mismatch");
                 }
                 Type::Bool
@@ -2268,12 +2283,13 @@ impl Checker<'_> {
             BinOp::Add if lt == Type::Str && rt == Type::Str => Type::Str,
             BinOp::In => {
                 match (&lt, &rt) {
-                    (elem, Type::List(el)) if **el == *elem => Type::Bool,
+                    (elem, Type::List(el)) if **el == *elem || el.assignable_from(elem, &self.db.blueprints) => Type::Bool,
                     (Type::Str, Type::Str) => Type::Bool,
+                    (elem, Type::Map(k, _)) if **k == *elem || k.assignable_from(elem, &self.db.blueprints) => Type::Bool,
                     _ => {
                         self.diag.error(
                             lhs.span,
-                            format!("'in' requires elem in list<T> or substring in str, got {lt} and {rt}"),
+                            format!("'in' requires elem in list<T>, substring in str, or key in map<K, V>, got {lt} and {rt}"),
                         );
                         Type::Bool
                     }
@@ -2285,9 +2301,9 @@ impl Checker<'_> {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow => {
                 if lt == Type::Float || rt == Type::Float {
                     if lt != Type::Float || rt != Type::Float {
-                        // allow Int literal promotion to float at type level; IR needs explicit cast for vars
-                        let lit_ok = (lt == Type::Float && Self::int_lit_value(rhs).is_some())
-                            || (rt == Type::Float && Self::int_lit_value(lhs).is_some());
+                        // allow Int literal / Dec promotion to float at type level
+                        let lit_ok = (lt == Type::Float && (Self::int_lit_value(rhs).is_some() || matches!(rt, Type::Dec(_))))
+                            || (rt == Type::Float && (Self::int_lit_value(lhs).is_some() || matches!(lt, Type::Dec(_))));
                         if !lit_ok {
                             self.diag.error(lhs.span, format!("float arithmetic on {lt} and {rt} (both must be float)"));
                         }
@@ -2873,6 +2889,19 @@ impl Checker<'_> {
             (Type::Map(_, _), "length") => Type::Int,
             (Type::Map(k, _), "keys") => Type::List(k.clone()),
             (Type::Map(_, v), "values") => Type::List(v.clone()),
+            (Type::Map(k, _), "contains") | (Type::Map(k, _), "has") => {
+                if args.len() != 1 {
+                    self.diag.error(span, "contains expects 1 arg");
+                    return Type::Bool;
+                }
+                if let Some(Arg::Pos(e)) = args.first() {
+                    let t = self.check_expr(e);
+                    if !k.assignable_from(&t, &self.db.blueprints) {
+                        self.diag.error(e.span, format!("cannot check key {t} in map<{k}, ...>"));
+                    }
+                }
+                Type::Bool
+            }
             (Type::Chan(_), "send") => Type::Void,
             (Type::Chan(t), "receive") => *t.clone(),
             (Type::Chan(_), "close") => Type::Void,

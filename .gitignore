@@ -31,3 +31,12 @@ packages/dist/
 # Scratch
 /tmp/
 SELF_HOSTING_GAP_ANALYSIS.md
+
+# Web & SQLite binaries
+website_server
+*.db
+*.db-shm
+*.db-wal
+node_modules/
+sandbox_*
+

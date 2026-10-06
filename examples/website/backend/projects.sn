@@ -1,0 +1,124 @@
+use std.web
+use std.db
+use std.json
+use std.time
+use common
+use db
+use middleware
+
+fn handle_project_create(Request req) -> Response {
+    str token = extract_session_token(req)
+    let ok, uid, uname, role = verify_session_record(token)
+    if (not ok) {
+        return Response.unauthorized("Authentication required to save projects")
+    }
+
+    let doc, err = parse(req.body)
+    if (err != none) {
+        return Response.bad_request("Invalid JSON request")
+    }
+
+    str title = doc.get("title").as_str()
+    str desc = doc.get("description").as_str()
+    str code = doc.get("code").as_str()
+
+    if (title.length() == 0 or code.length() == 0) {
+        return Response.bad_request("Project title and code are required")
+    }
+
+    int now = now_ms()
+    ptr db = get_db()
+    str ins = "INSERT INTO projects (user_id, title, description, code, is_public, created_at, updated_at) VALUES (" + cast(uid, str) + ", '" + sql_escape(title) + "', '" + sql_escape(desc) + "', '" + sql_escape(code) + "', 1, " + cast(now, str) + ", " + cast(now, str) + ");"
+    db_exec(db, ins)
+    
+    ptr last_stmt = db_prepare(db, "SELECT last_insert_rowid()")
+    int pid = 0
+    if (db_step(last_stmt) == 100) {
+        pid = db_column_int(last_stmt, 0)
+    }
+    db_finalize(last_stmt)
+    db_close(db)
+
+    log_audit_event("PROJECT_CREATE", uname, "Saved project #" + cast(pid, str) + ": " + title)
+    return Response.created("\{\"status\":\"success\",\"project_id\":" + cast(pid, str) + ",\"title\":\"" + json_escape(title) + "\"\}")
+}
+
+fn handle_project_list(Request req) -> Response {
+    str q_param = req.query("q")
+    ptr db = get_db()
+    
+    str sql = "SELECT p.id, p.title, p.description, u.username, p.created_at FROM projects p JOIN users u ON p.user_id = u.id"
+    if (q_param.length() > 0) {
+        sql = sql + " WHERE p.title LIKE '%" + sql_escape(q_param) + "%' OR p.description LIKE '%" + sql_escape(q_param) + "%'"
+    }
+    sql = sql + " ORDER BY p.id DESC LIMIT 40"
+
+    ptr stmt = db_prepare(db, sql)
+    str acc = "["
+    bool first = true
+    while (db_step(stmt) == 100) {
+        int pid = db_column_int(stmt, 0)
+        str title = db_column_text(stmt, 1)
+        str desc = db_column_text(stmt, 2)
+        str owner = db_column_text(stmt, 3)
+        int ts = db_column_int(stmt, 4)
+        if (not first) {
+            acc = acc + ","
+        }
+        first = false
+        acc = acc + "\{\"id\":" + cast(pid, str) + ",\"title\":\"" + json_escape(title) + "\",\"description\":\"" + json_escape(desc) + "\",\"owner\":\"" + json_escape(owner) + "\",\"created_at\":" + cast(ts, str) + "\}"
+    }
+    db_finalize(stmt)
+    db_close(db)
+    acc = acc + "]"
+    return Response.ok(acc)
+}
+
+fn handle_project_get(Request req) -> Response {
+    str pid_str = req.param("id")
+    if (pid_str.length() == 0) {
+        return Response.bad_request("Project ID required")
+    }
+
+    ptr db = get_db()
+    ptr stmt = db_prepare(db, "SELECT p.id, p.title, p.description, p.code, u.username, p.created_at FROM projects p JOIN users u ON p.user_id = u.id WHERE p.id = " + sql_escape(pid_str))
+    if (db_step(stmt) != 100) {
+        db_finalize(stmt)
+        db_close(db)
+        return Response.not_found("Project not found")
+    }
+
+    int pid = db_column_int(stmt, 0)
+    str title = db_column_text(stmt, 1)
+    str desc = db_column_text(stmt, 2)
+    str code = db_column_text(stmt, 3)
+    str owner = db_column_text(stmt, 4)
+    int ts = db_column_int(stmt, 5)
+    db_finalize(stmt)
+    db_close(db)
+
+    str res = "\{\"id\":" + cast(pid, str) + ",\"title\":\"" + json_escape(title) + "\",\"description\":\"" + json_escape(desc) + "\",\"code\":\"" + json_escape(code) + "\",\"owner\":\"" + json_escape(owner) + "\",\"created_at\":" + cast(ts, str) + "\}"
+    return Response.ok(res)
+}
+
+fn handle_project_delete(Request req) -> Response {
+    str token = extract_session_token(req)
+    let ok, uid, uname, role = verify_session_record(token)
+    if (not ok) {
+        return Response.unauthorized("Authentication required")
+    }
+
+    str pid_str = req.param("id")
+    ptr db = get_db()
+    
+    // Admin can delete any project; users can delete their own
+    str q = "DELETE FROM projects WHERE id = " + sql_escape(pid_str)
+    if (role != "admin") {
+        q = q + " AND user_id = " + cast(uid, str)
+    }
+    db_exec(db, q)
+    db_close(db)
+
+    log_audit_event("PROJECT_DELETE", uname, "Deleted project #" + pid_str)
+    return Response.ok("\{\"status\":\"success\",\"message\":\"Project deleted\"\}")
+}

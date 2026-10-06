@@ -1,0 +1,784 @@
+// std.web — Enterprise HTTP Web Framework and Server for SNlang
+//
+// Consolidated modern features inspired by Django, Spring Boot, and Go Chi:
+//   - Request / Response models with cookie, auth, and query parsing
+//   - Parameterized path pattern matching (:id, :slug) with automatic extraction
+//   - Spring Boot style ResponseEntity status factories & HTTP redirects
+//   - Django-style middleware / interceptor pipeline with short-circuiting
+//   - Sub-router mounting (app.mount("/api/v1", router))
+//   - Full CORS preflight and custom origin handling
+//   - Static asset pipeline with automatic MIME detection (GET and HEAD)
+//   - Non-blocking Reactor-backed TCP HTTP server with concurrent thread dispatching
+
+fn match_path(str pattern, str actual, map<str, str> params_out) -> bool {
+    if (not pattern.contains(":")) {
+        return pattern == actual
+    }
+    list<str> p_parts = pattern.split("/")
+    list<str> a_parts = actual.split("/")
+    if (p_parts.length() != a_parts.length()) {
+        return false
+    }
+    int i = 0
+    while (i < p_parts.length()) {
+        str p_seg = p_parts[i]
+        str a_seg = a_parts[i]
+        if (p_seg.length() > 0 and p_seg.slice(0, 1) == ":") {
+            str param_name = p_seg.slice(1, p_seg.length())
+            params_out[param_name] = a_seg
+        } else {
+            if (p_seg != a_seg) {
+                return false
+            }
+        }
+        i = i + 1
+    }
+    return true
+}
+
+blueprint Request {
+    str method
+    str path
+    str query_string
+    str body
+    map<str, str> params
+    map<str, str> query_params
+    map<str, str> headers
+    map<str, str> cookies
+
+    fn header(str name) -> str {
+        str key = name.lower()
+        if (key in self.headers) {
+            return self.headers[key]
+        }
+        return ""
+    }
+
+    fn param(str name) -> str {
+        if (name in self.params) {
+            return self.params[name]
+        }
+        return ""
+    }
+
+    fn query(str name) -> str {
+        if (name in self.query_params) {
+            return self.query_params[name]
+        }
+        return ""
+    }
+
+    fn cookie(str name) -> str {
+        if (name in self.cookies) {
+            return self.cookies[name]
+        }
+        return ""
+    }
+
+    fn bearer_token() -> str {
+        str auth = self.header("authorization")
+        if (auth.length() >= 7 and auth.slice(0, 7) == "Bearer ") {
+            return auth.slice(7, auth.length())
+        }
+        return ""
+    }
+
+    fn is_json() -> bool {
+        str ct = self.header("content-type")
+        return ct.contains("application/json")
+    }
+}
+
+blueprint Response {
+    int status
+    str content_type
+    map<str, str> headers
+    list<str> cookies_to_set
+    str body
+
+    static fn make(int status, str content_type, str body) -> Response {
+        map<str, str> hdrs = {}
+        list<str> cks = []
+        new Response res(
+            status: status,
+            content_type: content_type,
+            headers: hdrs,
+            cookies_to_set: cks,
+            body: body
+        )
+        return res
+    }
+
+    // Spring Boot ResponseEntity / Django HttpResponse status factories
+    static fn ok(str body) -> Response {
+        return Response.make(200, "application/json; charset=utf-8", body)
+    }
+
+    static fn json(str body) -> Response {
+        return Response.make(200, "application/json; charset=utf-8", body)
+    }
+
+    static fn html(str body) -> Response {
+        return Response.make(200, "text/html; charset=utf-8", body)
+    }
+
+    static fn text(str body) -> Response {
+        return Response.make(200, "text/plain; charset=utf-8", body)
+    }
+
+    static fn created(str body) -> Response {
+        return Response.make(201, "application/json; charset=utf-8", body)
+    }
+
+    static fn no_content() -> Response {
+        return Response.make(204, "text/plain; charset=utf-8", "")
+    }
+
+    static fn bad_request(str message) -> Response {
+        return Response.make(400, "application/json; charset=utf-8", "\{\"error\":\"" + message + "\"\}")
+    }
+
+    static fn unauthorized(str message) -> Response {
+        return Response.make(401, "application/json; charset=utf-8", "\{\"error\":\"" + message + "\"\}")
+    }
+
+    static fn forbidden(str message) -> Response {
+        return Response.make(403, "application/json; charset=utf-8", "\{\"error\":\"" + message + "\"\}")
+    }
+
+    static fn not_found(str message) -> Response {
+        return Response.make(404, "application/json; charset=utf-8", "\{\"error\":\"" + message + "\"\}")
+    }
+
+    static fn server_error(str message) -> Response {
+        return Response.make(500, "application/json; charset=utf-8", "\{\"error\":\"" + message + "\"\}")
+    }
+
+    static fn redirect(str target_url, bool permanent) -> Response {
+        int code = 302
+        if (permanent) {
+            code = 301
+        }
+        Response res = Response.make(code, "text/plain; charset=utf-8", "")
+        res.headers["Location"] = target_url
+        return res
+    }
+
+    // Middleware pass-through indicator
+    static fn next() -> Response {
+        return Response.make(0, "text/plain", "")
+    }
+
+    static fn status(int code) -> Response {
+        return Response.make(code, "text/plain; charset=utf-8", "")
+    }
+
+    fn with_status(int code) -> Response {
+        self.status = code
+        return self
+    }
+
+    fn with_header(str key, str value) -> Response {
+        self.headers[key] = value
+        return self
+    }
+
+    fn with_content_type(str ct) -> Response {
+        self.content_type = ct
+        return self
+    }
+
+    fn set_cookie(str name, str value, int max_age, str path, bool http_only, bool secure) -> Response {
+        str c = name + "=" + value
+        if (path.length() > 0) {
+            c = c + "; Path=" + path
+        } else {
+            c = c + "; Path=/"
+        }
+        if (max_age > 0) {
+            c = c + "; Max-Age=" + cast(max_age, str)
+        }
+        if (http_only) {
+            c = c + "; HttpOnly"
+        }
+        if (secure) {
+            c = c + "; Secure"
+        }
+        c = c + "; SameSite=Lax"
+        self.cookies_to_set.push(c)
+        return self
+    }
+}
+
+blueprint Router {
+    map<str, fn(Request) -> Response> routes_get
+    map<str, fn(Request) -> Response> routes_post
+    map<str, fn(Request) -> Response> routes_put
+    map<str, fn(Request) -> Response> routes_delete
+
+    static fn create() -> Router {
+        map<str, fn(Request) -> Response> rg = {}
+        map<str, fn(Request) -> Response> rp = {}
+        map<str, fn(Request) -> Response> rpu = {}
+        map<str, fn(Request) -> Response> rd = {}
+        new Router r(
+            routes_get: rg,
+            routes_post: rp,
+            routes_put: rpu,
+            routes_delete: rd
+        )
+        return r
+    }
+
+    fn get(str path, fn(Request) -> Response handler) {
+        self.routes_get[path] = handler
+    }
+
+    fn post(str path, fn(Request) -> Response handler) {
+        self.routes_post[path] = handler
+    }
+
+    fn put(str path, fn(Request) -> Response handler) {
+        self.routes_put[path] = handler
+    }
+
+    fn delete(str path, fn(Request) -> Response handler) {
+        self.routes_delete[path] = handler
+    }
+}
+
+fn mime_type(str path) -> str {
+    if (path.contains(".html") or path.contains(".htm")) {
+        return "text/html; charset=utf-8"
+    }
+    if (path.contains(".css")) {
+        return "text/css; charset=utf-8"
+    }
+    if (path.contains(".js")) {
+        return "application/javascript; charset=utf-8"
+    }
+    if (path.contains(".json")) {
+        return "application/json; charset=utf-8"
+    }
+    if (path.contains(".svg")) {
+        return "image/svg+xml"
+    }
+    if (path.contains(".png")) {
+        return "image/png"
+    }
+    if (path.contains(".jpg") or path.contains(".jpeg")) {
+        return "image/jpeg"
+    }
+    if (path.contains(".ico")) {
+        return "image/x-icon"
+    }
+    if (path.contains(".wasm")) {
+        return "application/wasm"
+    }
+    return "text/plain; charset=utf-8"
+}
+
+fn status_text(int code) -> str {
+    if (code == 200) { return "OK" }
+    if (code == 201) { return "Created" }
+    if (code == 204) { return "No Content" }
+    if (code == 301) { return "Moved Permanently" }
+    if (code == 302) { return "Found" }
+    if (code == 400) { return "Bad Request" }
+    if (code == 401) { return "Unauthorized" }
+    if (code == 403) { return "Forbidden" }
+    if (code == 404) { return "Not Found" }
+    if (code == 405) { return "Method Not Allowed" }
+    if (code == 500) { return "Internal Server Error" }
+    return "OK"
+}
+
+fn parse_request(str raw) -> (Request, error) {
+    map<str, str> empty_params = {}
+    map<str, str> empty_query = {}
+    map<str, str> empty_headers = {}
+    map<str, str> empty_cookies = {}
+    new Request empty_req(
+        method: "",
+        path: "",
+        query_string: "",
+        body: "",
+        params: empty_params,
+        query_params: empty_query,
+        headers: empty_headers,
+        cookies: empty_cookies
+    )
+
+    if (raw.length() == 0) {
+        return (empty_req, error("empty request"))
+    }
+
+    str header_part = raw
+    str body_part = ""
+
+    if (raw.contains("\r\n\r\n")) {
+        list<str> parts = raw.split("\r\n\r\n")
+        header_part = parts[0]
+        if (parts.length() > 1) {
+            body_part = parts[1]
+        }
+    } else {
+        if (raw.contains("\n\n")) {
+            list<str> parts = raw.split("\n\n")
+            header_part = parts[0]
+            if (parts.length() > 1) {
+                body_part = parts[1]
+            }
+        }
+    }
+
+    list<str> lines = header_part.split("\n")
+    if (lines.length() == 0) {
+        return (empty_req, error("no request lines"))
+    }
+
+    str req_line = lines[0].replace("\r", "")
+    list<str> req_parts = req_line.split(" ")
+    if (req_parts.length() < 2) {
+        return (empty_req, error("invalid request line"))
+    }
+
+    str method = req_parts[0]
+    str full_path = req_parts[1]
+    str path = full_path
+    str query_str = ""
+    map<str, str> query_map = {}
+
+    if (full_path.contains("?")) {
+        list<str> qparts = full_path.split("?")
+        path = qparts[0]
+        if (qparts.length() > 1) {
+            query_str = qparts[1]
+            list<str> qpairs = query_str.split("&")
+            int qi = 0
+            while (qi < qpairs.length()) {
+                str pair = qpairs[qi]
+                if (pair.contains("=")) {
+                    list<str> kv = pair.split("=")
+                    if (kv.length() >= 2) {
+                        query_map[kv[0]] = kv[1]
+                    }
+                }
+                qi = qi + 1
+            }
+        }
+    }
+
+    map<str, str> headers_map = {}
+    int i = 1
+    while (i < lines.length()) {
+        str line = lines[i].replace("\r", "")
+        if (line.contains(": ")) {
+            list<str> hparts = line.split(": ")
+            if (hparts.length() >= 2) {
+                str hkey = hparts[0].lower()
+                str hval = hparts[1]
+                headers_map[hkey] = hval
+            }
+        }
+        i = i + 1
+    }
+
+    map<str, str> cookies_map = {}
+    if ("cookie" in headers_map) {
+        str raw_cookie = headers_map["cookie"]
+        list<str> cpairs = raw_cookie.split(";")
+        int ci = 0
+        while (ci < cpairs.length()) {
+            str cpair = cpairs[ci].replace(" ", "")
+            if (cpair.contains("=")) {
+                list<str> ckv = cpair.split("=")
+                if (ckv.length() >= 2) {
+                    cookies_map[ckv[0]] = ckv[1]
+                }
+            }
+            ci = ci + 1
+        }
+    }
+
+    map<str, str> params_map = {}
+    new Request req(
+        method: method,
+        path: path,
+        query_string: query_str,
+        body: body_part,
+        params: params_map,
+        query_params: query_map,
+        headers: headers_map,
+        cookies: cookies_map
+    )
+    return (req, none)
+}
+
+fn format_response(Response res, bool cors_enabled, str cors_origin, bool cors_credentials, str req_origin) -> str {
+    str st = status_text(res.status)
+    str out = "HTTP/1.1 " + cast(res.status, str) + " " + st + "\r\n"
+    out = out + "Content-Type: " + res.content_type + "\r\n"
+    out = out + "Content-Length: " + cast(res.body.length(), str) + "\r\n"
+    out = out + "Connection: close\r\n"
+    out = out + "X-Content-Type-Options: nosniff\r\n"
+    out = out + "Server: SNlang/v0.2.0\r\n"
+
+    if (cors_enabled) {
+        if (cors_credentials) {
+            str allowed = cors_origin
+            if (allowed == "*" and req_origin.length() > 0) {
+                allowed = req_origin
+            }
+            out = out + "Access-Control-Allow-Origin: " + allowed + "\r\n"
+            out = out + "Access-Control-Allow-Credentials: true\r\n"
+        } else {
+            out = out + "Access-Control-Allow-Origin: " + cors_origin + "\r\n"
+        }
+        out = out + "Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS\r\n"
+        out = out + "Access-Control-Allow-Headers: Content-Type, Authorization, Accept, X-Requested-With\r\n"
+        out = out + "Access-Control-Max-Age: 86400\r\n"
+    }
+
+    list<str> hkeys = res.headers.keys()
+    int hi = 0
+    while (hi < hkeys.length()) {
+        str k = hkeys[hi]
+        if (k.length() > 0) {
+            out = out + k + ": " + res.headers[k] + "\r\n"
+        }
+        hi = hi + 1
+    }
+
+    int cki = 0
+    while (cki < res.cookies_to_set.length()) {
+        out = out + "Set-Cookie: " + res.cookies_to_set[cki] + "\r\n"
+        cki = cki + 1
+    }
+
+    out = out + "\r\n" + res.body
+    return out
+}
+
+blueprint App {
+    map<str, fn(Request) -> Response> routes_get
+    map<str, fn(Request) -> Response> routes_post
+    map<str, fn(Request) -> Response> routes_put
+    map<str, fn(Request) -> Response> routes_delete
+    list<str> patterns_get
+    list<fn(Request) -> Response> p_handlers_get
+    list<str> patterns_post
+    list<fn(Request) -> Response> p_handlers_post
+    list<str> patterns_put
+    list<fn(Request) -> Response> p_handlers_put
+    list<str> patterns_delete
+    list<fn(Request) -> Response> p_handlers_delete
+    list<fn(Request) -> Response> middlewares
+    str static_prefix
+    str static_dir
+    bool cors_enabled
+    str cors_origin
+    bool cors_credentials
+
+    static fn create() -> App {
+        map<str, fn(Request) -> Response> rg = {}
+        map<str, fn(Request) -> Response> rp = {}
+        map<str, fn(Request) -> Response> rpu = {}
+        map<str, fn(Request) -> Response> rd = {}
+        list<str> pg = []
+        list<fn(Request) -> Response> phg = []
+        list<str> pp = []
+        list<fn(Request) -> Response> php = []
+        list<str> ppu = []
+        list<fn(Request) -> Response> phpu = []
+        list<str> pd = []
+        list<fn(Request) -> Response> phd = []
+        list<fn(Request) -> Response> mws = []
+        new App app(
+            routes_get: rg,
+            routes_post: rp,
+            routes_put: rpu,
+            routes_delete: rd,
+            patterns_get: pg,
+            p_handlers_get: phg,
+            patterns_post: pp,
+            p_handlers_post: php,
+            patterns_put: ppu,
+            p_handlers_put: phpu,
+            patterns_delete: pd,
+            p_handlers_delete: phd,
+            middlewares: mws,
+            static_prefix: "",
+            static_dir: "",
+            cors_enabled: false,
+            cors_origin: "*",
+            cors_credentials: false
+        )
+        return app
+    }
+
+    fn middleware(fn(Request) -> Response mw) {
+        self.middlewares.push(mw)
+    }
+
+    fn get(str path, fn(Request) -> Response handler) {
+        if (path.contains(":")) {
+            self.patterns_get.push(path)
+            self.p_handlers_get.push(handler)
+        } else {
+            self.routes_get[path] = handler
+        }
+    }
+
+    fn post(str path, fn(Request) -> Response handler) {
+        if (path.contains(":")) {
+            self.patterns_post.push(path)
+            self.p_handlers_post.push(handler)
+        } else {
+            self.routes_post[path] = handler
+        }
+    }
+
+    fn put(str path, fn(Request) -> Response handler) {
+        if (path.contains(":")) {
+            self.patterns_put.push(path)
+            self.p_handlers_put.push(handler)
+        } else {
+            self.routes_put[path] = handler
+        }
+    }
+
+    fn delete(str path, fn(Request) -> Response handler) {
+        if (path.contains(":")) {
+            self.patterns_delete.push(path)
+            self.p_handlers_delete.push(handler)
+        } else {
+            self.routes_delete[path] = handler
+        }
+    }
+
+    fn mount(str prefix, Router router) {
+        list<str> g_keys = router.routes_get.keys()
+        int i = 0
+        while (i < g_keys.length()) {
+            str p = g_keys[i]
+            if (p == "/" or p == "") {
+                self.get(prefix, router.routes_get[p])
+                self.get(prefix + "/", router.routes_get[p])
+            } else {
+                self.get(prefix + p, router.routes_get[p])
+            }
+            i = i + 1
+        }
+        list<str> post_keys = router.routes_post.keys()
+        int j = 0
+        while (j < post_keys.length()) {
+            str p = post_keys[j]
+            if (p == "/" or p == "") {
+                self.post(prefix, router.routes_post[p])
+                self.post(prefix + "/", router.routes_post[p])
+            } else {
+                self.post(prefix + p, router.routes_post[p])
+            }
+            j = j + 1
+        }
+        list<str> put_keys = router.routes_put.keys()
+        int k = 0
+        while (k < put_keys.length()) {
+            str p = put_keys[k]
+            if (p == "/" or p == "") {
+                self.put(prefix, router.routes_put[p])
+                self.put(prefix + "/", router.routes_put[p])
+            } else {
+                self.put(prefix + p, router.routes_put[p])
+            }
+            k = k + 1
+        }
+        list<str> del_keys = router.routes_delete.keys()
+        int d = 0
+        while (d < del_keys.length()) {
+            str p = del_keys[d]
+            if (p == "/" or p == "") {
+                self.delete(prefix, router.routes_delete[p])
+                self.delete(prefix + "/", router.routes_delete[p])
+            } else {
+                self.delete(prefix + p, router.routes_delete[p])
+            }
+            d = d + 1
+        }
+    }
+
+    fn enable_cors(str origin, bool allow_credentials) {
+        self.cors_enabled = true
+        self.cors_origin = origin
+        self.cors_credentials = allow_credentials
+    }
+
+    fn serve_static(str url_prefix, str dir_path) {
+        self.static_prefix = url_prefix
+        self.static_dir = dir_path
+    }
+
+    fn dispatch(Request req) -> Response {
+        if (req.method == "OPTIONS") {
+            return Response.no_content()
+        }
+
+        // Middleware chain execution (Django / Spring Interceptor pipeline)
+        int mi = 0
+        while (mi < self.middlewares.length()) {
+            let mw = self.middlewares[mi]
+            Response mw_res = mw(req)
+            if (mw_res.status > 0) {
+                return mw_res // Short-circuit pipeline on non-zero response (e.g. 401 Unauthorized)
+            }
+            mi = mi + 1
+        }
+
+        if (req.method == "GET") {
+            if (req.path in self.routes_get) {
+                let h = self.routes_get[req.path]
+                return h(req)
+            }
+            int pi = 0
+            while (pi < self.patterns_get.length()) {
+                str pat = self.patterns_get[pi]
+                map<str, str> params = {}
+                if (match_path(pat, req.path, params)) {
+                    req.params = params
+                    let h = self.p_handlers_get[pi]
+                    return h(req)
+                }
+                pi = pi + 1
+            }
+        }
+        if (req.method == "POST") {
+            if (req.path in self.routes_post) {
+                let h = self.routes_post[req.path]
+                return h(req)
+            }
+            int pi = 0
+            while (pi < self.patterns_post.length()) {
+                str pat = self.patterns_post[pi]
+                map<str, str> params = {}
+                if (match_path(pat, req.path, params)) {
+                    req.params = params
+                    let h = self.p_handlers_post[pi]
+                    return h(req)
+                }
+                pi = pi + 1
+            }
+        }
+        if (req.method == "PUT") {
+            if (req.path in self.routes_put) {
+                let h = self.routes_put[req.path]
+                return h(req)
+            }
+            int pi = 0
+            while (pi < self.patterns_put.length()) {
+                str pat = self.patterns_put[pi]
+                map<str, str> params = {}
+                if (match_path(pat, req.path, params)) {
+                    req.params = params
+                    let h = self.p_handlers_put[pi]
+                    return h(req)
+                }
+                pi = pi + 1
+            }
+        }
+        if (req.method == "DELETE") {
+            if (req.path in self.routes_delete) {
+                let h = self.routes_delete[req.path]
+                return h(req)
+            }
+            int pi = 0
+            while (pi < self.patterns_delete.length()) {
+                str pat = self.patterns_delete[pi]
+                map<str, str> params = {}
+                if (match_path(pat, req.path, params)) {
+                    req.params = params
+                    let h = self.p_handlers_delete[pi]
+                    return h(req)
+                }
+                pi = pi + 1
+            }
+        }
+
+        // Static files dispatch for GET and HEAD requests
+        if ((req.method == "GET" or req.method == "HEAD") and self.static_prefix.length() > 0) {
+            int pre_len = self.static_prefix.length()
+            if (req.path.length() >= pre_len) {
+                if (req.path.slice(0, pre_len) == self.static_prefix) {
+                    str rel = req.path.slice(pre_len, req.path.length())
+                    if (rel.length() == 0 or rel == "/") {
+                        rel = "index.html"
+                    }
+                    if (rel.slice(0, 1) == "/") {
+                        rel = rel.slice(1, rel.length())
+                    }
+                    str filepath = self.static_dir + "/" + rel
+                    if (file_exists(filepath)) {
+                        if (req.method == "HEAD") {
+                            return Response.make(200, mime_type(filepath), "")
+                        }
+                        let body, err = file_read_ex(filepath)
+                        if (err == none) {
+                            return Response.make(200, mime_type(filepath), body)
+                        }
+                    }
+                }
+            }
+        }
+
+        return Response.not_found("endpoint not found")
+    }
+
+    fn handle_client(int sock) {
+        str raw = tcp_read(sock)
+        if (raw.length() > 0) {
+            let req, err = parse_request(raw)
+            if (err == none) {
+                Response res = self.dispatch(req)
+                str formatted = format_response(
+                    res,
+                    self.cors_enabled,
+                    self.cors_origin,
+                    self.cors_credentials,
+                    req.header("origin")
+                )
+                tcp_write(sock, formatted)
+            } else {
+                Response err_res = Response.bad_request("malformed HTTP request")
+                str formatted = format_response(
+                    err_res,
+                    self.cors_enabled,
+                    self.cors_origin,
+                    self.cors_credentials,
+                    ""
+                )
+                tcp_write(sock, formatted)
+            }
+        }
+        tcp_close(sock)
+    }
+
+    fn listen(int port) {
+        int listener = tcp_listen_any(port)
+        if (listener < 0) {
+            print("Failed to listen on port")
+            return
+        }
+        list<int> socks = [listener]
+        while (true) {
+            int ready = select_read(socks, 500)
+            if (ready == 0) {
+                int client = tcp_accept(listener)
+                if (client >= 0) {
+                    spawn {
+                        self.handle_client(client)
+                    }
+                }
+            }
+        }
+    }
+}

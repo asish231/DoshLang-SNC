@@ -1,0 +1,141 @@
+use std.web
+use std.db
+use std.time
+use common
+use db
+use middleware
+
+fn handle_healthz(Request req) -> Response {
+    return Response.ok("\{\"status\":\"UP\",\"checks\":\{\"liveness\":\"PASS\"\},\"timestamp\":" + cast(now_ms(), str) + "\}")
+}
+
+fn handle_readyz(Request req) -> Response {
+    let ok, lat, mode, ver = db_health_check()
+    if (not ok) {
+        return Response.server_error("Readiness check failed: Database unreachable")
+    }
+    return Response.ok("\{\"status\":\"READY\",\"checks\":\{\"readiness\":\"PASS\",\"database\":\"CONNECTED\",\"wal_mode\":\"" + mode + "\",\"schema_version\":" + cast(ver, str) + ",\"db_latency_ms\":" + cast(lat, str) + "\},\"timestamp\":" + cast(now_ms(), str) + "\}")
+}
+
+fn handle_telemetry(Request req) -> Response {
+    ptr db = get_db()
+    int u_count = 0
+    int s_count = 0
+    int p_count = 0
+    int c_count = 0
+    int m_count = 0
+    int sb_count = 0
+    int a_count = 0
+
+    ptr st1 = db_prepare(db, "SELECT count(*) FROM users")
+    if (db_step(st1) == 100) { u_count = db_column_int(st1, 0) }
+    db_finalize(st1)
+
+    ptr st2 = db_prepare(db, "SELECT count(*) FROM sessions")
+    if (db_step(st2) == 100) { s_count = db_column_int(st2, 0) }
+    db_finalize(st2)
+
+    ptr st3 = db_prepare(db, "SELECT count(*) FROM projects")
+    if (db_step(st3) == 100) { p_count = db_column_int(st3, 0) }
+    db_finalize(st3)
+
+    ptr st4 = db_prepare(db, "SELECT count(*) FROM chat_sessions")
+    if (db_step(st4) == 100) { c_count = db_column_int(st4, 0) }
+    db_finalize(st4)
+
+    ptr st5 = db_prepare(db, "SELECT count(*) FROM chat_messages")
+    if (db_step(st5) == 100) { m_count = db_column_int(st5, 0) }
+    db_finalize(st5)
+
+    ptr st6 = db_prepare(db, "SELECT count(*) FROM sandbox_history")
+    if (db_step(st6) == 100) { sb_count = db_column_int(st6, 0) }
+    db_finalize(st6)
+
+    ptr st7 = db_prepare(db, "SELECT count(*) FROM audit_logs")
+    if (db_step(st7) == 100) { a_count = db_column_int(st7, 0) }
+    db_finalize(st7)
+
+    str db_ver = db_version()
+    db_close(db)
+
+    let db_ok, db_lat, db_mode, schema_ver = db_health_check()
+
+    str res = "\{\"users\":" + cast(u_count, str) + ",\"active_sessions\":" + cast(s_count, str) + ",\"projects\":" + cast(p_count, str) + ",\"chat_sessions\":" + cast(c_count, str) + ",\"chat_messages\":" + cast(m_count, str) + ",\"sandbox_runs\":" + cast(sb_count, str) + ",\"audit_logs\":" + cast(a_count, str) + ",\"sqlite_version\":\"" + db_ver + "\",\"wal_mode\":\"" + db_mode + "\",\"schema_version\":" + cast(schema_ver, str) + ",\"db_latency_ms\":" + cast(db_lat, str) + ",\"engine\":\"SNlang Native LLVM\",\"runtime\":\"Reactor Multiplexing + Mutex Thread-Safe GC\",\"port\":8090\}"
+    return Response.ok(res)
+}
+
+fn handle_audit_logs(Request req) -> Response {
+    str token = extract_session_token(req)
+    let ok, uid, uname, role = verify_session_record(token)
+    if (not ok) {
+        return Response.unauthorized("Authentication required")
+    }
+    if (role != "admin") {
+        return Response.forbidden("Admin privileges required")
+    }
+
+    ptr db = get_db()
+    ptr stmt = db_prepare(db, "SELECT id, event_type, actor, details, timestamp FROM audit_logs ORDER BY id DESC LIMIT 25")
+    str acc = "["
+    bool first = true
+    while (db_step(stmt) == 100) {
+        int aid = db_column_int(stmt, 0)
+        str etype = db_column_text(stmt, 1)
+        str actor = db_column_text(stmt, 2)
+        str det = db_column_text(stmt, 3)
+        int ts = db_column_int(stmt, 4)
+        if (not first) {
+            acc = acc + ","
+        }
+        first = false
+        acc = acc + "\{\"id\":" + cast(aid, str) + ",\"event_type\":\"" + json_escape(etype) + "\",\"actor\":\"" + json_escape(actor) + "\",\"details\":\"" + json_escape(det) + "\",\"timestamp\":" + cast(ts, str) + "\}"
+    }
+    db_finalize(stmt)
+    db_close(db)
+    acc = acc + "]"
+    return Response.ok(acc)
+}
+
+fn handle_status(Request req) -> Response {
+    let ok, lat, mode, ver = db_health_check()
+    return Response.ok("\{\"status\":\"healthy\",\"uptime\":\"active\",\"version\":\"0.3.0\",\"runtime\":\"SNlang Native LLVM\",\"schema_version\":" + cast(ver, str) + ",\"architecture\":\"Modular Reactor + Mutex-Locked GC + WAL SQLite\"\}")
+}
+
+fn handle_features(Request req) -> Response {
+    return Response.ok("\{\"features\":[\"Thread-Safe GC Concurrency with Mutex Protections\",\"Automated Versioned Schema Migrations (V1, V2, V3)\",\"Sliding-Window Token-Bucket Rate Limiter\",\"Kubernetes Health & Readiness Probes (/api/healthz, /api/readyz)\",\"Enterprise Security Headers (HSTS, CSP, X-Frame)\",\"Modular Package Layout (backend.*)\",\"Role-Based Access Control (RBAC Guard)\",\"Persistent User Code Projects Table\",\"Enterprise Audit Log Trail\",\"Salted SHA-256 Auth Pipeline\",\"Transactional SQLite WAL Mode Engine\",\"Sub-Router Architecture (Router.mount)\",\"Online Sandbox Compiler Integration\"]\}")
+}
+
+fn handle_courses(Request req) -> Response {
+    str json = "[\{\"id\":\"sn-core-101\",\"title\":\"SNlang Core Systems \u0026 Architecture\",\"level\":\"Beginner to Intermediate\",\"modules\":8,\"duration\":\"3 weeks\",\"description\":\"Master LLVM native compilation, primitive data layouts, manual and managed pointer mechanics, control flow, and pattern matching in SNlang.\"\},"
+    json = json + "\{\"id\":\"sn-concur-201\",\"title\":\"High-Throughput Concurrency \u0026 Goroutines\",\"level\":\"Intermediate to Advanced\",\"modules\":6,\"duration\":\"2.5 weeks\",\"description\":\"Architect non-blocking systems using M:N green threads, typed channels, select multiplexing, and lock-free thread synchronizations.\"\},"
+    json = json + "\{\"id\":\"sn-web-301\",\"title\":\"High-Performance Web \u0026 Microservice Engineering\",\"level\":\"Advanced\",\"modules\":10,\"duration\":\"4 weeks\",\"description\":\"Build enterprise-grade REST APIs, interceptor middleware pipelines, SQLite database connection patterns, and sub-router trees using std.web.\"\},"
+    json = json + "\{\"id\":\"sn-dsa-401\",\"title\":\"Data Structures, Algorithms \u0026 Systems Benchmarking\",\"level\":\"Advanced\",\"modules\":12,\"duration\":\"5 weeks\",\"description\":\"Implement Kadane's algorithm, Binary Search trees, LRU Caches, Graph Traversals, and measure execution down to CPU cycles.\"\}]"
+    return Response.ok(json)
+}
+
+fn handle_dsa_list(Request req) -> Response {
+    str json = "[\{\"id\":\"kadane\",\"title\":\"Kadane's Algorithm (Max Subarray)\",\"category\":\"Dynamic Programming\",\"difficulty\":\"Medium\",\"time_complexity\":\"O(N)\",\"space_complexity\":\"O(1)\"\},"
+    json = json + "\{\"id\":\"binary-search\",\"title\":\"Binary Search \u0026 Lower Bound\",\"category\":\"Searching\",\"difficulty\":\"Easy\",\"time_complexity\":\"O(log N)\",\"space_complexity\":\"O(1)\"\},"
+    json = json + "\{\"id\":\"two-sum\",\"title\":\"Two Sum (Two Pointers)\",\"category\":\"Arrays\",\"difficulty\":\"Easy\",\"time_complexity\":\"O(N)\",\"space_complexity\":\"O(1)\"\},"
+    json = json + "\{\"id\":\"quicksort\",\"title\":\"QuickSort Partitioning\",\"category\":\"Sorting\",\"difficulty\":\"Medium\",\"time_complexity\":\"O(N log N)\",\"space_complexity\":\"O(log N)\"\},"
+    json = json + "\{\"id\":\"lru-cache\",\"title\":\"LRU Cache Blueprint\",\"category\":\"Data Structures\",\"difficulty\":\"Hard\",\"time_complexity\":\"O(1)\",\"space_complexity\":\"O(Capacity)\"\},"
+    json = json + "\{\"id\":\"goroutine-pool\",\"title\":\"Concurrent Worker Pool\",\"category\":\"Concurrency\",\"difficulty\":\"Medium\",\"time_complexity\":\"O(N/P)\",\"space_complexity\":\"O(Queue)\"\}]"
+    return Response.ok(json)
+}
+
+fn handle_dsa_detail(Request req) -> Response {
+    str did = req.param("id")
+    if (did == "kadane") {
+        str code = "fn kadane(list<int> nums) -> int \{\n    int max_so_far = nums[0]\n    int curr_max = nums[0]\n    int i = 1\n    int n = nums.length()\n    while (i < n) \{\n        if (nums[i] > curr_max + nums[i]) \{\n            curr_max = nums[i]\n        \} else \{\n            curr_max = curr_max + nums[i]\n        \}\n        if (curr_max > max_so_far) \{\n            max_so_far = curr_max\n        \}\n        i = i + 1\n    \}\n    return max_so_far\n\}\n\nfn main() \{\n    list<int> arr = [-2, 1, -3, 4, -1, 2, 1, -5, 4]\n    print(\"Array: [-2, 1, -3, 4, -1, 2, 1, -5, 4]\")\n    print(\"Max Subarray Sum: \" + cast(kadane(arr), str))\n\}"
+        return Response.ok("\{\"id\":\"kadane\",\"title\":\"Kadane's Algorithm\",\"time\":\"O(N)\",\"space\":\"O(1)\",\"code\":\"" + json_escape(code) + "\"\}")
+    }
+    if (did == "binary-search") {
+        str code = "fn binary_search(list<int> arr, int target) -> int \{\n    int low = 0\n    int high = arr.length() - 1\n    while (low <= high) \{\n        int mid = low + (high - low) / 2\n        if (arr[mid] == target) \{\n            return mid\n        \}\n        if (arr[mid] < target) \{\n            low = mid + 1\n        \} else \{\n            high = mid - 1\n        \}\n    \}\n    return -1\n\}\n\nfn main() \{\n    list<int> sorted = [2, 5, 8, 12, 16, 23, 38, 56, 72, 91]\n    int idx = binary_search(sorted, 23)\n    print(\"Target 23 found at index: \" + cast(idx, str))\n\}"
+        return Response.ok("\{\"id\":\"binary-search\",\"title\":\"Binary Search\",\"time\":\"O(log N)\",\"space\":\"O(1)\",\"code\":\"" + json_escape(code) + "\"\}")
+    }
+    if (did == "goroutine-pool") {
+        str code = "fn worker(chan<int> jobs, chan<int> results, int id) \{\n    while (true) \{\n        int j = <-jobs\n        if (j == -1) \{\n            break\n        \}\n        results <- (j * j)\n    \}\n\}\n\nfn main() \{\n    chan<int> jobs = make(chan<int>, 10)\n    chan<int> results = make(chan<int>, 10)\n    go worker(jobs, results, 1)\n    go worker(jobs, results, 2)\n    jobs <- 4\n    jobs <- 7\n    jobs <- 9\n    jobs <- -1\n    jobs <- -1\n    print(\"Result 1: \" + cast(<-results, str))\n    print(\"Result 2: \" + cast(<-results, str))\n    print(\"Result 3: \" + cast(<-results, str))\n\}"
+        return Response.ok("\{\"id\":\"goroutine-pool\",\"title\":\"Concurrent Worker Pool\",\"time\":\"O(N/P)\",\"space\":\"O(Queue)\",\"code\":\"" + json_escape(code) + "\"\}")
+    }
+    return Response.ok("\{\"id\":\"default\",\"title\":\"SNlang DSA Example\",\"time\":\"O(1)\",\"space\":\"O(1)\",\"code\":\"fn main() \{\\n    print(\\\"Select a problem to inspect solution\\\")\\n\}\"\}")
+}

@@ -264,6 +264,20 @@ typedef struct GcStackRange {
     void *owner;
 } GcStackRange;
 
+#ifdef _WIN32
+static CRITICAL_SECTION g_gc_mu;
+static int g_gc_mu_inited = 0;
+static void gc_lock(void) {
+    if (!g_gc_mu_inited) { InitializeCriticalSection(&g_gc_mu); g_gc_mu_inited = 1; }
+    EnterCriticalSection(&g_gc_mu);
+}
+static void gc_unlock(void) { LeaveCriticalSection(&g_gc_mu); }
+#else
+static pthread_mutex_t g_gc_mu = PTHREAD_MUTEX_INITIALIZER;
+static void gc_lock(void) { pthread_mutex_lock(&g_gc_mu); }
+static void gc_unlock(void) { pthread_mutex_unlock(&g_gc_mu); }
+#endif
+
 #define GC_MAX_THREADS 64
 /* Window above the collecting thread's stack pointer that is scanned for
    roots. 1 MiB comfortably covers a normal SNlang call chain. */
@@ -282,6 +296,7 @@ static int gc_index_of(const void *p) {
 
 static void gc_track(void *p, int64_t size) {
     if (!p) return;
+    gc_lock();
     if (g_gc_count == g_gc_cap) {
         int64_t ncap = g_gc_cap ? g_gc_cap * 2 : 1024;
         g_gc_objs = (GcObj *)realloc(g_gc_objs, (size_t)ncap * sizeof(GcObj));
@@ -291,13 +306,17 @@ static void gc_track(void *p, int64_t size) {
     g_gc_objs[g_gc_count].size = size;
     g_gc_objs[g_gc_count].marked = 0;
     g_gc_count++;
+    gc_unlock();
 }
 
 static void gc_untrack(void *p) {
+    gc_lock();
     int i = gc_index_of(p);
-    if (i < 0) return;
-    g_gc_objs[i] = g_gc_objs[g_gc_count - 1];
-    g_gc_count--;
+    if (i >= 0) {
+        g_gc_objs[i] = g_gc_objs[g_gc_count - 1];
+        g_gc_count--;
+    }
+    gc_unlock();
 }
 
 /* Record a GC-managed allocation. */
@@ -336,18 +355,22 @@ static int gc_stack_bounds(void **lo, void **hi) {
 
 void sn_gc_register_thread(void *lo, void *hi) {
     void *owner = (void *)pthread_self();
+    gc_lock();
     for (int64_t i = 0; i < g_gc_nthreads; i++) {
         if (g_gc_threads[i].owner == owner) {
             g_gc_threads[i].lo = lo;
             g_gc_threads[i].hi = hi;
+            gc_unlock();
             return;
         }
     }
-    if (g_gc_nthreads >= GC_MAX_THREADS) return;
-    g_gc_threads[g_gc_nthreads].lo = lo;
-    g_gc_threads[g_gc_nthreads].hi = hi;
-    g_gc_threads[g_gc_nthreads].owner = owner;
-    g_gc_nthreads++;
+    if (g_gc_nthreads < GC_MAX_THREADS) {
+        g_gc_threads[g_gc_nthreads].lo = lo;
+        g_gc_threads[g_gc_nthreads].hi = hi;
+        g_gc_threads[g_gc_nthreads].owner = owner;
+        g_gc_nthreads++;
+    }
+    gc_unlock();
 }
 
 static void gc_mark(void *p) {
@@ -486,9 +509,11 @@ static void gc_free(void *p) {
 
 /* Runs a full collection. Safe only when g_active_threads == 1. */
 void sn_gc_collect(void) {
-    if (g_gc_running) return;
-    if (g_active_threads > 1) return; /* another mutator is running */
-    if (g_gc_count == 0) return;
+    gc_lock();
+    if (g_gc_running || g_active_threads > 1 || g_gc_count == 0) {
+        gc_unlock();
+        return;
+    }
     g_gc_running = 1;
 
     /* Roots for this thread: everything from the current stack pointer up to
@@ -535,6 +560,7 @@ void sn_gc_collect(void) {
     g_gc_count = w;
 
     g_gc_running = 0;
+    gc_unlock();
 }
 
 /* Precise roots: the compiler pushes the value of every GC-visible local that
@@ -551,10 +577,14 @@ void sn_gc_root_push(void *p) {
    local that is live at this point, so reachability is exact rather than
    inferred from a stack scan. */
 void sn_gc_collect_roots(void) {
+    gc_lock();
     void **roots = g_gc_pending;
     int64_t n = g_gc_npending;
     g_gc_npending = 0;
-    if (g_gc_running || g_active_threads > 1) return;
+    if (g_gc_running || g_active_threads > 1) {
+        gc_unlock();
+        return;
+    }
     g_gc_running = 1;
     for (int64_t i = 0; i < g_gc_count; i++) g_gc_objs[i].marked = 0;
     for (int64_t i = 0; i < g_gc_nroots; i++) gc_mark(g_gc_roots[i]);
@@ -574,6 +604,7 @@ void sn_gc_collect_roots(void) {
     }
     g_gc_count = w;
     g_gc_running = 0;
+    gc_unlock();
 }
 
 /* Called from a safe point: no object is half-built, and every live value is
@@ -588,8 +619,24 @@ void sn_gc_poll(void) {
 /* Diagnostics for tests and the debugger. */
 int64_t sn_gc_object_count(void) { return g_gc_count; }
 void sn_gc_set_threshold(int64_t n) { g_gc_threshold = n > 0 ? n : 4096; }
-void sn_gc_enter(void) { g_active_threads++; }
-void sn_gc_leave(void) { g_active_threads--; }
+void sn_gc_enter(void) {
+    gc_lock();
+    g_active_threads++;
+    gc_unlock();
+}
+void sn_gc_leave(void) {
+    gc_lock();
+    g_active_threads--;
+    void *owner = (void *)pthread_self();
+    for (int64_t i = 0; i < g_gc_nthreads; i++) {
+        if (g_gc_threads[i].owner == owner) {
+            g_gc_threads[i] = g_gc_threads[g_gc_nthreads - 1];
+            g_gc_nthreads--;
+            break;
+        }
+    }
+    gc_unlock();
+}
 
 void sn_release(void *p) {
     if (!p) return;
@@ -966,6 +1013,7 @@ static int key_eq(Map *m, int64_t a, int64_t b) {
 }
 
 void sn_map_set(void *p, int64_t key, int64_t val) {
+    if (!p) return;
     Map *m = (Map *)p;
     for (int64_t i = 0; i < m->len; i++) {
         if (key_eq(m, m->keys[i], key)) {
@@ -990,16 +1038,17 @@ void sn_map_set(void *p, int64_t key, int64_t val) {
 }
 
 int64_t sn_map_has(void *p, int64_t key) {
+    if (!p) return 0;
     Map *m = (Map *)p;
     for (int64_t i = 0; i < m->len; i++) if (key_eq(m, m->keys[i], key)) return 1;
     return 0;
 }
 
 int64_t sn_map_get(void *p, int64_t key) {
+    if (!p) return 0;
     Map *m = (Map *)p;
     for (int64_t i = 0; i < m->len; i++) if (key_eq(m, m->keys[i], key)) return m->vals[i];
-    fprintf(stderr, "map key not found\n");
-    exit(1);
+    return 0;
 }
 
 int64_t sn_map_len(void *p) { return p ? ((Map *)p)->len : 0; }
@@ -3864,13 +3913,21 @@ int64_t sn_tcp_accept(int64_t lfd) {
 /* Blocking-style read that only waits for this caller. */
 int64_t sn_tcp_read(int64_t fd) {
     char tmp[8192];
+    int retries = 0;
     for (;;) {
         int64_t n = (int64_t)recv((int)fd, tmp, sizeof(tmp), 0);
         if (n > 0) return (int64_t)sn_str_new(tmp, n);
         if (n == 0) return 0; /* orderly shutdown */
         if (errno == EINTR) continue;
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            if (rx_wait_readable((int)fd, 1000) < 0) return -1;
+            int r = rx_wait_readable((int)fd, 1000);
+            if (r < 0) return -1;
+            if (r == 0) {
+                retries++;
+                if (retries >= 30) return -1; /* 30s read deadline */
+                continue;
+            }
+            retries = 0;
             continue;
         }
         return -1;
@@ -4442,7 +4499,7 @@ void sn_ptr_store_f64(void *p, int64_t offset, double value) {
 
 /* Read a NUL-terminated C string out of foreign memory. */
 void *sn_ptr_load_str(void *p, int64_t offset) {
-    if (!p) return NULL;
+    if (!p) return sn_str_from_cstr("");
     return sn_str_from_cstr((const char *)p + offset);
 }
 

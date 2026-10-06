@@ -1,0 +1,77 @@
+use std.web
+use std.db
+use std.file
+use std.os
+use std.json
+use std.time
+use common
+use db
+use middleware
+
+fn handle_sandbox_run(Request req) -> Response {
+    let doc, err = parse(req.body)
+    if (err != none) {
+        return Response.bad_request("Invalid JSON request")
+    }
+
+    str code = doc.get("code").as_str()
+    if (code.length() == 0) {
+        return Response.bad_request("Code snippet cannot be empty")
+    }
+
+    // Identify user if logged in
+    str token = extract_session_token(req)
+    let ok, uid, uname, role = verify_session_record(token)
+    int user_id = 0
+    if (ok) {
+        user_id = uid
+    }
+
+    int t0 = now_ms()
+    str file_id = cast(t0, str) + "_" + cast(code.length(), str)
+    str path = "examples/website/sandbox_" + file_id + ".sn"
+    str bin = "examples/website/sandbox_" + file_id + "_bin"
+
+    write(path, code)
+
+    str cmd = "./snc " + path + " -o " + bin + " 2>&1 && " + bin + " 2>&1"
+    let code_ret, out, serr = system(cmd)
+    int elapsed = now_ms() - t0
+
+    // Remove artifacts
+    delete(path)
+    delete(bin)
+
+    // Log to SQLite
+    ptr db = get_db()
+    str ins = "INSERT INTO sandbox_history (user_id, code, output, exit_code, duration_ms, timestamp) VALUES (" + cast(user_id, str) + ", '" + sql_escape(code) + "', '" + sql_escape(out) + "', " + cast(code_ret, str) + ", " + cast(elapsed, str) + ", " + cast(now_ms(), str) + ");"
+    db_exec(db, ins)
+    db_close(db)
+
+    str safe_out = json_escape(out)
+    return Response.ok("\{\"output\":\"" + safe_out + "\",\"exit_code\":" + cast(code_ret, str) + ",\"duration_ms\":" + cast(elapsed, str) + ",\"success\":" + cast(code_ret == 0, str) + "\}")
+}
+
+fn handle_sandbox_history(Request req) -> Response {
+    ptr db = get_db()
+    ptr stmt = db_prepare(db, "SELECT id, user_id, output, exit_code, duration_ms, timestamp FROM sandbox_history ORDER BY id DESC LIMIT 20")
+    str acc = "["
+    bool first = true
+    while (db_step(stmt) == 100) {
+        int sid = db_column_int(stmt, 0)
+        int uid = db_column_int(stmt, 1)
+        str sout = db_column_text(stmt, 2)
+        int scode = db_column_int(stmt, 3)
+        int sdur = db_column_int(stmt, 4)
+        int sts = db_column_int(stmt, 5)
+        if (not first) {
+            acc = acc + ","
+        }
+        first = false
+        acc = acc + "\{\"id\":" + cast(sid, str) + ",\"user_id\":" + cast(uid, str) + ",\"exit_code\":" + cast(scode, str) + ",\"duration_ms\":" + cast(sdur, str) + ",\"timestamp\":" + cast(sts, str) + "\}"
+    }
+    db_finalize(stmt)
+    db_close(db)
+    acc = acc + "]"
+    return Response.ok(acc)
+}

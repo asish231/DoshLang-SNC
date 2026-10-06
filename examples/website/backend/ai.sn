@@ -1,0 +1,223 @@
+use std.web
+use std.db
+use std.json
+use std.time
+use common
+use db
+use middleware
+
+fn generate_ai_tutor_reply(str query) -> str {
+    str q = query.lower()
+
+    if (q.contains("kadane") or q.contains("subarray") or q.contains("dsa")) {
+        return "Kadane's Algorithm computes the maximum subarray sum in O(N) time and O(1) auxiliary space.\n\nHere is the idiomatic implementation in SNlang:\n\n```sn\nfn kadane(list<int> nums) -> int \{\n    int max_so_far = nums[0]\n    int curr_max = nums[0]\n    int i = 1\n    int n = nums.length()\n    while (i < n) \{\n        if (nums[i] > curr_max + nums[i]) \{\n            curr_max = nums[i]\n        \} else \{\n            curr_max = curr_max + nums[i]\n        \}\n        if (curr_max > max_so_far) \{\n            max_so_far = curr_max\n        \}\n        i = i + 1\n    \}\n    return max_so_far\n\}\n\nfn main() \{\n    list<int> arr = [-2, 1, -3, 4, -1, 2, 1, -5, 4]\n    print(\"Max Subarray Sum: \" + cast(kadane(arr), str))\n\}\n```\n\nYou can run this directly in the Online Sandbox tab!"
+    }
+
+    if (q.contains("goroutine") or q.contains("concur") or q.contains("channel") or q.contains("thread")) {
+        return "SNlang Concurrency Model:\n\n1. Multiplexed M:N Model: Goroutines are spawned using the `go` keyword or `spawn` built-in, backed by pthreads with a 1MB segmented stack.\n2. Communication via Channels: `chan<T>` provides unbuffered and buffered message passing.\n3. Synchronization: Lock blueprints (`lock`) ensure thread-safe memory mutations.\n\nExample SNlang Concurrency:\n\n```sn\nfn worker(chan<int> ch, int id) \{\n    int val = id * 10\n    ch <- val\n\}\n\nfn main() \{\n    chan<int> ch = make(chan<int>, 4)\n    go worker(ch, 1)\n    go worker(ch, 2)\n    int r1 = <-ch\n    int r2 = <-ch\n    print(\"Results: \" + cast(r1, str) + \", \" + cast(r2, str))\n\}\n```"
+    }
+
+    if (q.contains("web") or q.contains("http") or q.contains("router") or q.contains("middleware")) {
+        return "SNlang `std.web` Enterprise Architecture:\n\n- Reactor Event Loop: Non-blocking socket multiplexing via epoll/kqueue.\n- Interceptor Pipeline: `app.middleware(fn(Request) -> Response)` implements Django / Spring Boot filter chains.\n- Sub-Routers: `Router.create()` and `app.mount(\"/api\", router)` enable clean modularization.\n- Dynamic Route Matching: `:param` tokens are automatically extracted via `req.param(\"key\")`.\n- Status Factories: `Response.ok()`, `Response.created()`, `Response.unauthorized()` produce strict HTTP status responses."
+    }
+
+    if (q.contains("db") or q.contains("database") or q.contains("sqlite") or q.contains("sql")) {
+        return "SNlang `std.db` Native SQLite Driver:\n\n- Zero-overhead C FFI linking directly to SQLite3.\n- Thread-isolated connections: `ptr db = db_open(\"app.db\")` per goroutine ensures serialized thread safety.\n- Prepared Statements: `db_prepare(db, sql)`, `db_step(stmt)`, and `db_column_text(stmt, col)`.\n- Always finalize statements with `db_finalize(stmt)` and `db_close(db)` to prevent connection leaks."
+    }
+
+    if (q.contains("crypto") or q.contains("auth") or q.contains("hash") or q.contains("password")) {
+        return "SNlang Cryptographic Security (`std.crypto` & `std.bytes`):\n\n- Passwords must never be stored in plain text.\n- Salt Generation: Generate cryptographic entropy with timestamp + seed.\n- Hash computation: `ptr digest = sha256(password + \":\" + salt)`.\n- Hex representation: `bytes.hex(digest)` yields 64-character lowercase hex.\n- Constant-time verification: `crypto.eq(hash_a, hash_b)` mitigates timing attacks."
+    }
+
+    if (q.contains("compiler") or q.contains("llvm") or q.contains("architecture")) {
+        return "SNlang Compiler Pipeline Architecture:\n\n1. Lexer (`lexer.rs`): Tokenizes source into keywords, identifiers, literals.\n2. Parser (`parser.rs`): Builds Abstract Syntax Tree (AST) supporting blueprints, match statements, closures.\n3. Type Checker (`check.rs`): Strict bidirectional type inference with trait bounds.\n4. IR Generation (`ir.rs`): Converts typed AST to SSA-based Intermediate Representation.\n5. LLVM Code Generator (`llvm.rs`): Emits LLVM IR and invokes Clang for native Mach-O / ELF machine code generation with `-O2` optimizations."
+    }
+
+    return "Hello! I am your SNlang Systems AI Tutor.\n\nI can assist you with:\n- Writing and optimizing SNlang code\n- Data Structures & Algorithms (Kadane's, Binary Search, QuickSort, LRU Cache)\n- Concurrency (Goroutines, Channels, Locks)\n- Web Services (`std.web`, Router, Interceptors, CORS)\n- Database Persistence (`std.db`, SQLite prepared statements)\n- Cryptography & Auth (`std.crypto`, SHA-256, Session management)\n\nWhat would you like to explore or benchmark today?"
+}
+
+fn handle_ai_chat(Request req) -> Response {
+    let doc, err = parse(req.body)
+    if (err != none) {
+        return Response.bad_request("Invalid JSON request")
+    }
+
+    str sid = doc.get("session_id").as_str()
+    str user_msg = doc.get("message").as_str()
+
+    if (user_msg.length() == 0) {
+        return Response.bad_request("Message cannot be empty")
+    }
+
+    int now = now_ms()
+    ptr db = get_db()
+
+    if (sid.length() == 0 or sid == "null") {
+        sid = "chat_" + cast(now, str)
+        str title = "Conversation #" + cast(now % 10000, str)
+        if (user_msg.length() < 30) {
+            title = user_msg
+        }
+        str ins_sess = "INSERT INTO chat_sessions (id, user_id, title, created_at) VALUES ('" + sql_escape(sid) + "', 1, '" + sql_escape(title) + "', " + cast(now, str) + ");"
+        db_exec(db, ins_sess)
+    }
+
+    // Insert user message
+    str ins_user = "INSERT INTO chat_messages (session_id, role, content, timestamp) VALUES ('" + sql_escape(sid) + "', 'user', '" + sql_escape(user_msg) + "', " + cast(now, str) + ");"
+    db_exec(db, ins_user)
+
+    // Generate AI tutor reply
+    str ai_reply = generate_ai_tutor_reply(user_msg)
+    int ai_now = now_ms()
+
+    // Insert AI reply
+    str ins_ai = "INSERT INTO chat_messages (session_id, role, content, timestamp) VALUES ('" + sql_escape(sid) + "', 'assistant', '" + sql_escape(ai_reply) + "', " + cast(ai_now, str) + ");"
+    db_exec(db, ins_ai)
+
+    db_close(db)
+
+    str safe_reply = json_escape(ai_reply)
+    return Response.ok("\{\"session_id\":\"" + json_escape(sid) + "\",\"role\":\"assistant\",\"content\":\"" + safe_reply + "\",\"timestamp\":" + cast(ai_now, str) + "\}")
+}
+
+fn handle_ai_create_session(Request req) -> Response {
+    let doc, err = parse(req.body)
+    str title = "New Systems Tutor Session"
+    if (err == none) {
+        str t = doc.get("title").as_str()
+        if (t.length() > 0 and t != "null") {
+            title = t
+        }
+    }
+    int now = now_ms()
+    str sid = "chat_" + cast(now, str)
+    ptr db = get_db()
+    str ins = "INSERT INTO chat_sessions (id, user_id, title, created_at) VALUES ('" + sql_escape(sid) + "', 1, '" + sql_escape(title) + "', " + cast(now, str) + ");"
+    db_exec(db, ins)
+    db_close(db)
+    return Response.created("\{\"id\":\"" + json_escape(sid) + "\",\"title\":\"" + json_escape(title) + "\",\"created_at\":" + cast(now, str) + "\}")
+}
+
+fn handle_ai_sessions_list(Request req) -> Response {
+    ptr db = get_db()
+    ptr stmt = db_prepare(db, "SELECT id, title, created_at FROM chat_sessions ORDER BY created_at DESC LIMIT 20")
+    str acc = "["
+    bool first = true
+    while (db_step(stmt) == 100) {
+        str sid = db_column_text(stmt, 0)
+        str stitle = db_column_text(stmt, 1)
+        int screated = db_column_int(stmt, 2)
+        if (not first) {
+            acc = acc + ","
+        }
+        first = false
+        acc = acc + "\{\"id\":\"" + json_escape(sid) + "\",\"title\":\"" + json_escape(stitle) + "\",\"created_at\":" + cast(screated, str) + "\}"
+    }
+    db_finalize(stmt)
+    db_close(db)
+    acc = acc + "]"
+    return Response.ok(acc)
+}
+
+fn handle_ai_session_detail(Request req) -> Response {
+    str sid = req.param("id")
+    if (sid.length() == 0) {
+        return Response.bad_request("Session ID required")
+    }
+
+    ptr db = get_db()
+    ptr stmt = db_prepare(db, "SELECT role, content, timestamp FROM chat_messages WHERE session_id = '" + sql_escape(sid) + "' ORDER BY timestamp ASC")
+    str acc = "["
+    bool first = true
+    while (db_step(stmt) == 100) {
+        str role = db_column_text(stmt, 0)
+        str content = db_column_text(stmt, 1)
+        int ts = db_column_int(stmt, 2)
+        if (not first) {
+            acc = acc + ","
+        }
+        first = false
+        acc = acc + "\{\"role\":\"" + json_escape(role) + "\",\"content\":\"" + json_escape(content) + "\",\"timestamp\":" + cast(ts, str) + "\}"
+    }
+    db_finalize(stmt)
+    db_close(db)
+    acc = acc + "]"
+    return Response.ok(acc)
+}
+
+fn handle_ai_session_delete(Request req) -> Response {
+    str sid = req.param("id")
+    if (sid.length() == 0) {
+        return Response.bad_request("Session ID required")
+    }
+
+    ptr db = get_db()
+    db_exec(db, "DELETE FROM chat_messages WHERE session_id = '" + sql_escape(sid) + "'")
+    db_exec(db, "DELETE FROM chat_sessions WHERE id = '" + sql_escape(sid) + "'")
+    db_close(db)
+
+    return Response.ok("\{\"status\":\"success\",\"message\":\"Chat session deleted\"\}")
+}
+
+fn handle_ai_stress_test(Request req) -> Response {
+    let doc, err = parse(req.body)
+    int count = 100
+    str sid = "capacity_benchmark_stream"
+    if (err == none) {
+        if (doc.get("count").is_null() == false) {
+            count = doc.get("count").as_int()
+        }
+        if (doc.get("session_id").is_null() == false) {
+            sid = doc.get("session_id").as_str()
+        }
+    }
+    if (count <= 0) { count = 50 }
+    if (count > 2000) { count = 2000 }
+
+    int t0 = now_ms()
+    ptr db = get_db()
+    db_exec(db, "BEGIN TRANSACTION;")
+    int i = 0
+    while (i < count) {
+        str chunk = "Stream packet #" + cast(i, str) + " | Telemetry payload: metrics.throughput=" + cast(i * 12, str) + " msg/s | State=ACTIVE"
+        str ins = "INSERT INTO chat_messages (session_id, role, content, timestamp) VALUES ('" + sql_escape(sid) + "', 'stream_telemetry', '" + sql_escape(chunk) + "', " + cast(now_ms(), str) + ");"
+        db_exec(db, ins)
+        i = i + 1
+    }
+    db_exec(db, "COMMIT;")
+    db_close(db)
+    int elapsed = now_ms() - t0
+    if (elapsed == 0) { elapsed = 1 }
+    int rate = (count * 1000) / elapsed
+
+    return Response.ok("\{\"status\":\"success\",\"records_inserted\":" + cast(count, str) + ",\"duration_ms\":" + cast(elapsed, str) + ",\"throughput_msg_per_sec\":" + cast(rate, str) + ",\"session_id\":\"" + json_escape(sid) + "\"\}")
+}
+
+fn handle_ai_stream(Request req) -> Response {
+    let doc, err = parse(req.body)
+    str user_msg = "Hello SNlang"
+    if (err == none) {
+        str m = doc.get("message").as_str()
+        if (m.length() > 0) {
+            user_msg = m
+        }
+    }
+
+    str reply = generate_ai_tutor_reply(user_msg)
+    list<str> words = reply.split(" ")
+    str sse_body = "event: start\ndata: \{\"status\":\"started\",\"model\":\"SNlang-Tutor-LLVM-v2\"\}\n\n"
+
+    int i = 0
+    while (i < words.length()) {
+        str w = words[i]
+        sse_body = sse_body + "event: token\ndata: \{\"index\":" + cast(i, str) + ",\"token\":\"" + json_escape(w) + " \"\}\n\n"
+        i = i + 1
+    }
+    sse_body = sse_body + "event: done\ndata: \{\"total_tokens\":" + cast(words.length(), str) + ",\"completed\":true\}\n\n"
+
+    Response res = Response.make(200, "text/event-stream; charset=utf-8", sse_body)
+    res.headers["Cache-Control"] = "no-cache"
+    res.headers["Connection"] = "keep-alive"
+    return res
+}
+

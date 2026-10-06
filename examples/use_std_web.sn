@@ -1,0 +1,61 @@
+use std.web
+
+fn handle_status(Request req) -> Response {
+    return Response.json("\{\"status\":\"operational\"\}")
+}
+
+fn handle_echo(Request req) -> Response {
+    return Response.json("\{\"echo\":\"" + req.body + "\"\}")
+}
+
+fn main() {
+    App app = App.create()
+    app.enable_cors("*", false)
+    app.get("/api/status", handle_status)
+    app.post("/api/echo", handle_echo)
+
+    // 1. Test GET dispatch
+    str raw_get = "GET /api/status HTTP/1.1\r\nHost: localhost:8080\r\n\r\n"
+    let req1, err1 = parse_request(raw_get)
+    print(err1 == none)
+    Response res1 = app.dispatch(req1)
+    print(res1.status)
+    print(res1.body)
+
+    // 2. Test POST dispatch with body
+    str raw_post = "POST /api/echo HTTP/1.1\r\nHost: localhost:8080\r\nContent-Length: 4\r\n\r\nping"
+    let req2, err2 = parse_request(raw_post)
+    Response res2 = app.dispatch(req2)
+    print(res2.status)
+    print(res2.body)
+
+    // 3. Test OPTIONS preflight
+    str raw_opt = "OPTIONS /api/status HTTP/1.1\r\nHost: localhost:8080\r\n\r\n"
+    let req3, err3 = parse_request(raw_opt)
+    Response res3 = app.dispatch(req3)
+    print(res3.status)
+
+    // 4. Test format_response
+    str formatted = format_response(res1, app.cors_enabled, app.cors_origin, app.cors_credentials, "")
+    print(formatted.contains("HTTP/1.1 200 OK"))
+    print(formatted.contains("Access-Control-Allow-Origin: *"))
+
+    // 5. Test Parameterized Sub-Router (/v1/users/:id)
+    Router sub = Router.create()
+    sub.get("/users/:id", handle_user_id)
+    app.mount("/v1", sub)
+    str raw5 = "GET /v1/users/42 HTTP/1.1\r\nHost: localhost\r\n\r\n"
+    let req5, err5 = parse_request(raw5)
+    Response res5 = app.dispatch(req5)
+    print(res5.status)
+    print(res5.body)
+
+    // 6. Test Redirect
+    Response res6 = Response.redirect("/home", false)
+    print(res6.status)
+    print(res6.headers["Location"])
+}
+
+fn handle_user_id(Request req) -> Response {
+    return Response.ok("\{\"id\":\"" + req.param("id") + "\"\}")
+}
