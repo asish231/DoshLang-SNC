@@ -87,6 +87,7 @@ impl Parser {
             is_abstract: true,
             access: Access::Open,
             name,
+            type_params: Vec::new(),
             params,
             ret,
             body: Vec::new(),
@@ -109,6 +110,14 @@ impl Parser {
         let is_async = self.eat_if(TokenKind::Async);
         self.eat(TokenKind::Fn)?;
         let name = self.expect_ident()?;
+        let mut type_params = Vec::new();
+        if self.eat_if(TokenKind::Lt) {
+            type_params.push(self.parse_type_param()?);
+            while self.eat_if(TokenKind::Comma) {
+                type_params.push(self.parse_type_param()?);
+            }
+            self.eat_gt()?;
+        }
         self.eat(TokenKind::LParen)?;
         let mut params = Vec::new();
         if !self.at(TokenKind::RParen) {
@@ -145,6 +154,7 @@ impl Parser {
             is_abstract,
             access,
             name,
+            type_params,
             params,
             ret,
             body,
@@ -767,6 +777,32 @@ impl Parser {
         }
     }
 
+    fn looks_like_generic_call_at(&self, at: usize) -> bool {
+        let mut i = at + 1; // first token after `<`
+        let mut depth = 1i32;
+        let mut steps = 0usize;
+        loop {
+            steps += 1;
+            if steps > 64 {
+                return false;
+            }
+            match self.peek_n(i) {
+                TokenKind::Lt => depth += 1,
+                TokenKind::Gt => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return matches!(self.peek_n(i + 1), TokenKind::LParen);
+                    }
+                }
+                TokenKind::GtEq | TokenKind::PlusEq | TokenKind::MinusEq
+                | TokenKind::StarEq | TokenKind::SlashEq => return false,
+                TokenKind::LBrace | TokenKind::RBrace | TokenKind::Eof => return false,
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+
     fn looks_like_new_without_keyword(&self) -> bool {
         // Type name (
         if !matches!(
@@ -1331,7 +1367,27 @@ impl Parser {
     fn parse_postfix(&mut self) -> Result<Expr, String> {
         let mut expr = self.parse_primary()?;
         loop {
-            if self.at(TokenKind::LParen) {
+            if self.at(TokenKind::Lt) && self.looks_like_generic_call_at(0) {
+                self.bump();
+                let mut type_args = Vec::new();
+                type_args.push(self.parse_type()?);
+                while self.eat_if(TokenKind::Comma) {
+                    type_args.push(self.parse_type()?);
+                }
+                self.eat_gt()?;
+                self.eat(TokenKind::LParen)?;
+                let args = self.parse_arg_list()?;
+                self.eat(TokenKind::RParen)?;
+                let span = expr.span.merge(self.prev_span());
+                expr = Expr {
+                    kind: ExprKind::Call {
+                        callee: Box::new(expr),
+                        type_args,
+                        args,
+                    },
+                    span,
+                };
+            } else if self.at(TokenKind::LParen) {
                 self.bump();
                 let args = self.parse_arg_list()?;
                 self.eat(TokenKind::RParen)?;
@@ -1339,6 +1395,7 @@ impl Parser {
                 expr = Expr {
                     kind: ExprKind::Call {
                         callee: Box::new(expr),
+                        type_args: Vec::new(),
                         args,
                     },
                     span,

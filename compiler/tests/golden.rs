@@ -805,3 +805,11 @@ fn debug_drives_lldb_with_sn_source_lines() {
     assert!(stdout.contains("sn_fn_main"), "{stdout}");
     assert!(stdout.contains("hello_world.sn:2"), "{stdout}");
 }
+#[test]
+fn generic_fn() {
+    assert_out(
+        "examples/generic_fn.sn",
+        "42\nhello generics\n99\n10\nalpha\n777\n5\n5\n1234\nbeep boop\n",
+    );
+}
+

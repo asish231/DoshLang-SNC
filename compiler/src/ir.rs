@@ -236,6 +236,9 @@ pub fn lower(programs: &[Program], db: &CheckDb, files: &[SourceFile]) -> IrModu
                     }
                 }
                 Item::Fn(f) => {
+                    if !f.type_params.is_empty() {
+                        continue;
+                    }
                     if f.name == "main" {
                         has_main = true;
                         main_ret_void = f.ret.is_none();
@@ -302,6 +305,17 @@ pub fn lower(programs: &[Program], db: &CheckDb, files: &[SourceFile]) -> IrModu
                 &mut dbg,
             ));
         }
+    }
+    for inst in db.instantiated_funcs.values() {
+        functions.push(lower_fn(
+            inst,
+            db,
+            None,
+            &mut strings,
+            &mut extra,
+            files,
+            &mut dbg,
+        ));
     }
     functions.extend(extra);
     let mut globals = Vec::new();
@@ -988,7 +1002,9 @@ impl Cx<'_> {
                         self.line(&format!("call void @sn_record_copy(ptr {mem}, ptr {r}, i64 {sz})"));
                         self.line(&format!("ret ptr {mem}"));
                     } else {
-                        self.line(&format!("ret {} {r}", llty(&t)));
+                        let ret_ty = self.current_fn_ret.clone();
+                        let (r, _) = self.coerce(r, &t, &ret_ty);
+                        self.line(&format!("ret {} {r}", llty(&ret_ty)));
                     }
                 } else {
                     self.emit_defers();
@@ -1290,7 +1306,7 @@ impl Cx<'_> {
                     let v = self.t();
                     self.line(&format!("{v} = load {}, ptr {an}", llty(&t)));
                     let want = self.lookup_ty(e);
-                    if want != t && want != Type::Int {
+                    if want != t && want != Type::Int && (t.is_fixed_int() || t == Type::Int || matches!(t, Type::Optional(_))) {
                         let (v, wt) = self.coerce_narrow(v, &t, &want);
                         (v, wt)
                     } else if matches!((&t, &want), (Type::Optional(_), _)) && t != want {
@@ -1340,7 +1356,7 @@ impl Cx<'_> {
                     }
                 }
             }
-            ExprKind::Call { callee, args } => self.call(callee, args),
+            ExprKind::Call { callee, type_args, args } => self.call(callee, type_args, args, e.span),
             ExprKind::Index { base, index } => {
                 let (b, bt) = self.expr(base);
                 let (i, _) = self.expr(index);
@@ -1911,11 +1927,35 @@ impl Cx<'_> {
         (r, sig.ret.clone())
     }
 
-    fn ident_call(&mut self, n: &str, args: &[Arg]) -> (String, Type) {
+    fn ident_call(&mut self, n: &str, type_args: &[TypeAst], args: &[Arg], span: Span, callee_span: Span) -> (String, Type) {
         let mut vs = Vec::new();
         for a in args {
             match a {
                 Arg::Pos(e) | Arg::Named { value: e, .. } => vs.push(self.expr(e)),
+            }
+        }
+        if let Some(mono) = self.db.resolved_calls.get(&(span.file, span.start, span.end)).cloned()
+            .or_else(|| self.db.resolved_calls.get(&(callee_span.file, callee_span.start, callee_span.end)).cloned())
+        {
+            if let Some(sig) = self.db.funcs.get(&mono).cloned() {
+                return self.call_user_fn(&sig, &vs);
+            }
+        }
+        if let Some(template) = self.db.fn_templates.get(n).cloned() {
+            let mut eff_args = type_args.to_vec();
+            if eff_args.is_empty() {
+                let mut inferred = HashMap::new();
+                let tp_names = template_param_names(&template.type_params);
+                for (p, v) in template.params.iter().zip(vs.iter()) {
+                    infer_type_param(&p.ty, &v.1, &tp_names, &mut inferred);
+                }
+                for tp in &template.type_params {
+                    eff_args.push(inferred.get(&tp.name).cloned().unwrap_or(TypeAst::Int));
+                }
+            }
+            let mono = mono_name(&template.name, &eff_args);
+            if let Some(sig) = self.db.funcs.get(&mono).cloned() {
+                return self.call_user_fn(&sig, &vs);
             }
         }
         // `extern` declarations are dispatched before the builtin names so a
@@ -4002,7 +4042,7 @@ fn walk_expr(e: &Expr, out: &mut Vec<String>) {
         | ExprKind::OptionalChain(expr)
         | ExprKind::ForceUnwrap(expr) => walk_expr(expr, out),
         ExprKind::Lambda { body, .. } => collect_idents(body, out),
-        ExprKind::Call { callee, args } => {
+        ExprKind::Call { callee, args, .. } => {
             walk_expr(callee, out);
             for a in args {
                 match a {

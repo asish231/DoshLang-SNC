@@ -43,7 +43,7 @@ struct Checker<'a> {
     in_static: bool,
 }
 
-fn template_param_names(tp: &[crate::ast::TypeParam]) -> Vec<String> {
+pub fn template_param_names(tp: &[crate::ast::TypeParam]) -> Vec<String> {
     tp.iter().map(|p| p.name.clone()).collect()
 }
 
@@ -129,6 +129,9 @@ pub fn check_programs(programs: &[Program], diag: &mut Diagnostics) -> CheckDb {
         extern_libs: Vec::new(),
         mono_variance: HashMap::new(),
         instantiated: HashMap::new(),
+        fn_templates: HashMap::new(),
+        instantiated_funcs: HashMap::new(),
+        resolved_calls: HashMap::new(),
     };
     collect(&mut db, programs, diag);
     check_contracts(&mut db, diag);
@@ -169,7 +172,11 @@ pub fn check_programs(programs: &[Program], diag: &mut Diagnostics) -> CheckDb {
                         c.db.funcs.insert(f.name.clone(), sig);
                     }
                 }
-                Item::Fn(f) => c.check_fn(f),
+                Item::Fn(f) => {
+                    if f.type_params.is_empty() {
+                        c.check_fn(f);
+                    }
+                }
                 Item::Blueprint(b) => {
                     if !b.type_params.is_empty() {
                         continue;
@@ -262,7 +269,7 @@ fn extension_key(ty: &TypeAst) -> String {
     }
 }
 
-fn mono_name(base: &str, args: &[TypeAst]) -> String {
+pub fn mono_name(base: &str, args: &[TypeAst]) -> String {
     if args.is_empty() {
         return base.to_string();
     }
@@ -270,19 +277,31 @@ fn mono_name(base: &str, args: &[TypeAst]) -> String {
     format!("{}_{}", base, parts.join("_"))
 }
 
-fn type_ast_label(t: &TypeAst) -> String {
+pub fn type_ast_label(t: &TypeAst) -> String {
     match t {
         TypeAst::Int => "int".into(),
+        TypeAst::I8 => "i8".into(),
+        TypeAst::I16 => "i16".into(),
+        TypeAst::I32 => "i32".into(),
+        TypeAst::U8 => "u8".into(),
+        TypeAst::U16 => "u16".into(),
+        TypeAst::U32 => "u32".into(),
+        TypeAst::U64 => "u64".into(),
+        TypeAst::Float => "float".into(),
         TypeAst::Str => "str".into(),
         TypeAst::Bool => "bool".into(),
         TypeAst::Byte => "byte".into(),
         TypeAst::Named(n) => n.clone(),
         TypeAst::List(i) => format!("list_{}", type_ast_label(i)),
+        TypeAst::Generic(n, args) => {
+            let parts: Vec<String> = args.iter().map(type_ast_label).collect();
+            format!("{}_{}", n, parts.join("_"))
+        }
         _ => "T".into(),
     }
 }
 
-fn substitute_type(t: &TypeAst, params: &[String], args: &[TypeAst]) -> TypeAst {
+pub fn substitute_type(t: &TypeAst, params: &[String], args: &[TypeAst]) -> TypeAst {
     if let TypeAst::Named(n) = t {
         if let Some(i) = params.iter().position(|p| p == n) {
             return args.get(i).cloned().unwrap_or(TypeAst::Int);
@@ -292,11 +311,256 @@ fn substitute_type(t: &TypeAst, params: &[String], args: &[TypeAst]) -> TypeAst 
         TypeAst::List(i) => TypeAst::List(Box::new(substitute_type(i, params, args))),
         TypeAst::Optional(i) => TypeAst::Optional(Box::new(substitute_type(i, params, args))),
         TypeAst::Ref(i) => TypeAst::Ref(Box::new(substitute_type(i, params, args))),
+        TypeAst::Mut(i) => TypeAst::Mut(Box::new(substitute_type(i, params, args))),
+        TypeAst::Chan(i) => TypeAst::Chan(Box::new(substitute_type(i, params, args))),
         TypeAst::Map(k, v) => TypeAst::Map(
             Box::new(substitute_type(k, params, args)),
             Box::new(substitute_type(v, params, args)),
         ),
+        TypeAst::Tuple(parts) => TypeAst::Tuple(
+            parts.iter().map(|p| substitute_type(p, params, args)).collect(),
+        ),
+        TypeAst::Generic(name, g_args) => TypeAst::Generic(
+            name.clone(),
+            g_args.iter().map(|a| substitute_type(a, params, args)).collect(),
+        ),
         _ => t.clone(),
+    }
+}
+
+pub fn infer_type_param(
+    param_ast: &TypeAst,
+    arg_type: &Type,
+    type_param_names: &[String],
+    inferred: &mut HashMap<String, TypeAst>,
+) {
+    match (param_ast, arg_type) {
+        (TypeAst::Named(name), ty) if type_param_names.contains(name) => {
+            inferred.entry(name.clone()).or_insert_with(|| ty.to_type_ast());
+        }
+        (TypeAst::List(p_inner), Type::List(a_inner)) => {
+            infer_type_param(p_inner, a_inner, type_param_names, inferred);
+        }
+        (TypeAst::Map(pk, pv), Type::Map(ak, av)) => {
+            infer_type_param(pk, ak, type_param_names, inferred);
+            infer_type_param(pv, av, type_param_names, inferred);
+        }
+        (TypeAst::Optional(p_inner), Type::Optional(a_inner)) => {
+            infer_type_param(p_inner, a_inner, type_param_names, inferred);
+        }
+        (TypeAst::Ref(p_inner), Type::Ref(a_inner)) => {
+            infer_type_param(p_inner, a_inner, type_param_names, inferred);
+        }
+        (TypeAst::Mut(p_inner), Type::Mut(a_inner)) => {
+            infer_type_param(p_inner, a_inner, type_param_names, inferred);
+        }
+        (TypeAst::Chan(p_inner), Type::Chan(a_inner)) => {
+            infer_type_param(p_inner, a_inner, type_param_names, inferred);
+        }
+        (TypeAst::Tuple(p_parts), Type::Tuple(a_parts)) => {
+            for (p, a) in p_parts.iter().zip(a_parts.iter()) {
+                infer_type_param(p, a, type_param_names, inferred);
+            }
+        }
+        _ => {}
+    }
+}
+
+pub fn substitute_stmts(stmts: &mut [Stmt], params: &[String], args: &[TypeAst]) {
+    for s in stmts {
+        substitute_stmt(s, params, args);
+    }
+}
+
+pub fn substitute_stmt(s: &mut Stmt, params: &[String], args: &[TypeAst]) {
+    match s {
+        Stmt::Expr(e) => substitute_expr(e, params, args),
+        Stmt::Decl { ty, value, .. } => {
+            if let Some(t) = ty {
+                *t = substitute_type(t, params, args);
+            }
+            if let Some(v) = value {
+                substitute_expr(v, params, args);
+            }
+        }
+        Stmt::Assign { target, value, .. } => {
+            substitute_expr(target, params, args);
+            substitute_expr(value, params, args);
+        }
+        Stmt::If { cond, then_body, else_ifs, else_body, .. } => {
+            substitute_expr(cond, params, args);
+            substitute_stmts(then_body, params, args);
+            for (c, b) in else_ifs {
+                substitute_expr(c, params, args);
+                substitute_stmts(b, params, args);
+            }
+            if let Some(eb) = else_body {
+                substitute_stmts(eb, params, args);
+            }
+        }
+        Stmt::While { cond, body, .. } => {
+            substitute_expr(cond, params, args);
+            substitute_stmts(body, params, args);
+        }
+        Stmt::ForCount { init, cond, step, body, .. } => {
+            substitute_stmt(init, params, args);
+            substitute_expr(cond, params, args);
+            substitute_stmt(step, params, args);
+            substitute_stmts(body, params, args);
+        }
+        Stmt::ForIn { iter, body, .. } => {
+            substitute_expr(iter, params, args);
+            substitute_stmts(body, params, args);
+        }
+        Stmt::Match { expr, arms, default, .. } => {
+            substitute_expr(expr, params, args);
+            for (p, b) in arms {
+                substitute_expr(p, params, args);
+                substitute_stmts(b, params, args);
+            }
+            if let Some(d) = default {
+                substitute_stmts(d, params, args);
+            }
+        }
+        Stmt::Return { value, .. } => {
+            if let Some(v) = value {
+                substitute_expr(v, params, args);
+            }
+        }
+        Stmt::SpawnBlock { body, .. }
+        | Stmt::GoroutineBlock { body, .. }
+        | Stmt::LockBlock { body, .. }
+        | Stmt::Defer { body, .. } => {
+            substitute_stmts(body, params, args);
+        }
+        Stmt::SpawnExpr { expr, .. } => {
+            substitute_expr(expr, params, args);
+        }
+        Stmt::New { ty, type_args, args: new_args, .. } => {
+            if let Some(i) = params.iter().position(|p| p == ty) {
+                if let Some(replacement) = args.get(i) {
+                    *ty = type_ast_label(replacement);
+                }
+            }
+            for a in type_args {
+                *a = substitute_type(a, params, args);
+            }
+            for a in new_args {
+                match a {
+                    Arg::Pos(e) | Arg::Named { value: e, .. } => substitute_expr(e, params, args),
+                }
+            }
+        }
+        Stmt::NestedFn(f) => {
+            for p in &mut f.params {
+                p.ty = substitute_type(&p.ty, params, args);
+            }
+            if let Some(r) = &mut f.ret {
+                *r = substitute_type(r, params, args);
+            }
+            substitute_stmts(&mut f.body, params, args);
+        }
+        _ => {}
+    }
+}
+
+pub fn substitute_expr(e: &mut Expr, params: &[String], args: &[TypeAst]) {
+    match &mut e.kind {
+        ExprKind::Binary { lhs, rhs, .. } => {
+            substitute_expr(lhs, params, args);
+            substitute_expr(rhs, params, args);
+        }
+        ExprKind::Unary { expr, .. }
+        | ExprKind::Await(expr)
+        | ExprKind::Try(expr)
+        | ExprKind::OptionalChain(expr)
+        | ExprKind::ForceUnwrap(expr) => {
+            substitute_expr(expr, params, args);
+        }
+        ExprKind::Call { callee, type_args, args: call_args } => {
+            substitute_expr(callee, params, args);
+            for a in type_args {
+                *a = substitute_type(a, params, args);
+            }
+            for a in call_args {
+                match a {
+                    Arg::Pos(e) | Arg::Named { value: e, .. } => substitute_expr(e, params, args),
+                }
+            }
+        }
+        ExprKind::Index { base, index } => {
+            substitute_expr(base, params, args);
+            substitute_expr(index, params, args);
+        }
+        ExprKind::Member { base, .. } => {
+            substitute_expr(base, params, args);
+        }
+        ExprKind::List(items) | ExprKind::Tuple(items) => {
+            for item in items {
+                substitute_expr(item, params, args);
+            }
+        }
+        ExprKind::Map(entries) => {
+            for (k, v) in entries {
+                substitute_expr(k, params, args);
+                substitute_expr(v, params, args);
+            }
+        }
+        ExprKind::Cast { expr, ty } => {
+            substitute_expr(expr, params, args);
+            *ty = substitute_type(ty, params, args);
+        }
+        ExprKind::SuperCall { args: sc_args, .. } => {
+            for a in sc_args {
+                match a {
+                    Arg::Pos(e) | Arg::Named { value: e, .. } => substitute_expr(e, params, args),
+                }
+            }
+        }
+        ExprKind::Interpolate { parts } => {
+            for p in parts {
+                if let InterpPart::Expr(ex) = p {
+                    substitute_expr(ex, params, args);
+                }
+            }
+        }
+        ExprKind::Lambda { params: l_params, ret, body } => {
+            for p in l_params {
+                p.ty = substitute_type(&p.ty, params, args);
+            }
+            if let Some(r) = ret {
+                *r = substitute_type(r, params, args);
+            }
+            substitute_stmts(body, params, args);
+        }
+        _ => {}
+    }
+}
+
+fn check_type_arg_bounds_fn(
+    db: &CheckDb,
+    template: &FnItem,
+    args: &[TypeAst],
+    span: Span,
+    diag: &mut Diagnostics,
+) {
+    for (i, tp) in template.type_params.iter().enumerate() {
+        let Some(bound) = &tp.bound else { continue };
+        let Some(arg) = args.get(i) else { continue };
+        let aty = resolve_type_ast(arg, db);
+        if matches!(aty, Type::Any) {
+            continue;
+        }
+        if !satisfies_bound(db, &aty, bound) {
+            diag.error(
+                span,
+                format!(
+                    "type argument '{}' does not satisfy bound '{bound}' on '{}'",
+                    type_ast_label(arg),
+                    tp.name
+                ),
+            );
+        }
     }
 }
 
@@ -662,8 +926,12 @@ fn collect(db: &mut CheckDb, programs: &[Program], diag: &mut Diagnostics) {
         for item in &p.items {
             match item {
                 Item::Fn(f) => {
-                    let sig = fn_sig(f, None, db);
-                    db.funcs.insert(f.name.clone(), sig);
+                    if !f.type_params.is_empty() {
+                        db.fn_templates.insert(f.name.clone(), f.clone());
+                    } else {
+                        let sig = fn_sig(f, None, db);
+                        db.funcs.insert(f.name.clone(), sig);
+                    }
                 }
                 Item::Blueprint(b) if b.type_params.is_empty() => {
                     for m in &b.methods {
@@ -900,6 +1168,44 @@ impl Checker<'_> {
         ty
     }
 
+    fn instantiate_fn(&mut self, template: &FnItem, args: &[TypeAst], _span: Span) -> String {
+        let mono = mono_name(&template.name, args);
+        if self.db.funcs.contains_key(&mono) {
+            return mono;
+        }
+        let mut inst = template.clone();
+        inst.name = mono.clone();
+        inst.type_params.clear();
+        let param_names = template_param_names(&template.type_params);
+        for p in &mut inst.params {
+            p.ty = substitute_type(&p.ty, &param_names, args);
+        }
+        if let Some(r) = &mut inst.ret {
+            *r = substitute_type(r, &param_names, args);
+        }
+        substitute_stmts(&mut inst.body, &param_names, args);
+
+        let sig = fn_sig(&inst, None, self.db);
+        self.db.funcs.insert(mono.clone(), sig);
+        self.db.instantiated_funcs.insert(mono.clone(), inst.clone());
+
+        let prev_bp = self.current_bp.take();
+        let prev_bp_hierarchy = std::mem::take(&mut self.current_bp_hierarchy);
+        let prev_ret = self.current_fn_ret.clone();
+        let prev_in_async = self.in_async;
+        let prev_in_static = self.in_static;
+
+        self.check_fn(&inst);
+
+        self.current_bp = prev_bp;
+        self.current_bp_hierarchy = prev_bp_hierarchy;
+        self.current_fn_ret = prev_ret;
+        self.in_async = prev_in_async;
+        self.in_static = prev_in_static;
+
+        mono
+    }
+
     fn check_fn(&mut self, f: &FnItem) {
         let prev_static = self.in_static;
         self.in_static = f.is_static;
@@ -1002,7 +1308,7 @@ impl Checker<'_> {
                         if let Some(val) = value {
                             match &val.kind {
                                 // ref<T> r = address(x)  /  mut<T> m = address(x)
-                                ExprKind::Call { callee, args } => {
+                                ExprKind::Call { callee, args, .. } => {
                                     let is_address = matches!(&callee.kind,
                                         ExprKind::Ident(f) if f == "address" || f == "as_ptr");
                                     if is_address {
@@ -1606,7 +1912,7 @@ impl Checker<'_> {
                     }
                 }
             }
-            ExprKind::Call { callee, args } => self.check_call(callee, args, e.span),
+            ExprKind::Call { callee, type_args, args } => self.check_call(callee, type_args, args, e.span),
             ExprKind::Index { base, index } => {
                 let bt = self.check_expr(base);
                 let it = self.check_expr(index);
@@ -1964,7 +2270,7 @@ impl Checker<'_> {
         }
     }
 
-    fn check_call(&mut self, callee: &Expr, args: &[Arg], span: Span) -> Type {
+    fn check_call(&mut self, callee: &Expr, type_args: &[TypeAst], args: &[Arg], span: Span) -> Type {
         if let ExprKind::Member { base, name } = &callee.kind {
             // Static call: BlueprintName.static_method(...)
             if let ExprKind::Ident(bpname) = &base.kind {
@@ -2005,6 +2311,57 @@ impl Checker<'_> {
             return t;
         }
         if let ExprKind::Ident(n) = &callee.kind {
+            if let Some(template) = self.db.fn_templates.get(n).cloned() {
+                let mut effective_args = type_args.to_vec();
+                if effective_args.is_empty() {
+                    let type_param_names = template_param_names(&template.type_params);
+                    let mut inferred: HashMap<String, TypeAst> = HashMap::new();
+                    for (i, p) in template.params.iter().enumerate() {
+                        if let Some(arg) = args.get(i) {
+                            let arg_expr = match arg {
+                                Arg::Pos(e) | Arg::Named { value: e, .. } => e,
+                            };
+                            let aty = self.check_expr(arg_expr);
+                            infer_type_param(&p.ty, &aty, &type_param_names, &mut inferred);
+                        }
+                    }
+                    for tp in &template.type_params {
+                        if let Some(t) = inferred.get(&tp.name) {
+                            effective_args.push(t.clone());
+                        } else {
+                            self.diag.error(
+                                span,
+                                format!("could not infer type argument for '{}' on '{}'", tp.name, n),
+                            );
+                            effective_args.push(TypeAst::Int);
+                        }
+                    }
+                } else if effective_args.len() != template.type_params.len() {
+                    self.diag.error(
+                        span,
+                        format!(
+                            "generic function '{n}' expects {} type arguments, got {}",
+                            template.type_params.len(),
+                            effective_args.len()
+                        ),
+                    );
+                }
+                check_type_arg_bounds_fn(self.db, &template, &effective_args, span, self.diag);
+                let mono = self.instantiate_fn(&template, &effective_args, span);
+                self.db.resolved_calls.insert((span.file, span.start, span.end), mono.clone());
+                self.db.resolved_calls.insert((callee.span.file, callee.span.start, callee.span.end), mono.clone());
+                for a in args {
+                    match a {
+                        Arg::Pos(e) | Arg::Named { value: e, .. } => {
+                            self.check_expr(e);
+                        }
+                    }
+                }
+                if let Some(sig) = self.db.funcs.get(&mono).cloned() {
+                    self.check_arity(&sig, args, span);
+                    return sig.ret;
+                }
+            }
             for a in args {
                 match a {
                     Arg::Pos(e) | Arg::Named { value: e, .. } => {

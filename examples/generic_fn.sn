@@ -1,0 +1,78 @@
+contract Greeter {
+    fn greet() -> str
+}
+
+blueprint Bot follows Greeter {
+    fn greet() -> str {
+        return "beep boop"
+    }
+}
+
+fn identity<T>(T val) -> T {
+    return val
+}
+
+fn first<T>(list<T> items) -> T {
+    return items[0]
+}
+
+fn pair_first<A, B>(A a, B b) -> A {
+    return a
+}
+
+fn duplicate<T>(T item) -> list<T> {
+    list<T> res = [item, item]
+    return res
+}
+
+fn repeat_id<T>(T val, int n) -> T {
+    if (n <= 0) {
+        return val
+    }
+    return repeat_id(val, n - 1)
+}
+
+fn do_greet<T: Greeter>(T g) -> str {
+    return g.greet()
+}
+
+fn main() -> int {
+    // 1. Inferred identity with int
+    let num = identity(42)
+    print(num)
+
+    // 2. Inferred identity with str
+    let text = identity("hello generics")
+    print(text)
+
+    // 3. Explicit type parameter call
+    let explicit_num = identity<int>(99)
+    print(explicit_num)
+
+    // 4. List element generic extraction
+    let f1 = first([10, 20, 30])
+    print(f1)
+
+    let f2 = first(["alpha", "beta", "gamma"])
+    print(f2)
+
+    // 5. Multiple type parameters
+    let pf = pair_first(777, "ignored")
+    print(pf)
+
+    // 6. Generic list construction
+    let dups = duplicate(5)
+    print(dups[0])
+    print(dups[1])
+
+    // 7. Recursive generic function
+    let rep = repeat_id(1234, 3)
+    print(rep)
+
+    // 8. Bounded generic function
+    new Bot bot()
+    let g = do_greet(bot)
+    print(g)
+
+    return 0
+}

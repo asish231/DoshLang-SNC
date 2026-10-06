@@ -98,6 +98,41 @@ impl Type {
         }
     }
 
+    pub fn to_type_ast(&self) -> TypeAst {
+        match self {
+            Type::Int => TypeAst::Int,
+            Type::I8 => TypeAst::I8,
+            Type::I16 => TypeAst::I16,
+            Type::I32 => TypeAst::I32,
+            Type::U8 => TypeAst::U8,
+            Type::U16 => TypeAst::U16,
+            Type::U32 => TypeAst::U32,
+            Type::U64 => TypeAst::U64,
+            Type::Float => TypeAst::Float,
+            Type::Bool => TypeAst::Bool,
+            Type::Byte => TypeAst::Byte,
+            Type::Str => TypeAst::Str,
+            Type::Error => TypeAst::Error,
+            Type::Dec(scale) => TypeAst::Dec(*scale),
+            Type::Void => TypeAst::Named("void".into()),
+            Type::None => TypeAst::Named("none".into()),
+            Type::List(inner) => TypeAst::List(Box::new(inner.to_type_ast())),
+            Type::Map(k, v) => TypeAst::Map(Box::new(k.to_type_ast()), Box::new(v.to_type_ast())),
+            Type::Chan(inner) => TypeAst::Chan(Box::new(inner.to_type_ast())),
+            Type::Ref(inner) => TypeAst::Ref(Box::new(inner.to_type_ast())),
+            Type::Mut(inner) => TypeAst::Mut(Box::new(inner.to_type_ast())),
+            Type::Ptr => TypeAst::Ptr,
+            Type::Optional(inner) => TypeAst::Optional(Box::new(inner.to_type_ast())),
+            Type::Tuple(ts) => TypeAst::Tuple(ts.iter().map(|t| t.to_type_ast()).collect()),
+            Type::Blueprint(name) => TypeAst::Named(name.clone()),
+            Type::Record(name) => TypeAst::Named(name.clone()),
+            Type::Enum(name) => TypeAst::Named(name.clone()),
+            Type::Contract(name) => TypeAst::Named(name.clone()),
+            Type::Named(name) => TypeAst::Named(name.clone()),
+            _ => TypeAst::Any,
+        }
+    }
+
     pub fn assignable_from(&self, other: &Type, bps: &std::collections::HashMap<String, BlueprintInfo>) -> bool {
         if self == other {
             return true;
