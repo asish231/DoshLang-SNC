@@ -1,7 +1,7 @@
 # SNlang (`snc`)
 
 <p align="center">
-  <img src="logo.png" alt="SNlang" width="96" height="96"/>
+  <img src="logo.png" alt="SNlang Logo" width="160"/>
 </p>
 
 
