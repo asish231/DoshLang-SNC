@@ -821,3 +821,20 @@ fn generic_fn() {
     );
 }
 
+
+#[test]
+fn algebraic_enums() {
+    assert_out(
+        "examples/algebraic_enums.sn",
+        "foo_var\n42\nEOF\nmatched foo_var\nmatched EOF\n",
+    );
+}
+
+#[test]
+fn stress_algebraic_enums() {
+    assert_out(
+        "examples/stress_algebraic_enums.sn",
+        "100\n42\n42\n0\nn2 equals eq_test1\nn2 not equals eq_test2\nn4 is Empty\n",
+    );
+}
+

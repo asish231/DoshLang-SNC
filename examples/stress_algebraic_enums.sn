@@ -1,0 +1,53 @@
+enum AstNode {
+    Const(int val),
+    BinOp(str op, int left, int right),
+    Empty
+}
+
+fn eval_node(AstNode node) -> int {
+    match (node) {
+        AstNode.Const(v) {
+            return v
+        }
+        AstNode.BinOp(op, l, r) {
+            if (op == "+") {
+                return l + r
+            }
+            if (op == "*") {
+                return l * r
+            }
+            return 0
+        }
+        AstNode.Empty {
+            return 0
+        }
+        default {
+            return -1
+        }
+    }
+}
+
+fn main() {
+    let n1 = AstNode.Const(100)
+    let n2 = AstNode.BinOp("+", 40, 2)
+    let n3 = AstNode.BinOp("*", 6, 7)
+    let n4 = AstNode.Empty
+
+    print(eval_node(n1))
+    print(eval_node(n2))
+    print(eval_node(n3))
+    print(eval_node(n4))
+
+    let eq_test1 = AstNode.BinOp("+", 40, 2)
+    let eq_test2 = AstNode.BinOp("+", 40, 3)
+
+    if (n2 == eq_test1) {
+        print("n2 equals eq_test1")
+    }
+    if (n2 != eq_test2) {
+        print("n2 not equals eq_test2")
+    }
+    if (n4 == AstNode.Empty) {
+        print("n4 is Empty")
+    }
+}

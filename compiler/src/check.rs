@@ -4,12 +4,19 @@ use crate::span::Span;
 use crate::types::*;
 use std::collections::HashMap;
 
+#[derive(Clone, Debug)]
+pub struct EnumVariantInfo {
+    pub name: String,
+    pub fields: Vec<(String, Type)>,
+}
+
 pub struct CheckDb {
     pub funcs: HashMap<String, FuncSig>,
     pub blueprints: HashMap<String, BlueprintInfo>,
     pub blueprint_templates: HashMap<String, BlueprintItem>,
     pub records: HashMap<String, RecordInfo>,
     pub enums: HashMap<String, Vec<String>>,
+    pub enum_variants: HashMap<String, Vec<EnumVariantInfo>>,
     pub extensions: HashMap<String, Vec<String>>,
     pub contracts: HashMap<String, ContractInfo>,
     pub expr_ty: HashMap<(u32, u32, u32), Type>,
@@ -22,6 +29,17 @@ pub struct CheckDb {
     /// keyed by monomorphic name (e.g. "Box_Dog").
     pub mono_variance: HashMap<String, Vec<(String, crate::ast::Variance)>>,
     pub instantiated: HashMap<String, BlueprintItem>,
+    pub fn_templates: HashMap<String, FnItem>,
+    pub instantiated_funcs: HashMap<String, FnItem>,
+    pub resolved_calls: HashMap<(u32, u32, u32), String>,
+}
+
+impl CheckDb {
+    pub fn is_algebraic_enum(&self, name: &str) -> bool {
+        self.enum_variants.get(name).map_or(false, |vars| {
+            vars.iter().any(|v| !v.fields.is_empty())
+        })
+    }
 }
 
 struct Checker<'a> {
@@ -120,6 +138,7 @@ pub fn check_programs(programs: &[Program], diag: &mut Diagnostics) -> CheckDb {
         blueprint_templates: HashMap::new(),
         records: HashMap::new(),
         enums: HashMap::new(),
+        enum_variants: HashMap::new(),
         extensions: HashMap::new(),
         contracts: HashMap::new(),
         expr_ty: HashMap::new(),
@@ -806,12 +825,14 @@ fn collect(db: &mut CheckDb, programs: &[Program], diag: &mut Diagnostics) {
                     diag.error(e.span, format!("duplicate enum '{}'", e.name));
                 }
                 let mut seen = std::collections::HashSet::new();
+                let mut v_names = Vec::new();
                 for v in &e.variants {
-                    if !seen.insert(v) {
-                        diag.error(e.span, format!("duplicate variant '{v}' in enum '{}'", e.name));
+                    if !seen.insert(&v.name) {
+                        diag.error(v.span, format!("duplicate variant '{}' in enum '{}'", v.name, e.name));
                     }
+                    v_names.push(v.name.clone());
                 }
-                db.enums.insert(e.name.clone(), e.variants.clone());
+                db.enums.insert(e.name.clone(), v_names);
             }
         }
     }
@@ -899,6 +920,25 @@ fn collect(db: &mut CheckDb, programs: &[Program], diag: &mut Diagnostics) {
         for item in &p.items {
             if let Item::Record(r) = item {
                 layout_record(db, r, diag);
+            }
+        }
+    }
+    for p in programs {
+        for item in &p.items {
+            if let Item::Enum(e) = item {
+                let mut v_infos = Vec::new();
+                for v in &e.variants {
+                    let mut f_infos = Vec::new();
+                    for f in &v.fields {
+                        let ty = resolve_type_ast(&f.ty, db);
+                        f_infos.push((f.name.clone(), ty));
+                    }
+                    v_infos.push(EnumVariantInfo {
+                        name: v.name.clone(),
+                        fields: f_infos,
+                    });
+                }
+                db.enum_variants.insert(e.name.clone(), v_infos);
             }
         }
     }
@@ -1551,6 +1591,78 @@ impl Checker<'_> {
                 let mut has_none = false;
                 let mut has_other = false;
                 for (pat, body) in arms {
+                    if let Type::Enum(en) = &et {
+                        if self.db.is_algebraic_enum(en) {
+                            has_other = true;
+                            self.push();
+                            match &pat.kind {
+                                ExprKind::Call { callee, args, .. } => {
+                                    if let ExprKind::Member { base, name } = &callee.kind {
+                                        if let ExprKind::Ident(ref pen) = &base.kind {
+                                            if pen == en {
+                                                if let Some(v_info) = self.db.enum_variants.get(en).and_then(|vs| vs.iter().find(|v| &v.name == name)).cloned() {
+                                                    if v_info.fields.len() != args.len() {
+                                                        self.diag.error(
+                                                            pat.span,
+                                                            format!(
+                                                                "pattern '{en}.{name}' expects {} arguments, got {}",
+                                                                v_info.fields.len(),
+                                                                args.len()
+                                                            ),
+                                                        );
+                                                    } else {
+                                                        for (i, a) in args.iter().enumerate() {
+                                                            let arg_e = match a {
+                                                                Arg::Pos(e) | Arg::Named { value: e, .. } => e,
+                                                            };
+                                                            if let ExprKind::Ident(var_name) = &arg_e.kind {
+                                                                if var_name != "_" {
+                                                                    self.scopes.last_mut().unwrap().insert(
+                                                                        var_name.clone(),
+                                                                        (v_info.fields[i].1.clone(), false),
+                                                                    );
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                } else {
+                                                    self.diag.error(pat.span, format!("unknown variant '{name}' for enum '{en}'"));
+                                                }
+                                            } else {
+                                                self.diag.error(pat.span, format!("expected variant of '{en}', got '{pen}'"));
+                                            }
+                                        }
+                                    }
+                                }
+                                ExprKind::Member { base, name } => {
+                                    if let ExprKind::Ident(ref pen) = &base.kind {
+                                        if pen == en {
+                                            if let Some(v_info) = self.db.enum_variants.get(en).and_then(|vs| vs.iter().find(|v| &v.name == name)) {
+                                                if !v_info.fields.is_empty() {
+                                                    self.diag.error(
+                                                        pat.span,
+                                                        format!("variant '{en}.{name}' has fields, pattern must bind them"),
+                                                    );
+                                                }
+                                            } else {
+                                                self.diag.error(pat.span, format!("unknown variant '{name}' for enum '{en}'"));
+                                            }
+                                        } else {
+                                            self.diag.error(pat.span, format!("expected variant of '{en}', got '{pen}'"));
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    self.diag.error(pat.span, format!("invalid pattern for enum '{en}'"));
+                                }
+                            }
+                            for s in body {
+                                self.check_stmt(s);
+                            }
+                            self.pop();
+                            continue;
+                        }
+                    }
                     let pt = self.check_expr(pat);
                     if matches!(pat.kind, ExprKind::None) {
                         has_none = true;
@@ -2295,6 +2407,42 @@ impl Checker<'_> {
                     self.check_arity(&sig, args, span);
                     return sig.ret;
                 }
+                if self.lookup(bpname).is_none() && self.db.enums.contains_key(bpname) {
+                    if let Some(variant_infos) = self.db.enum_variants.get(bpname).cloned() {
+                        if let Some(var) = variant_infos.iter().find(|v| &v.name == name) {
+                            if var.fields.len() != args.len() {
+                                self.diag.error(
+                                    span,
+                                    format!(
+                                        "enum variant '{bpname}.{name}' expects {} arguments, got {}",
+                                        var.fields.len(),
+                                        args.len()
+                                    ),
+                                );
+                            } else {
+                                for (i, a) in args.iter().enumerate() {
+                                    let arg_expr = match a {
+                                        Arg::Pos(e) | Arg::Named { value: e, .. } => e,
+                                    };
+                                    let at = self.check_expr(arg_expr);
+                                    let expected_ty = &var.fields[i].1;
+                                    if !expected_ty.assignable_from(&at, &self.db.blueprints) && expected_ty != &at {
+                                        self.diag.error(
+                                            arg_expr.span,
+                                            format!(
+                                                "argument {} for '{bpname}.{name}' expected {}, got {}",
+                                                i + 1,
+                                                expected_ty,
+                                                at
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
+                            return Type::Enum(bpname.clone());
+                        }
+                    }
+                }
             }
             let bt = self.check_expr(base);
             for a in args {
@@ -2787,6 +2935,11 @@ impl Checker<'_> {
         if let ExprKind::Ident(en) = &base.kind {
             if let Some(vars) = self.db.enums.get(en).cloned() {
                 if vars.iter().any(|v| v == name) {
+                    if let Some(v_info) = self.db.enum_variants.get(en).and_then(|vs| vs.iter().find(|v| &v.name == name)) {
+                        if !v_info.fields.is_empty() {
+                            self.diag.error(span, format!("variant '{en}.{name}' requires arguments"));
+                        }
+                    }
                     return Type::Enum(en.clone());
                 }
                 self.diag.error(span, format!("unknown variant '{name}' for enum '{en}'"));

@@ -716,6 +716,34 @@ int64_t sn_str_eq(void *a, void *b) {
     return memcmp(sn_str_cstr(a), sn_str_cstr(b), (size_t)la) == 0;
 }
 
+int64_t sn_enum_eq(void *a, void *b) {
+    if (a == b) return 1;
+    if (!a || !b) return 0;
+    int64_t *sa = (int64_t *)a;
+    int64_t *sb = (int64_t *)b;
+    if (sa[2] != sb[2]) return 0;
+    int idx_a = gc_index_of(a);
+    int idx_b = gc_index_of(b);
+    if (idx_a < 0 || idx_b < 0) return 0;
+    if (g_gc_objs[idx_a].size != g_gc_objs[idx_b].size) return 0;
+    int64_t nslots = g_gc_objs[idx_a].size / 8;
+    for (int64_t i = 3; i < nslots; i++) {
+        if (sa[i] != sb[i]) {
+            int ia = gc_index_of((void *)(intptr_t)sa[i]);
+            int ib = gc_index_of((void *)(intptr_t)sb[i]);
+            if (ia >= 0 && ib >= 0) {
+                int64_t *ha = (int64_t *)(intptr_t)sa[i];
+                int64_t *hb = (int64_t *)(intptr_t)sb[i];
+                if (ha[1] == KIND_STR && hb[1] == KIND_STR) {
+                    if (sn_str_eq((void *)ha, (void *)hb)) continue;
+                }
+            }
+            return 0;
+        }
+    }
+    return 1;
+}
+
 void *sn_str_slice(void *p, int64_t start, int64_t end) {
     int64_t n = sn_str_len(p);
     if (start < 0) start = 0;

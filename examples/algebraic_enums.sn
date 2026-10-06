@@ -1,0 +1,39 @@
+enum Token {
+    Ident(str name),
+    Number(int val),
+    Eof
+}
+
+fn describe(Token tok) {
+    match (tok) {
+        Token.Ident(name) {
+            print(name)
+        }
+        Token.Number(val) {
+            print(val)
+        }
+        Token.Eof {
+            print("EOF")
+        }
+    }
+}
+
+fn main() {
+    let t1 = Token.Ident("foo_var")
+    let t2 = Token.Number(42)
+    let t3 = Token.Eof
+
+    describe(t1)
+    describe(t2)
+    describe(t3)
+
+    if (t1 == Token.Ident("foo_var")) {
+        print("matched foo_var")
+    }
+    if (t1 == Token.Ident("bar_var")) {
+        print("should not match bar_var")
+    }
+    if (t3 == Token.Eof) {
+        print("matched EOF")
+    }
+}

@@ -1,9 +1,22 @@
 use crate::ast::*;
-use crate::check::CheckDb;
-use crate::check::resolve_type_ast;
-use crate::span::SourceFile;
+use crate::check::{CheckDb, resolve_type_ast, mono_name, template_param_names, infer_type_param};
+use crate::span::{SourceFile, Span};
 use crate::types::*;
 use std::collections::HashMap;
+
+thread_local! {
+    static ALGEBRAIC_ENUMS: std::cell::RefCell<std::collections::HashSet<String>> = std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+fn set_algebraic_enums(set: std::collections::HashSet<String>) {
+    ALGEBRAIC_ENUMS.with(|cell| {
+        *cell.borrow_mut() = set;
+    });
+}
+
+fn is_algebraic_enum_type(name: &str) -> bool {
+    ALGEBRAIC_ENUMS.with(|cell| cell.borrow().contains(name))
+}
 
 pub struct IrModule {
     pub strings: Vec<String>,
@@ -206,6 +219,13 @@ pub fn cov_collect(on: bool) -> Vec<(u32, u32)> {
 }
 
 pub fn lower(programs: &[Program], db: &CheckDb, files: &[SourceFile]) -> IrModule {
+    let mut alg = std::collections::HashSet::new();
+    for (en, _) in &db.enums {
+        if db.is_algebraic_enum(en) {
+            alg.insert(en.clone());
+        }
+    }
+    set_algebraic_enums(alg);
     let mut strings = Vec::new();
     let mut functions = Vec::new();
     let mut extra = Vec::new();
@@ -950,6 +970,90 @@ impl Cx<'_> {
                 ..
             } => {
                 let (v, vt) = self.expr(expr);
+                if let Type::Enum(en) = &vt {
+                    if self.db.is_algebraic_enum(en) {
+                        let tag_ptr = self.t();
+                        let tag_val = self.t();
+                        self.line(&format!("{tag_ptr} = getelementptr inbounds i8, ptr {v}, i64 16"));
+                        self.line(&format!("{tag_val} = load i64, ptr {tag_ptr}"));
+                        let end = self.l("mend");
+                        for (pat, body) in arms {
+                            let yes = self.l("my");
+                            let no = self.l("mn");
+                            let mut matched_idx = None;
+                            let mut bindings: Vec<(String, Type, i64)> = Vec::new();
+                            match &pat.kind {
+                                ExprKind::Call { callee, args, .. } => {
+                                    if let ExprKind::Member { base, name } = &callee.kind {
+                                        if let ExprKind::Ident(pen) = &base.kind {
+                                            if pen == en {
+                                                if let Some(vars) = self.db.enum_variants.get(en) {
+                                                    if let Some((idx, var)) = vars.iter().enumerate().find(|(_, v)| &v.name == name) {
+                                                        matched_idx = Some(idx);
+                                                        for (i, a) in args.iter().enumerate() {
+                                                            let arg_e = match a {
+                                                                Arg::Pos(e) | Arg::Named { value: e, .. } => e,
+                                                            };
+                                                            if let ExprKind::Ident(var_name) = &arg_e.kind {
+                                                                if var_name != "_" {
+                                                                    bindings.push((var_name.clone(), var.fields[i].1.clone(), 24 + 8 * i as i64));
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                ExprKind::Member { base, name } => {
+                                    if let ExprKind::Ident(pen) = &base.kind {
+                                        if pen == en {
+                                            if let Some(vars) = self.db.enums.get(en) {
+                                                if let Some(idx) = vars.iter().position(|v| v == name) {
+                                                    matched_idx = Some(idx);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+
+                            if let Some(target_idx) = matched_idx {
+                                let c = self.t();
+                                self.line(&format!("{c} = icmp eq i64 {tag_val}, {target_idx}"));
+                                self.line(&format!("br i1 {c}, label %{yes}, label %{no}"));
+                                self.raw(&format!("{yes}:"));
+                                let saved_locals = self.locals.clone();
+                                for (b_name, b_ty, b_offset) in bindings {
+                                    let fp = self.t();
+                                    let fval = self.t();
+                                    self.line(&format!("{fp} = getelementptr inbounds i8, ptr {v}, i64 {b_offset}"));
+                                    self.line(&format!("{fval} = load {}, ptr {fp}", llty(&b_ty)));
+                                    let an = format!("%v_{}_{}", b_name, self.l("lv"));
+                                    self.line(&format!("{an} = alloca {}", llty(&b_ty)));
+                                    self.line(&format!("store {} {fval}, ptr {an}", llty(&b_ty)));
+                                    self.locals.insert(b_name, (an, b_ty));
+                                }
+                                for s in body {
+                                    self.stmt(s);
+                                }
+                                self.locals = saved_locals;
+                                self.line(&format!("br label %{end}"));
+                                self.raw(&format!("{no}:"));
+                            }
+                        }
+                        if let Some(b) = default {
+                            for s in b {
+                                self.stmt(s);
+                            }
+                        }
+                        self.line(&format!("br label %{end}"));
+                        self.raw(&format!("{end}:"));
+                        return;
+                    }
+                }
                 let end = self.l("mend");
                 for (i, (pat, body)) in arms.iter().enumerate() {
                     let yes = self.l("my");
@@ -1652,6 +1756,18 @@ impl Cx<'_> {
                     _ => "eq",
                 };
                 let c = self.t();
+                if let Type::Enum(en) = &lt {
+                    if self.db.is_algebraic_enum(en) && matches!(op, BinOp::Eq | BinOp::Ne) {
+                        let eq = self.t();
+                        self.line(&format!("{eq} = call i64 @sn_enum_eq(ptr {l}, ptr {r})"));
+                        if op == BinOp::Ne {
+                            let x = self.t();
+                            self.line(&format!("{x} = xor i64 {eq}, 1"));
+                            return (x, Type::Bool);
+                        }
+                        return (eq, Type::Bool);
+                    }
+                }
                 if lt == Type::Str || matches!(lt, Type::Optional(_)) || lt.is_ptr() && op != BinOp::Lt {
                     if lt == Type::Str && matches!(op, BinOp::Eq | BinOp::Ne) {
                         let eq = self.t();
@@ -1791,12 +1907,37 @@ impl Cx<'_> {
         }
     }
 
-    fn call(&mut self, callee: &Expr, args: &[Arg]) -> (String, Type) {
+    fn call(&mut self, callee: &Expr, type_args: &[TypeAst], args: &[Arg], span: Span) -> (String, Type) {
         if let ExprKind::Member { base, name } = &callee.kind {
+            if let ExprKind::Ident(en) = &base.kind {
+                if self.db.is_algebraic_enum(en) {
+                    if let Some(vars) = self.db.enum_variants.get(en) {
+                        if let Some((idx, var)) = vars.iter().enumerate().find(|(_, v)| &v.name == name) {
+                            let nfields = args.len();
+                            let sz = 24 + 8 * nfields as i64;
+                            let obj = self.t();
+                            self.line(&format!("{obj} = call ptr @sn_obj_new(i64 {sz}, i64 0, ptr inttoptr (i64 {idx} to ptr))"));
+                            for (i, a) in args.iter().enumerate() {
+                                let arg_expr = match a {
+                                    Arg::Pos(e) | Arg::Named { value: e, .. } => e,
+                                };
+                                let (ar, at) = self.expr(arg_expr);
+                                let expected_ty = &var.fields[i].1;
+                                let (ar, _) = self.coerce(ar, &at, expected_ty);
+                                let fp = self.t();
+                                let offset = 24 + 8 * i as i64;
+                                self.line(&format!("{fp} = getelementptr inbounds i8, ptr {obj}, i64 {offset}"));
+                                self.line(&format!("store {} {ar}, ptr {fp}", llty(expected_ty)));
+                            }
+                            return (obj, Type::Enum(en.clone()));
+                        }
+                    }
+                }
+            }
             return self.method(base, name, args);
         }
         if let ExprKind::Ident(n) = &callee.kind {
-            return self.ident_call(n, args);
+            return self.ident_call(n, type_args, args, span, callee.span);
         }
         let (c, ct) = self.expr(callee);
         if let Type::Fn { params, ret } = ct {
@@ -1812,6 +1953,7 @@ impl Cx<'_> {
             Type::Ptr | Type::List(_) | Type::Map(_, _) | Type::Blueprint(_)
             | Type::Record(_) | Type::Contract(_) | Type::Any | Type::Optional(_)
             | Type::Ref(_) | Type::Chan(_) | Type::Json | Type::Named(_) => v,
+            Type::Enum(en) if self.db.is_algebraic_enum(&en) => v,
             _ => {
                 let p = self.t();
                 self.line(&format!("{p} = inttoptr i64 {v} to ptr"));
@@ -3141,7 +3283,15 @@ impl Cx<'_> {
 
     fn member(&mut self, base: &Expr, name: &str) -> (String, Type) {
         if let ExprKind::Ident(en) = &base.kind {
-            if let Some(vars) = self.db.enums.get(en).cloned() {
+            if self.db.is_algebraic_enum(en) {
+                if let Some(vars) = self.db.enums.get(en).cloned() {
+                    if let Some(idx) = vars.iter().position(|v| v == name) {
+                        let obj = self.t();
+                        self.line(&format!("{obj} = call ptr @sn_obj_new(i64 24, i64 0, ptr inttoptr (i64 {idx} to ptr))"));
+                        return (obj, Type::Enum(en.clone()));
+                    }
+                }
+            } else if let Some(vars) = self.db.enums.get(en).cloned() {
                 if let Some(idx) = vars.iter().position(|v| v == name) {
                     return (format!("{}", idx as i64), Type::Enum(en.clone()));
                 }
@@ -3309,6 +3459,15 @@ impl Cx<'_> {
             Type::Str => return v,
             Type::Float => self.line(&format!("{r} = call ptr @sn_str_from_f64(double {v})")),
             Type::Enum(en) => {
+                let tag_val = if self.db.is_algebraic_enum(en) {
+                    let tag_ptr = self.t();
+                    let tv = self.t();
+                    self.line(&format!("{tag_ptr} = getelementptr inbounds i8, ptr {v}, i64 16"));
+                    self.line(&format!("{tv} = load i64, ptr {tag_ptr}"));
+                    tv
+                } else {
+                    v.clone()
+                };
                 if let Some(variants) = self.db.enums.get(en).cloned() {
                     let sw_end = self.l("enum_str_end");
                     let def_lbl = self.l("enum_str_def");
@@ -3320,7 +3479,7 @@ impl Cx<'_> {
                         .iter()
                         .map(|(idx, l)| format!("i64 {idx}, label %{l}"))
                         .collect();
-                    self.line(&format!("switch i64 {v}, label %{def_lbl} [ {} ]", cases.join(" ")));
+                    self.line(&format!("switch i64 {tag_val}, label %{def_lbl} [ {} ]", cases.join(" ")));
                     let phi_res = self.t();
                     let mut incoming = Vec::new();
                     for (idx, lbl) in &labels {
@@ -3335,14 +3494,14 @@ impl Cx<'_> {
                     }
                     self.raw(&format!("{def_lbl}:"));
                     let unk_ptr = self.t();
-                    self.line(&format!("{unk_ptr} = call ptr @sn_str_from_i64(i64 {v})"));
+                    self.line(&format!("{unk_ptr} = call ptr @sn_str_from_i64(i64 {tag_val})"));
                     incoming.push(format!("[ {unk_ptr}, %{def_lbl} ]"));
                     self.line(&format!("br label %{sw_end}"));
                     self.raw(&format!("{sw_end}:"));
                     self.line(&format!("{phi_res} = phi ptr {}", incoming.join(", ")));
                     return phi_res;
                 } else {
-                    self.line(&format!("{r} = call ptr @sn_str_from_i64(i64 {v})"));
+                    self.line(&format!("{r} = call ptr @sn_str_from_i64(i64 {tag_val})"));
                 }
             }
             Type::Int | Type::Byte | Type::I8 | Type::I16 | Type::I32 | Type::U8 | Type::U16 | Type::U32 | Type::U64 => self.line(&format!("{r} = call ptr @sn_str_from_i64(i64 {v})")),
@@ -3466,6 +3625,12 @@ impl Cx<'_> {
         if t == &Type::Str {
             self.line(&format!("{c} = call i64 @sn_str_eq(ptr {a}, ptr {b})"));
             return c;
+        }
+        if let Type::Enum(en) = t {
+            if self.db.is_algebraic_enum(en) {
+                self.line(&format!("{c} = call i64 @sn_enum_eq(ptr {a}, ptr {b})"));
+                return c;
+            }
         }
         let i = self.t();
         if t == &Type::Float {
@@ -3979,6 +4144,7 @@ fn llty(t: &Type) -> &'static str {
         Type::Record(_) => "ptr",
         Type::Named(n) if n == "future" => "ptr",
         Type::Float => "double",
+        Type::Enum(en) if is_algebraic_enum_type(en) => "ptr",
         _ if t.is_ptr() || matches!(t, Type::Optional(_) | Type::None | Type::Any) => "ptr",
         _ => "i64",
     }

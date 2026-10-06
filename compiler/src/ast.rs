@@ -65,7 +65,14 @@ pub struct RecordItem {
 #[derive(Clone, Debug)]
 pub struct EnumItem {
     pub name: String,
-    pub variants: Vec<String>,
+    pub variants: Vec<EnumVariant>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct EnumVariant {
+    pub name: String,
+    pub fields: Vec<Field>,
     pub span: Span,
 }
 

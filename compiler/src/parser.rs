@@ -269,11 +269,37 @@ impl Parser {
         self.eat(TokenKind::LBrace)?;
         let mut variants = Vec::new();
         while !self.at(TokenKind::RBrace) && !self.at(TokenKind::Eof) {
-            let v = self.expect_ident()?;
-            variants.push(v);
-            if !self.eat_if(TokenKind::Comma) {
-                break;
+            let v_start = self.peek().span;
+            let v_name = self.expect_ident()?;
+            let mut fields = Vec::new();
+            if self.eat_if(TokenKind::LParen) {
+                if !self.at(TokenKind::RParen) {
+                    loop {
+                        let ty = self.parse_type()?;
+                        let fname = if !self.at(TokenKind::Comma) && !self.at(TokenKind::RParen) {
+                            self.expect_ident()?
+                        } else {
+                            format!("_{}", fields.len())
+                        };
+                        fields.push(crate::ast::Field {
+                            name: fname,
+                            ty,
+                            access: crate::ast::Access::Open,
+                            init: None,
+                        });
+                        if !self.eat_if(TokenKind::Comma) {
+                            break;
+                        }
+                    }
+                }
+                self.eat(TokenKind::RParen)?;
             }
+            variants.push(crate::ast::EnumVariant {
+                name: v_name,
+                fields,
+                span: v_start.merge(self.prev_span()),
+            });
+            self.eat_if(TokenKind::Comma);
         }
         self.eat(TokenKind::RBrace)?;
         if variants.is_empty() {
