@@ -1,0 +1,13 @@
+use std.os
+
+fn main() {
+    let code, out, err = exec("echo", ["hello from os.exec"])
+    print("exec code: {code}")
+    printn("exec out: ")
+    printn(out)
+
+    let scode, sout, serr = system("echo hello from os.system")
+    print("system code: {scode}")
+    printn("system out: ")
+    printn(sout)
+}

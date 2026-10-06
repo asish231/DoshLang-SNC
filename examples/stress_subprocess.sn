@@ -1,0 +1,52 @@
+use std.os
+use std.file
+
+fn main() {
+    print("=== Test 1: Non-zero exit code ===")
+    let code1, out1, err1 = system("sh -c 'exit 42'")
+    print("Exit code (expected 42): {code1}")
+    if (code1 == 42) {
+        print("Pass: non-zero exit code captured")
+    } else {
+        print("FAIL: expected 42, got {code1}")
+    }
+
+    print("=== Test 2: Stderr and Stdout combined capture ===")
+    let code2, out2, err2 = system("sh -c 'echo stdout_msg && echo stderr_msg >&2'")
+    if (out2.contains("stdout_msg") and out2.contains("stderr_msg")) {
+        print("Pass: both stdout and stderr captured")
+    } else {
+        print("FAIL: stdout/stderr missing: {out2}")
+    }
+
+    print("=== Test 3: Complex arguments with spaces and quotes ===")
+    list<str> complex_args = ["-c", "import sys; print(sys.argv[1] + ' ' + sys.argv[2])", "hello world", "foo'bar"]
+    let code3, out3, err3 = exec("python3", complex_args)
+    if (code3 == 0 and out3.contains("hello world") and out3.contains("foo'bar")) {
+        print("Pass: arguments with spaces and quotes preserved")
+    } else {
+        print("FAIL: argument escaping issue, out: {out3}")
+    }
+
+    print("=== Test 4: Real Clang Compilation from SNlang ===")
+    // Use printf with hex escapes for braces to avoid SNlang string interpolation
+    let s_res, s_out, s_err = system("printf 'int main() \\x7b return 7; \\x7d\n' > /tmp/sn_subprocess_test.c")
+
+    // Compile it using clang via os.exec
+    let c_res, c_out, c_err = exec("clang", ["/tmp/sn_subprocess_test.c", "-o", "/tmp/sn_compiled_prog"])
+    print("Clang compile exit code: {c_res}")
+
+    // Execute the compiled binary and check exit code 7
+    let r_code, r_out, r_err = exec("/tmp/sn_compiled_prog", [])
+    print("Compiled binary exit code (expected 7): {r_code}")
+
+    if (c_res == 0 and r_code == 7) {
+        print("Pass: Clang successfully invoked to compile and run native code!")
+    } else {
+        print("FAIL: Clang compilation test failed")
+    }
+
+    // Cleanup
+    error derr1 = delete("/tmp/sn_subprocess_test.c")
+    error derr2 = delete("/tmp/sn_compiled_prog")
+}

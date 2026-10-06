@@ -2085,6 +2085,44 @@ impl Cx<'_> {
                 self.line(&format!("{r} = call ptr @sn_os_args()"));
                 (r, Type::List(Box::new(Type::Str)))
             }
+            "os_system" => {
+                let code_slot = self.t();
+                let out_slot = self.t();
+                let err_slot = self.t();
+                self.line(&format!("{code_slot} = alloca i64"));
+                self.line(&format!("{out_slot} = alloca ptr"));
+                self.line(&format!("{err_slot} = alloca ptr"));
+                self.line(&format!(
+                    "call void @sn_os_system(ptr {}, ptr {code_slot}, ptr {out_slot}, ptr {err_slot})",
+                    vs[0].0
+                ));
+                let c = self.t();
+                let o = self.t();
+                let e = self.t();
+                self.line(&format!("{c} = load i64, ptr {code_slot}"));
+                self.line(&format!("{o} = load ptr, ptr {out_slot}"));
+                self.line(&format!("{e} = load ptr, ptr {err_slot}"));
+                self.make_triple(c, Type::Int, o, Type::Str, e, Type::Error)
+            }
+            "os_exec" => {
+                let code_slot = self.t();
+                let out_slot = self.t();
+                let err_slot = self.t();
+                self.line(&format!("{code_slot} = alloca i64"));
+                self.line(&format!("{out_slot} = alloca ptr"));
+                self.line(&format!("{err_slot} = alloca ptr"));
+                self.line(&format!(
+                    "call void @sn_os_exec(ptr {}, ptr {}, ptr {code_slot}, ptr {out_slot}, ptr {err_slot})",
+                    vs[0].0, vs[1].0
+                ));
+                let c = self.t();
+                let o = self.t();
+                let e = self.t();
+                self.line(&format!("{c} = load i64, ptr {code_slot}"));
+                self.line(&format!("{o} = load ptr, ptr {out_slot}"));
+                self.line(&format!("{e} = load ptr, ptr {err_slot}"));
+                self.make_triple(c, Type::Int, o, Type::Str, e, Type::Error)
+            }
             "panic" => {
                 self.line(&format!("call void @sn_panic(ptr {})", vs[0].0));
                 ("0".into(), Type::Void)
@@ -3591,6 +3629,35 @@ impl Cx<'_> {
             llty(&bt)
         ));
         (n2, Type::Tuple(ts))
+    }
+
+    fn make_triple(
+        &mut self,
+        a: String,
+        at: Type,
+        b: String,
+        bt: Type,
+        c: String,
+        ct: Type,
+    ) -> (String, Type) {
+        let ts = vec![at.clone(), bt.clone(), ct.clone()];
+        let st = tuple_ll(&ts);
+        let n1 = self.t();
+        self.line(&format!(
+            "{n1} = insertvalue {st} zeroinitializer, {} {a}, 0",
+            llty(&at)
+        ));
+        let n2 = self.t();
+        self.line(&format!(
+            "{n2} = insertvalue {st} {n1}, {} {b}, 1",
+            llty(&bt)
+        ));
+        let n3 = self.t();
+        self.line(&format!(
+            "{n3} = insertvalue {st} {n2}, {} {c}, 2",
+            llty(&ct)
+        ));
+        (n3, Type::Tuple(ts))
     }
 
     fn http_req(&mut self, method: &str, vs: &[(String, Type)], has_body: bool) -> (String, Type) {

@@ -34,6 +34,7 @@
 #include <sys/time.h>
 #include <sys/sysctl.h>
 #include <unistd.h>
+#include <sys/wait.h>
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || \
     defined(__NetBSD__) || defined(__DragonFly__)
 #include <sys/event.h>
@@ -2322,6 +2323,90 @@ static void http_via_curl(const char *method, const char *url, const char *body,
     if (out_body) *out_body = sn_str_from_cstr(buf);
     if (out_err) *out_err = NULL;
     free(buf);
+}
+
+void sn_os_system(void *cmd, int64_t *out_code, void **out_out, void **out_err) {
+    if (!cmd) {
+        if (out_code) *out_code = -1;
+        if (out_out) *out_out = sn_str_from_cstr("");
+        if (out_err) *out_err = sn_error_new(sn_str_from_cstr("null command"));
+        return;
+    }
+    const char *c = sn_str_cstr(cmd);
+    size_t clen = strlen(c);
+    char *full_cmd = (char *)xmalloc(clen + 16);
+    snprintf(full_cmd, clen + 16, "%s 2>&1", c);
+#ifdef _WIN32
+    FILE *fp = _popen(full_cmd, "r");
+#else
+    FILE *fp = popen(full_cmd, "r");
+#endif
+    free(full_cmd);
+    if (!fp) {
+        if (out_code) *out_code = -1;
+        if (out_out) *out_out = sn_str_from_cstr("");
+        if (out_err) *out_err = sn_error_new(sn_str_from_cstr("failed to start process"));
+        return;
+    }
+    size_t cap = 4096, n = 0;
+    char *buf = (char *)xmalloc(cap);
+    int ch;
+    while ((ch = fgetc(fp)) != EOF) {
+        if (n + 2 > cap) { cap *= 2; buf = (char *)realloc(buf, cap); }
+        buf[n++] = (char)ch;
+    }
+    buf[n] = 0;
+#ifdef _WIN32
+    int status = _pclose(fp);
+    int exit_code = status;
+#else
+    int status = pclose(fp);
+    int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : status;
+#endif
+    if (out_code) *out_code = (int64_t)exit_code;
+    if (out_out) *out_out = sn_str_from_cstr(buf);
+    if (out_err) *out_err = NULL;
+    free(buf);
+}
+
+void sn_os_exec(void *cmd, void *args, int64_t *out_code, void **out_out, void **out_err) {
+    if (!cmd) {
+        if (out_code) *out_code = -1;
+        if (out_out) *out_out = sn_str_from_cstr("");
+        if (out_err) *out_err = sn_error_new(sn_str_from_cstr("null command"));
+        return;
+    }
+    const char *c = sn_str_cstr(cmd);
+    size_t total_len = strlen(c) * 4 + 32;
+    int64_t argc = args ? sn_list_len(args) : 0;
+    for (int64_t i = 0; i < argc; i++) {
+        void *arg_str = sn_list_get_ptr(args, i);
+        if (arg_str) {
+            total_len += strlen(sn_str_cstr(arg_str)) * 4 + 8;
+        }
+    }
+    char *full_cmd = (char *)xmalloc(total_len);
+    char *qpart = (char *)xmalloc(total_len);
+    sn_shell_single_quote(qpart, total_len, c);
+    size_t pos = strlen(qpart);
+    memcpy(full_cmd, qpart, pos);
+
+    for (int64_t i = 0; i < argc; i++) {
+        void *arg_str = sn_list_get_ptr(args, i);
+        if (arg_str) {
+            sn_shell_single_quote(qpart, total_len, sn_str_cstr(arg_str));
+            size_t qlen = strlen(qpart);
+            full_cmd[pos++] = ' ';
+            memcpy(full_cmd + pos, qpart, qlen);
+            pos += qlen;
+        }
+    }
+    full_cmd[pos] = 0;
+    free(qpart);
+
+    void *cmd_obj = sn_str_from_cstr(full_cmd);
+    free(full_cmd);
+    sn_os_system(cmd_obj, out_code, out_out, out_err);
 }
 
 void sn_http_request(void *method, void *url, void *body, void **out_body, void **out_err) {

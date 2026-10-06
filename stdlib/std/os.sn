@@ -9,3 +9,11 @@ fn exit(int code) {
 fn args() -> list<str> {
     return os_args()
 }
+
+fn exec(str cmd, list<str> args) -> (int, str, error) {
+    return os_exec(cmd, args)
+}
+
+fn system(str cmd) -> (int, str, error) {
+    return os_system(cmd)
+}

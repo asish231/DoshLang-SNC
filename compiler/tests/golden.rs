@@ -478,6 +478,14 @@ fn selfhost_lexer() {
 }
 
 #[test]
+fn subprocess_exec() {
+    assert_out(
+        "examples/subprocess.sn",
+        "exec code: 0\nexec out: hello from os.exec\nsystem code: 0\nsystem out: hello from os.system\n",
+    );
+}
+
+#[test]
 fn std_test_helpers() {
     assert_out("examples/std_test.sn", "all tests passed\n");
 }

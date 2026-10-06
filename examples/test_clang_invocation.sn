@@ -1,0 +1,11 @@
+use std.os
+
+fn main() {
+    let code, out, err = exec("clang", ["--version"])
+    print("clang exit code: {code}")
+    if (out.contains("clang")) {
+        print("clang verified: true")
+    } else {
+        print("clang verified: false")
+    }
+}

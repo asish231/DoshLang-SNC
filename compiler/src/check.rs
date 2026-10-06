@@ -1784,6 +1784,8 @@ impl Checker<'_> {
                     || n == "os_getenv"
                     || n == "os_exit"
                     || n == "os_args"
+                    || n == "os_exec"
+                    || n == "os_system"
                     || n == "panic"
                     || n == "alloc"
                     || n == "free"
@@ -2417,6 +2419,7 @@ impl Checker<'_> {
             "os_getenv" => Type::Optional(Box::new(Type::Str)),
             "os_exit" => Type::Void,
             "os_args" => Type::List(Box::new(Type::Str)),
+            "os_exec" | "os_system" => Type::Tuple(vec![Type::Int, Type::Str, Type::Error]),
             "alloc" => Type::Ref(Box::new(Type::Byte)),
             "address" => {
                 if let Some(Arg::Pos(e)) = args.first() {
