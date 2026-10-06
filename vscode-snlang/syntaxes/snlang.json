@@ -28,7 +28,7 @@
       "patterns": [
         {
           "name": "keyword.control.snlang",
-          "match": "\\b(fn|if|else|while|for|in|stop|skip|return|match|default|use|const|let|blueprint|contract|from|follows|new|defer|try|spawn|async|await)\\b"
+          "match": "\\b(fn|if|else|while|for|in|stop|skip|return|match|default|use|const|let|blueprint|contract|from|follows|new|defer|try|spawn|goroutine|async|await|asm|enum|static|abstract|extern|mut|record|extension|super|any)\\b"
         },
         {
           "name": "keyword.operator.snlang",
@@ -44,7 +44,7 @@
       "patterns": [
         {
           "name": "storage.type.snlang",
-          "match": "\\b(int|str|bool|byte|dec|list|map|ref|chan|lock|error|json)\\b"
+          "match": "\\b(int|i8|i16|i32|u8|u16|u32|u64|float|str|bool|byte|dec|list|map|ref|chan|lock|ptr|error|json)\\b"
         }
       ]
     },
