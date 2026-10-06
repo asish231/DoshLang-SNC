@@ -1,0 +1,15 @@
+[package]
+name = "snc"
+version = "0.2.0"
+edition = "2021"
+description = "SNlang compiler — emits LLVM IR and links with clang"
+license = "MIT"
+authors = ["Asish Kumar Sharma"]
+
+[[bin]]
+name = "snc"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde_json = "1.0.151"
