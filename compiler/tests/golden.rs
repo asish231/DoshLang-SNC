@@ -821,14 +821,6 @@ fn debug_drives_lldb_with_sn_source_lines() {
     assert!(stdout.contains("sn_fn_main"), "{stdout}");
     assert!(stdout.contains("hello_world.sn:2"), "{stdout}");
 }
-#[test]
-fn generic_fn() {
-    assert_out(
-        "examples/generic_fn.sn",
-        "42\nhello generics\n99\n10\nalpha\n777\n5\n5\n1234\nbeep boop\n",
-    );
-}
-
 
 #[test]
 fn algebraic_enums() {
@@ -843,6 +835,14 @@ fn stress_algebraic_enums() {
     assert_out(
         "examples/stress_algebraic_enums.sn",
         "100\n42\n42\n0\nn2 equals eq_test1\nn2 not equals eq_test2\nn4 is Empty\n",
+    );
+}
+
+#[test]
+fn generic_fn() {
+    assert_out(
+        "examples/generic_fn.sn",
+        "42\nhello generics\n99\n10\nalpha\n777\n5\n5\n1234\nbeep boop\n",
     );
 }
 
