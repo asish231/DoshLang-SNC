@@ -1395,6 +1395,7 @@ impl Checker<'_> {
                 self.check_fn(f);
                 self.current_fn_ret = saved;
             }
+            Stmt::Asm { .. } => {}
         }
     }
 

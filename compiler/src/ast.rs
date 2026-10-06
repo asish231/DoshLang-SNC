@@ -235,6 +235,11 @@ pub enum Stmt {
         body: Vec<Stmt>,
         span: Span,
     },
+    Asm {
+        template: String,
+        clobbers: Vec<String>,
+        span: Span,
+    },
     New {
         heap: bool,
         ty: String,

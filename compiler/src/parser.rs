@@ -622,6 +622,7 @@ impl Parser {
             TokenKind::Spawn => self.parse_spawn(),
             TokenKind::Goroutine => self.parse_goroutine(),
             TokenKind::Lock => self.parse_lock_stmt(),
+            TokenKind::Asm => self.parse_asm(),
             TokenKind::New => self.parse_new(true),
             TokenKind::Const => self.parse_decl(true),
             TokenKind::Let => self.parse_decl(false),
@@ -996,6 +997,30 @@ impl Parser {
                 span: start.merge(self.prev_span()),
             })
         }
+    }
+
+    fn parse_asm(&mut self) -> Result<Stmt, String> {
+        let start = self.eat(TokenKind::Asm)?;
+        if !self.at(TokenKind::String) {
+            return Err(self.error("expected inline assembly template string"));
+        }
+        let tok = self.bump();
+        let template = tok.text;
+        let mut clobbers = Vec::new();
+        if self.eat_if(TokenKind::Colon) {
+            loop {
+                let name = self.expect_ident()?;
+                clobbers.push(name);
+                if !self.eat_if(TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+        Ok(Stmt::Asm {
+            template,
+            clobbers,
+            span: start.merge(self.prev_span()),
+        })
     }
 
     fn parse_lock_stmt(&mut self) -> Result<Stmt, String> {

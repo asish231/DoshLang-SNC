@@ -116,6 +116,7 @@ pub enum TokenKind {
     AnyKw,
     Super,
     Goroutine,
+    Asm,
 }
 
 #[derive(Clone, Debug)]

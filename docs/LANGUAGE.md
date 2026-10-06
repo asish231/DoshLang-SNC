@@ -306,6 +306,21 @@ fn main() {
 }
 ```
 
+## Inline assembly
+
+```sn
+asm "nop"
+asm "dmb ish" : "memory"
+```
+
+An `asm` statement takes a raw template string that is handed to the LLVM
+backend, plus an optional comma-separated clobber list after a colon
+(rendered as `~{name}` in the constraint string). The feature is a real
+escape hatch: the same lowering path runs for every supported target triple,
+so macOS (arm64/x64), Linux, and Windows targets all lower the same syntax
+once you supply target-valid assembly. Use `--emit-llvm` to inspect the
+generated `call void asm sideeffect ...` line.
+
 ## Editor support
 
 `snc lsp` speaks LSP over stdio and goes well past diagnostics:

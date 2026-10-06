@@ -1,0 +1,5 @@
+fn main() {
+    // inline asm is passed verbatim through LLVM lowering.
+    asm "nop"
+    print("asm ok")
+}

@@ -702,6 +702,56 @@ fn cross_compile_targets() {
 }
 
 #[test]
+fn inline_asm_emits_and_runs() {
+    assert_out("examples/inline_asm.sn", "asm ok\n");
+
+    // The IR must contain a real LLVM inline-asm call.
+    let root = repo_root();
+    let ll = std::env::temp_dir().join("snc-inlineasm.ll");
+    let out = Command::new(snc_bin())
+        .arg(root.join("examples/inline_asm.sn"))
+        .arg("--emit-llvm")
+        .arg("-o")
+        .arg(&ll)
+        .current_dir(&root)
+        .output()
+        .expect("run snc");
+    assert!(out.status.success(), "emit-llvm failed");
+    let ir = std::fs::read_to_string(&ll).expect("read ir");
+    assert!(
+        ir.contains("asm sideeffect"),
+        "expected inline asm in IR, got:\n{ir}"
+    );
+    let _ = std::fs::remove_file(&ll);
+
+    // The same syntax must lower correctly for every target triple we
+    // support; compiling is IR-only here, so no host toolchain needed.
+    for preset in ["linux-x64", "windows-x64", "macos-arm64"] {
+        let out = Command::new(snc_bin())
+            .arg(root.join("examples/inline_asm.sn"))
+            .arg("--emit-llvm")
+            .arg("-o")
+            .arg(&ll)
+            .arg("--target")
+            .arg(preset)
+            .current_dir(&root)
+            .output()
+            .expect("run snc");
+        assert!(
+            out.status.success(),
+            "target {preset} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let ir = std::fs::read_to_string(&ll).expect("read ir");
+        assert!(
+            ir.contains("asm sideeffect"),
+            "target {preset} missing inline asm:\n{ir}"
+        );
+    }
+    let _ = std::fs::remove_file(&ll);
+}
+
+#[test]
 fn test_runner_reports_statement_coverage() {
     let root = repo_root();
     let out = Command::new(snc_bin())

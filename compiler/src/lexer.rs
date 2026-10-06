@@ -435,6 +435,7 @@ fn keyword(text: &str) -> TokenKind {
         "any" => TokenKind::AnyKw,
         "super" => TokenKind::Super,
         "goroutine" => TokenKind::Goroutine,
+        "asm" => TokenKind::Asm,
         "static" => TokenKind::Static,
         "abstract" => TokenKind::Abstract,
         "extern" => TokenKind::Extern,

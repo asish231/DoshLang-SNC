@@ -519,7 +519,8 @@ impl Cx<'_> {
             | Stmt::LockBlock { span, .. }
             | Stmt::New { span, .. }
             | Stmt::GoroutineBlock { span, .. }
-            | Stmt::Defer { span, .. } => span,
+            | Stmt::Defer { span, .. }
+            | Stmt::Asm { span, .. } => span,
             Stmt::NestedFn(_) => return None,
         };
         let f = self.files.get(span.file as usize)?;
@@ -546,7 +547,8 @@ impl Cx<'_> {
             | Stmt::LockBlock { span, .. }
             | Stmt::New { span, .. }
             | Stmt::GoroutineBlock { span, .. }
-            | Stmt::Defer { span, .. } => span,
+            | Stmt::Defer { span, .. }
+            | Stmt::Asm { span, .. } => span,
             Stmt::NestedFn(_) => return,
         };
         // Keyed by byte offset: `Cx` has no source-line table, and the driver
@@ -591,6 +593,27 @@ impl Cx<'_> {
         self.buf.push_str(s);
         self.buf.push('\n');
     }
+    /// Emit a side-effect LLVM inline-assembly call. Clobbers are
+    /// rendered as `~{name}` in the constraint string so LLVM knows which
+    /// CPU state the assembly may clobber.
+    fn emit_asm(&mut self, template: &str, clobbers: &[String]) {
+        let esc = template.replace('\\', "\\\\").replace('"', "\\22");
+        let constr = if clobbers.is_empty() {
+            "\"\"".to_string()
+        } else {
+            let mut c = String::from("\"");
+            for (i, cl) in clobbers.iter().enumerate() {
+                if i > 0 {
+                    c.push(',');
+                }
+                c.push_str(&format!("~ {{{}}}", cl.trim_matches('{').trim_matches('}')).replace(' ', ""));
+            }
+            c.push('"');
+            c
+        };
+        self.line(&format!("call void asm sideeffect \"{}\", {}()", esc, constr));
+    }
+
     fn t(&mut self) -> String {
         self.tmp += 1;
         format!("%t{}", self.tmp)
@@ -1085,6 +1108,9 @@ impl Cx<'_> {
             }
             Stmt::Defer { body, .. } => {
                 self.defers.push(body.clone());
+            }
+            Stmt::Asm { template, clobbers, .. } => {
+                self.emit_asm(template, clobbers);
             }
             Stmt::NestedFn(f) => {
                 let ret = f.ret.as_ref().map(ast_to_type).unwrap_or(Type::Void);
@@ -3951,6 +3977,7 @@ fn walk_stmt(s: &Stmt, out: &mut Vec<String>) {
             }
         }
         Stmt::Defer { body, .. } | Stmt::SpawnBlock { body, .. } => collect_idents(body, out),
+        Stmt::Asm { .. } => {},
         Stmt::SpawnExpr { expr, .. } => walk_expr(expr, out),
         Stmt::NestedFn(f) => collect_idents(&f.body, out),
         Stmt::LockBlock { name, body, .. } => {
