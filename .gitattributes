@@ -1,0 +1,2 @@
+# GitHub Linguist syntax highlighting for SNlang
+*.sn linguist-language=Rust
