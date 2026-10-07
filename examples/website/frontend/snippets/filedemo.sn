@@ -1,0 +1,5 @@
+fn main() {
+    file_write("snc_file_io.txt", "hello file io")
+    str contents = file_read("snc_file_io.txt")
+    print(contents)
+}

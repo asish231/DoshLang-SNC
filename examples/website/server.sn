@@ -7,10 +7,13 @@ use backend.projects
 use backend.sandbox
 use backend.ai
 use backend.telemetry
+use backend.docs
+use backend.gemini
+use backend.ai_try
 
 fn main() {
     print("==================================================")
-    print("  SNlang Modular Enterprise Web Server v0.2.0    ")
+    print("  SNlang Starter & Docs Server v1.0.0              ")
     print("  Reactor Multiplexing + SQLite WAL Persistence   ")
     print("==================================================")
 
@@ -59,6 +62,8 @@ fn main() {
     ai_router.get("/sessions/:id", handle_ai_session_detail)
     ai_router.delete("/sessions/:id", handle_ai_session_delete)
     ai_router.post("/stress_test", handle_ai_stress_test)
+    ai_router.post("/explain", handle_ai_explain)
+    ai_router.post("/try", handle_ai_try)
     app.mount("/api/ai", ai_router)
 
     // 7. Mount Sub-Router: /api (Telemetry, Audit & DSA)
@@ -74,7 +79,13 @@ fn main() {
     api_router.get("/dsa/:id", handle_dsa_detail)
     app.mount("/api", api_router)
 
-    // 8. Static Asset Pipeline
+    // 8. Mount Sub-Router: /api/docs (Starter guide + repo examples)
+    Router docs_router = Router.create()
+    docs_router.get("/examples", handle_examples_list)
+    docs_router.get("/examples/:name", handle_example_get)
+    app.mount("/api/docs", docs_router)
+
+    // 9. Static Asset Pipeline
     app.serve_static("/", "examples/website/public")
 
     int port = 8090

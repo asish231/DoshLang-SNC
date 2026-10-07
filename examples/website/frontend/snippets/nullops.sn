@@ -1,0 +1,19 @@
+fn main() {
+    str? nick = none
+    str shown = nick otherwise "anon"
+    print(shown)
+    nick = "Ada"
+    print(nick otherwise "anon")
+    int? lucky = none
+    if (lucky != none) {
+        print(lucky)
+    } else {
+        print("no lucky number")
+    }
+    lucky = 7
+    if (lucky != none) {
+        print(lucky)
+    }
+    int sure = lucky!!
+    print(sure + 1)
+}

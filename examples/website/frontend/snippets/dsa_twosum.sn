@@ -1,0 +1,21 @@
+fn two_sum(list<int> nums, int target) -> (int, int) {
+    int i = 0
+    int n = nums.length()
+    while (i < n) {
+        int j = i + 1
+        while (j < n) {
+            if (nums[i] + nums[j] == target) {
+                return (i, j)
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return (-1, -1)
+}
+
+fn main() {
+    list<int> nums = [2, 7, 11, 15]
+    int a, b = two_sum(nums, 9)
+    print("Indices: " + cast(a, str) + " and " + cast(b, str))
+}

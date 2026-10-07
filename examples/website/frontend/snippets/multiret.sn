@@ -1,0 +1,17 @@
+fn divide(int a, int b) -> (int, bool) {
+    if (b == 0) {
+        return (0, false)
+    }
+    return (a / b, true)
+}
+
+fn main() {
+    int q, ok = divide(10, 2)
+    if (ok) {
+        print(q)
+    }
+    int q2, ok2 = divide(10, 0)
+    if (not ok2) {
+        print("division failed")
+    }
+}

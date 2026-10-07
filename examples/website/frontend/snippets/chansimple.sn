@@ -1,0 +1,7 @@
+fn main() {
+    chan<int> ch
+    goroutine {
+        ch.send(42)
+    }
+    print(ch.receive())
+}

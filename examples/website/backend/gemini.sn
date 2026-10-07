@@ -1,0 +1,44 @@
+use std.web
+use std.ai
+use common
+use middleware
+
+// Gemini-backed SNlang tutor, served at POST /api/ai/explain.
+// Thin HTTP layer: validation + rate limiting. Model calls go through std.ai.
+// Key: $GEMINI_API_KEY or .env (gitignored, never logged).
+
+fn handle_ai_explain(Request req) -> Response {
+    let doc, err = parse(req.body)
+    if (err != none) {
+        return Response.bad_request("Invalid JSON request")
+    }
+
+    str code = doc.get("code").as_str()
+    if (code.length() == 0) {
+        return Response.bad_request("Code cannot be empty")
+    }
+    if (code.length() > 8192) {
+        return Response.make(413, "application/problem+json", rfc7807_error(413, "Payload Too Large", "Code exceeds the 8192 byte AI explain limit."))
+    }
+
+    let allowed, used, remaining = check_rate_limit("ai_explain", 20, 60000)
+    if (not allowed) {
+        return Response.make(429, "application/problem+json", rfc7807_error(429, "Too Many Requests", "AI explain limit is 20 req/min shared."))
+    }
+
+    GoogleClient gc = google_client()
+    if (gc.api_key.length() == 0) {
+        return Response.server_error("AI tutor not configured: set GEMINI_API_KEY env or .env")
+    }
+
+    str prompt = "You are a concise SNlang programming tutor. Explain the following SNlang program in plain beginner-friendly language: what it does, what each part means, and what it prints. Keep it under 180 words, no markdown headings, short paragraphs only. Program:\n" + code
+    str reply = gc.interactions_create(prompt)
+    if (reply.length() == 0) {
+        gc.model = "gemini-2.5-flash"
+        reply = gc.interactions_create(prompt)
+    }
+    if (reply.length() == 0) {
+        return Response.server_error("Gemini request failed: try again in a moment")
+    }
+    return Response.ok("\{" + "\"reply\":\"" + json_escape(reply) + "\"" + "\}")
+}

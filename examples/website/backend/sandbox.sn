@@ -18,6 +18,9 @@ fn handle_sandbox_run(Request req) -> Response {
     if (code.length() == 0) {
         return Response.bad_request("Code snippet cannot be empty")
     }
+    if (code.length() > 32768) {
+        return Response.make(413, "application/problem+json", rfc7807_error(413, "Payload Too Large", "Code snippet exceeds the 32768 byte playground limit."))
+    }
 
     // Identify user if logged in
     str token = extract_session_token(req)

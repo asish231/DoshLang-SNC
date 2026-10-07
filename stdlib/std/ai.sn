@@ -1,0 +1,242 @@
+// std.ai — official-style AI SDK clients for SNlang.
+//
+// Mirrors the ergonomics of the vendors' own SDKs:
+//
+//   Python (google-genai):   client = genai.Client()
+//                            interaction = client.interactions.create(model=..., input=...)
+//                            interaction.output_text
+//   SNlang (this module):    GoogleClient client = google_client()
+//                            str text = client.interactions_create("...")
+//
+//   OpenAI Python:           client.responses.create(model=..., input=...).output_text
+//   SNlang:                  OpenAIClient client = openai_client()
+//                            str text = client.responses_create("...")
+//
+//   Anthropic Python:        client.messages.create(model=..., max_tokens=..., messages=[...])
+//   SNlang:                  AnthropicClient client = anthropic_client()
+//                            str text = client.messages_create("...")
+//
+// Keys come from the environment ($GEMINI_API_KEY / $OPENAI_API_KEY /
+// $ANTHROPIC_API_KEY), falling back to a NAME= line in .env. Models default
+// sensibly and can be overridden ($GEMINI_MODEL / $OPENAI_MODEL /
+// $ANTHROPIC_MODEL) or per client (client.model = "...").
+// Every call returns "" on any failure (no key, HTTP error, API error).
+
+use std.json
+use std.os
+use std.time
+
+fn ai_key_from_env(str name) -> str {
+    str? hit = getenv(name)
+    if (hit != none) {
+        return hit
+    }
+    str raw = file_read(".env")
+    list<str> lines = raw.split("\n")
+    for (line in lines) {
+        str clean = line.replace("\r", "")
+        list<str> kv = clean.split("=")
+        if (kv.length() == 2 and kv[0] == name) {
+            return kv[1]
+        }
+    }
+    return ""
+}
+
+fn ai_model(str env_name, str fallback) -> str {
+    str? hit = getenv(env_name)
+    if (hit != none) {
+        return hit
+    }
+    return fallback
+}
+
+fn ai_escape(str s) -> str {
+    str res = s.replace("\\", "\\\\")
+    res = res.replace("\"", "\\\"")
+    res = res.replace("\n", "\\n")
+    res = res.replace("\r", "\\r")
+    res = res.replace("\t", "\\t")
+    return res
+}
+
+// POST with explicit headers via curl (std.http cannot set headers).
+// Returns the response stdout, or "" when curl itself fails.
+fn ai_http_post(str url, list<str> headers, str body) -> str {
+    str path = ".ai_req_" + cast(now_ms(), str) + ".json"
+    file_write(path, body)
+    str flags = ""
+    for (h in headers) {
+        flags = flags + "-H '" + h + "' "
+    }
+    str cmd = "curl -sS --max-time 60 -X POST " + flags + "--data @" + path + " '" + url + "'"
+    let rc, out, cerr = system(cmd)
+    file_delete(path)
+    if (rc != 0) {
+        return ""
+    }
+    return out
+}
+
+// First text of array items shaped {"type": <want>, ... "text": ...}.
+fn ai_block_text(json parts, str text_type) -> str {
+    if (parts.is_null()) {
+        return ""
+    }
+    int m = parts.length()
+    int j = 0
+    while (j < m) {
+        json p = parts.at(j)
+        if (p.get("type").as_str() == text_type) {
+            str t = p.get("text").as_str()
+            if (t.length() > 0) {
+                return t
+            }
+        }
+        j = j + 1
+    }
+    return ""
+}
+
+// First text of steps shaped {"type": <step_type>, "content": [...]}.
+fn ai_step_text(json steps, str step_type, str text_type) -> str {
+    if (steps.is_null()) {
+        return ""
+    }
+    int n = steps.length()
+    int i = 0
+    while (i < n) {
+        json st = steps.at(i)
+        if (st.get("type").as_str() == step_type) {
+            str t = ai_block_text(st.get("content"), text_type)
+            if (t.length() > 0) {
+                return t
+            }
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+// ---------------- Google (Gemini Interactions API) ----------------
+
+blueprint GoogleClient {
+    str api_key
+    str model
+
+    // POST /v1beta/interactions {"model","input"} (+ previous_interaction_id).
+    // Returns output_text, or "" on any failure.
+    fn interactions_create(str input) -> str {
+        return self.interactions_create_prev(input, "")
+    }
+
+    fn interactions_create_prev(str input, str prev_id) -> str {
+        if (self.api_key.length() == 0) {
+            return ""
+        }
+        str body = "\{\"model\":\"" + self.model + "\",\"input\":\"" + ai_escape(input) + "\""
+        if (prev_id.length() > 0) {
+            body = body + ",\"previous_interaction_id\":\"" + prev_id + "\""
+        }
+        body = body + "\}"
+        list<str> hdrs = []
+        hdrs.push("x-goog-api-key: " + self.api_key)
+        hdrs.push("Content-Type: application/json")
+        str resp = ai_http_post("https://generativelanguage.googleapis.com/v1beta/interactions", hdrs, body)
+        if (resp.length() == 0 or not resp.contains("\"steps\"")) {
+            return ""
+        }
+        let doc, perr = parse(resp)
+        if (perr != none) {
+            return ""
+        }
+        return ai_step_text(doc.get("steps"), "model_output", "text")
+    }
+}
+
+fn google_client() -> GoogleClient {
+    new GoogleClient c(api_key: ai_key_from_env("GEMINI_API_KEY"), model: ai_model("GEMINI_MODEL", "gemini-3.8-flash"))
+    return c
+}
+
+// Explicit-key constructor, mirroring genai.Client(api_key=...).
+// Used by demos where the caller supplies their own key.
+fn google_client_with(str key, str model) -> GoogleClient {
+    new GoogleClient c(api_key: key, model: model)
+    return c
+}
+
+// ---------------- OpenAI (Responses API) ----------------
+
+blueprint OpenAIClient {
+    str api_key
+    str model
+
+    // POST /v1/responses {"model","input"}. Returns output_text, or "".
+    fn responses_create(str input) -> str {
+        if (self.api_key.length() == 0) {
+            return ""
+        }
+        str body = "\{\"model\":\"" + self.model + "\",\"input\":\"" + ai_escape(input) + "\"\}"
+        list<str> hdrs = []
+        hdrs.push("Authorization: Bearer " + self.api_key)
+        hdrs.push("Content-Type: application/json")
+        str resp = ai_http_post("https://api.openai.com/v1/responses", hdrs, body)
+        if (resp.length() == 0 or not resp.contains("\"output\"")) {
+            return ""
+        }
+        let doc, perr = parse(resp)
+        if (perr != none) {
+            return ""
+        }
+        return ai_step_text(doc.get("output"), "message", "output_text")
+    }
+}
+
+fn openai_client() -> OpenAIClient {
+    new OpenAIClient c(api_key: ai_key_from_env("OPENAI_API_KEY"), model: ai_model("OPENAI_MODEL", "gpt-5"))
+    return c
+}
+
+fn openai_client_with(str key, str model) -> OpenAIClient {
+    new OpenAIClient c(api_key: key, model: model)
+    return c
+}
+
+// ---------------- Anthropic (Messages API) ----------------
+
+blueprint AnthropicClient {
+    str api_key
+    str model
+
+    // POST /v1/messages {"model","max_tokens","messages"}. First text block, or "".
+    fn messages_create(str input) -> str {
+        if (self.api_key.length() == 0) {
+            return ""
+        }
+        str body = "\{\"model\":\"" + self.model + "\",\"max_tokens\":1024,\"messages\":[\{\"role\":\"user\",\"content\":\"" + ai_escape(input) + "\"\}]\}"
+        list<str> hdrs = []
+        hdrs.push("x-api-key: " + self.api_key)
+        hdrs.push("anthropic-version: 2023-06-01")
+        hdrs.push("Content-Type: application/json")
+        str resp = ai_http_post("https://api.anthropic.com/v1/messages", hdrs, body)
+        if (resp.length() == 0 or not resp.contains("\"content\"")) {
+            return ""
+        }
+        let doc, perr = parse(resp)
+        if (perr != none) {
+            return ""
+        }
+        return ai_block_text(doc.get("content"), "text")
+    }
+}
+
+fn anthropic_client() -> AnthropicClient {
+    new AnthropicClient c(api_key: ai_key_from_env("ANTHROPIC_API_KEY"), model: ai_model("ANTHROPIC_MODEL", "claude-sonnet-4-6"))
+    return c
+}
+
+fn anthropic_client_with(str key, str model) -> AnthropicClient {
+    new AnthropicClient c(api_key: key, model: model)
+    return c
+}

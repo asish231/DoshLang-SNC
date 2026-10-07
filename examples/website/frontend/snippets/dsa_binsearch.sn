@@ -1,0 +1,22 @@
+fn binary_search(list<int> arr, int target) -> int {
+    int low = 0
+    int high = arr.length() - 1
+    while (low <= high) {
+        int mid = low + (high - low) / 2
+        if (arr[mid] == target) {
+            return mid
+        }
+        if (arr[mid] < target) {
+            low = mid + 1
+        } else {
+            high = mid - 1
+        }
+    }
+    return -1
+}
+
+fn main() {
+    list<int> sorted = [2, 5, 8, 12, 16, 23, 38, 56, 72, 91]
+    int idx = binary_search(sorted, 23)
+    print("Target 23 found at index: " + cast(idx, str))
+}

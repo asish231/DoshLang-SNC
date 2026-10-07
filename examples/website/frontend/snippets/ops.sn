@@ -1,0 +1,10 @@
+fn main() {
+    print(7 + 3 * 2)
+    print((7 + 3) * 2)
+    print(17 / 5)
+    print(17 % 5)
+    int age = 21
+    print(age >= 18 and age < 60)
+    print(age < 18 or age > 65)
+    print(not (age == 21))
+}

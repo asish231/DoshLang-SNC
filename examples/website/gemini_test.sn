@@ -1,0 +1,22 @@
+use std.ai
+
+// Test script: proves the std.ai Google SDK path works end to end.
+// Run: ./snc examples/website/gemini_test.sn -o /tmp/gemtest && /tmp/gemtest
+// Key source: $GEMINI_API_KEY, falling back to a GEMINI_API_KEY= line in .env.
+
+fn main() {
+    GoogleClient client = google_client()
+    if (client.api_key.length() == 0) {
+        print("no key: export GEMINI_API_KEY or add GEMINI_API_KEY= to .env")
+        return
+    }
+    print("key loaded, {client.api_key.length()} chars, model {client.model}")
+    str reply = client.interactions_create("Reply with exactly this and nothing else: SNlang OK")
+    if (reply.length() == 0) {
+        print("default model saturated, retrying gemini-2.5-flash")
+        client.model = "gemini-2.5-flash"
+        reply = client.interactions_create("Reply with exactly this and nothing else: SNlang OK")
+    }
+    print("gemini says:")
+    print(reply)
+}

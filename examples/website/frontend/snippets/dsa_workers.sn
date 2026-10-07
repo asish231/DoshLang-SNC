@@ -1,0 +1,26 @@
+fn main() {
+    chan<int> jobs
+    chan<int> results
+    spawn {
+        int j1 = jobs.receive()
+        while (j1 != -1) {
+            results.send(j1 * j1)
+            j1 = jobs.receive()
+        }
+    }
+    spawn {
+        int j2 = jobs.receive()
+        while (j2 != -1) {
+            results.send(j2 * j2)
+            j2 = jobs.receive()
+        }
+    }
+    jobs.send(4)
+    jobs.send(7)
+    jobs.send(9)
+    jobs.send(-1)
+    jobs.send(-1)
+    print("Result 1: " + cast(results.receive(), str))
+    print("Result 2: " + cast(results.receive(), str))
+    print("Result 3: " + cast(results.receive(), str))
+}

@@ -1,0 +1,13 @@
+fn greet(str name) -> str {
+    return "Hello, " + name
+}
+
+fn add(int a, int b) -> int {
+    return a + b
+}
+
+fn main() {
+    print(greet("Ada"))
+    print(add(3, 7))
+    print(add(10, add(1, 2)))
+}

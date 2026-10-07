@@ -1,0 +1,11 @@
+fn main() {
+    list<int> nums = [10, 20, 30]
+    print(nums.length())
+    print(nums[0])
+    nums[1] = 99
+    print(nums[1])
+    nums.push(40)
+    print(nums.length())
+    print(99 in nums)
+    print(7 in nums)
+}

@@ -1,0 +1,13 @@
+fn greet(str name = "Guest", int times = 2) {
+    int i = 0
+    while (i < times) {
+        print(name)
+        i += 1
+    }
+}
+
+fn main() {
+    greet()
+    greet("Ace")
+    greet("Neo", 1)
+}

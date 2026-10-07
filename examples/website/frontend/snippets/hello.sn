@@ -1,0 +1,4 @@
+fn main() {
+    str message = "Hello, World!"
+    print(message)
+}

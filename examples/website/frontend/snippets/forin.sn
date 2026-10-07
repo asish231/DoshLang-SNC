@@ -1,0 +1,10 @@
+fn main() {
+    list<str> fruits = ["Apple", "Mango", "Banana"]
+    for (fruit in fruits) {
+        print(fruit)
+    }
+    map<str, int> ages = {"Bob": 30, "Ann": 25}
+    for (name in ages.keys()) {
+        print("{name} is {ages[name]}")
+    }
+}

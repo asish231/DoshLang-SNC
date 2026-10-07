@@ -1,16 +1,27 @@
-# React + Vite
+# SNlang starter & docs site (React + Vite)
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+The SNlang language starter and documentation UI served by `examples/website/server.sn`:
+Home, Get Started, a 14-chapter language guide, a live playground (runs code via
+`/api/sandbox/run`), the standard-library reference, a repo examples browser, and the
+tooling reference.
 
-Currently, two official plugins are available:
+Every runnable snippet lives in `snippets/*.sn` and is compile+run verified:
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+```sh
+node scripts/verify-snippets.mjs   # compiles + runs each snippet with ../../../../snc
+npm run lint                        # oxlint
+npm run build                       # vite build -> dist/
+```
 
-## React Compiler
+The SNlang server serves `examples/website/public/`, so after building, sync the
+output there (filenames are content-hashed; drop the stale bundle first):
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+```sh
+rm -f ../public/assets/* && cp dist/index.html ../public/index.html && cp dist/assets/* ../public/assets/
+```
 
-## Expanding the Oxlint configuration
+Dev mode with API proxy to the SNlang backend on :8090:
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+```sh
+npm run dev
+```

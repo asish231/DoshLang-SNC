@@ -1,0 +1,21 @@
+use std.ai
+
+// Live test for the Google SDK path (needs GEMINI_API_KEY env or .env).
+// Run: ./snc examples/ai_google_test.sn -o /tmp/ai_g && /tmp/ai_g
+
+fn main() {
+    GoogleClient client = google_client()
+    if (client.api_key.length() == 0) {
+        print("SKIP: set GEMINI_API_KEY env or .env")
+        return
+    }
+    print("model: " + client.model)
+    str reply = client.interactions_create("Reply with exactly: SDK OK")
+    if (reply.length() == 0) {
+        print("default model saturated, retrying gemini-2.5-flash")
+        client.model = "gemini-2.5-flash"
+        reply = client.interactions_create("Reply with exactly: SDK OK")
+    }
+    print("google says:")
+    print(reply)
+}

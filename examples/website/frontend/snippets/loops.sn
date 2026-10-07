@@ -1,0 +1,19 @@
+fn main() {
+    for (int i = 0, i < 5, i += 1) {
+        print(i)
+    }
+    int n = 3
+    while (n > 0) {
+        print(n)
+        n -= 1
+    }
+    for (num in [1, 2, 3, 4, 5]) {
+        if (num == 3) {
+            skip
+        }
+        if (num == 5) {
+            stop
+        }
+        print(num)
+    }
+}

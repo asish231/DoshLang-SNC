@@ -1,0 +1,11 @@
+fn main() {
+    chan<int> c1
+    chan<int> c2
+    spawn {
+        time_sleep_ms(20)
+        c2.send(77)
+    }
+    int ready = select(c1, c2, 1000)
+    print(ready)
+    print(c2.receive())
+}

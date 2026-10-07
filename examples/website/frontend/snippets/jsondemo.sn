@@ -1,0 +1,18 @@
+use std.json
+use std.time
+
+fn main() {
+    let v, err = parse("[7, \"hi\"]")
+    if (err != none) {
+        print(err.message())
+        return
+    }
+    print(v.at(0).as_int())
+    print(v.at(1).as_str())
+    print(encode(v))
+    int t = now_ms()
+    if (t > 0) {
+        print("time")
+    }
+    print(format(0))
+}

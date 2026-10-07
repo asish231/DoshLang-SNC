@@ -1,0 +1,16 @@
+use std.ai
+
+// Live test for the OpenAI SDK path (needs OPENAI_API_KEY env or .env).
+// Run: ./snc examples/ai_openai_test.sn -o /tmp/ai_o && /tmp/ai_o
+
+fn main() {
+    OpenAIClient client = openai_client()
+    if (client.api_key.length() == 0) {
+        print("SKIP: set OPENAI_API_KEY env or .env (OPENAI_MODEL overrides gpt-5)")
+        return
+    }
+    print("model: " + client.model)
+    str reply = client.responses_create("Reply with exactly: SDK OK")
+    print("openai says:")
+    print(reply)
+}

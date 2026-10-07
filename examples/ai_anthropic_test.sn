@@ -1,0 +1,16 @@
+use std.ai
+
+// Live test for the Anthropic SDK path (needs ANTHROPIC_API_KEY env or .env).
+// Run: ./snc examples/ai_anthropic_test.sn -o /tmp/ai_a && /tmp/ai_a
+
+fn main() {
+    AnthropicClient client = anthropic_client()
+    if (client.api_key.length() == 0) {
+        print("SKIP: set ANTHROPIC_API_KEY env or .env (ANTHROPIC_MODEL overrides default)")
+        return
+    }
+    print("model: " + client.model)
+    str reply = client.messages_create("Reply with exactly: SDK OK")
+    print("anthropic says:")
+    print(reply)
+}

@@ -1,0 +1,17 @@
+blueprint Animal {
+    fn speak() -> str {
+        return "animal"
+    }
+}
+
+blueprint Dog from Animal {
+    fn speak() -> str {
+        return "woof"
+    }
+}
+
+fn main() {
+    new Dog d()
+    Animal a = d
+    print(a.speak())
+}

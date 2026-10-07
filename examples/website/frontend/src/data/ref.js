@@ -1,0 +1,280 @@
+// Reference data: standard library, CLI/tooling, curated repo examples, DSA set.
+// Signatures verified against stdlib/std/*.sn and `snc --help`.
+
+export const STDLIB = [
+  {
+    pkg: 'std.ai',
+    desc: 'Official-style AI SDK clients: Google (Interactions API), OpenAI (Responses API), Anthropic (Messages API). Keys from $GEMINI_API_KEY / $OPENAI_API_KEY / $ANTHROPIC_API_KEY or .env; models via $GEMINI_MODEL / $OPENAI_MODEL / $ANTHROPIC_MODEL or client.model. Every call returns "" on failure.',
+    fns: [
+      ['google_client() -> GoogleClient', 'Reads key + model (default gemini-3.8-flash).'],
+      ['google_client_with(key, model)', 'Explicit key, mirroring genai.Client(api_key=...).'],
+      ['client.interactions_create(input)', 'POST /v1beta/interactions; returns output_text.'],
+      ['client.interactions_create_prev(input, id)', 'Multi-turn via previous_interaction_id.'],
+      ['openai_client() -> OpenAIClient', 'Reads key + model (default gpt-5).'],
+      ['openai_client_with(key, model)', 'Explicit key.'],
+      ['client.responses_create(input)', 'POST /v1/responses; returns output_text.'],
+      ['anthropic_client() -> AnthropicClient', 'Reads key + model (default claude-sonnet-4-6).'],
+      ['anthropic_client_with(key, model)', 'Explicit key.'],
+      ['client.messages_create(input)', 'POST /v1/messages; returns first text block.'],
+    ],
+  },
+  {
+    pkg: 'std.math',
+    desc: 'Integer math helpers.',
+    fns: [
+      ['abs(x)', 'Absolute value.'],
+      ['max(a, b)', 'The larger of two integers.'],
+      ['min(a, b)', 'The smaller of two integers.'],
+      ['pow(base, exp)', 'Integer exponentiation.'],
+      ['clamp(n, lo, hi)', 'Constrain n into [lo, hi].'],
+      ['sign(x)', '-1, 0, or 1.'],
+    ],
+  },
+  {
+    pkg: 'std.string',
+    desc: 'Helpers plus the built-in string methods (length, slice, contains, upper, lower, replace, split).',
+    fns: [
+      ['isEmpty(s)', 'True when the string is "".'],
+      ['repeat(s, n)', 's concatenated n times.'],
+    ],
+  },
+  {
+    pkg: 'std.io',
+    desc: 'Console output.',
+    fns: [['println(s)', 'Print a line. (The global print works without imports.)']],
+  },
+  {
+    pkg: 'std.json',
+    desc: 'JSON parsing and encoding.',
+    fns: [
+      ['parse(s) -> (json, error)', 'Parse text into a json value.'],
+      ['encode(v) -> str', 'Render a json value as text.'],
+    ],
+  },
+  {
+    pkg: 'std.time',
+    desc: 'Clocks and sleeps.',
+    fns: [
+      ['now_ms() -> int', 'Wall-clock milliseconds.'],
+      ['sleep_ms(ms)', 'Block the current thread. (sleep_async future for the reactor.)'],
+      ['format(ms) -> str', 'Format a timestamp as text.'],
+    ],
+  },
+  {
+    pkg: 'std.http',
+    desc: 'HTTP client and one-shot server. HTTPS goes through verified curl.',
+    fns: [
+      ['get(url) -> (str, error)', 'Fetch a URL.'],
+      ['post(url, body) -> (str, error)', 'POST a body.'],
+      ['serve_once(port, handler)', 'Serve one request with fn(str) -> str, then stop.'],
+    ],
+  },
+  {
+    pkg: 'std.net',
+    desc: 'Non-blocking TCP on the shared reactor.',
+    fns: [
+      ['listen(port) -> int', 'Bind a listener; 0 picks a free port.'],
+      ['listen_any(port) -> int', 'Bind, accepting any interface.'],
+      ['port(listener) -> int', 'The bound port (useful after listen(0)).'],
+      ['connect(host, port, timeout_ms) -> int', 'Open a connection.'],
+      ['accept(listener) -> int', 'Accept one peer.'],
+      ['read(sock) -> str', 'Read available text.'],
+      ['write(sock, data) -> int', 'Send text.'],
+      ['close(sock)', 'Close a socket.'],
+      ['wait_read(socks, timeout_ms) -> int', 'Readiness wait over many sockets.'],
+      ['get(url) -> (str, error)', 'Async-style fetch future helper.'],
+    ],
+  },
+  {
+    pkg: 'std.file',
+    desc: 'File and directory operations. (Globals file_read / file_write / file_append cover the two-liners.)',
+    fns: [
+      ['read(path) -> (str, error)', 'Read a whole file.'],
+      ['write(path, data) -> error', 'Create or overwrite.'],
+      ['append(path, data) -> error', 'Append to a file.'],
+      ['exists(path) -> bool', 'Presence check.'],
+      ['delete(path) -> error', 'Remove a file.'],
+      ['copy(src, dst) -> error', 'Copy a file.'],
+      ['move(src, dst) -> error', 'Rename a file.'],
+      ['mkdir(path) -> error', 'Create a directory.'],
+      ['rmdir(path) -> error', 'Remove an empty directory.'],
+      ['list_dir(path) -> (list<str>, error)', 'List directory entries.'],
+    ],
+  },
+  {
+    pkg: 'std.path',
+    desc: 'Path string surgery.',
+    fns: [
+      ['join(a, b)', 'Join with the platform separator.'],
+      ['base(p)', 'Final component.'],
+      ['dir(p)', 'Everything but the final component.'],
+      ['ext(p)', 'File extension.'],
+    ],
+  },
+  {
+    pkg: 'std.os',
+    desc: 'Processes and environment.',
+    fns: [
+      ['getenv(name) -> str?', 'Environment variable, none when unset.'],
+      ['exit(code)', 'Terminate the process.'],
+      ['args() -> list<str>', 'Command-line arguments.'],
+      ['exec(cmd, args) -> (int, str, error)', 'Run a program, capture output.'],
+      ['system(cmd) -> (int, str, error)', 'Run through the shell.'],
+    ],
+  },
+  {
+    pkg: 'std.db',
+    desc: 'SQLite through zero-overhead C FFI.',
+    fns: [
+      ['db_open(path) -> ptr', 'Open (":memory:" for transient use).'],
+      ['db_version() -> str', 'SQLite library version.'],
+      ['db_close(db)', 'Close the connection.'],
+      ['db_exec(db, sql) -> int', 'Run a statement without rows.'],
+      ['db_error(db) -> str', 'Last error text.'],
+      ['db_prepare(db, sql) -> ptr', 'Compile a statement.'],
+      ['db_step(stmt) -> int', 'Advance the cursor (100 means a row).'],
+      ['db_column_int(stmt, col) -> int', 'Read an integer column.'],
+      ['db_column_text(stmt, col) -> str', 'Read a text column.'],
+      ['db_finalize(stmt)', 'Release a prepared statement.'],
+    ],
+  },
+  {
+    pkg: 'std.crypto',
+    desc: 'Digests and helpers, verified against published test vectors.',
+    fns: [
+      ['sha256(data) -> ptr', 'Raw 32-byte digest.'],
+      ['sha512(data) -> ptr', 'Raw 64-byte digest.'],
+      ['md5(data) -> ptr', 'Raw 16-byte digest.'],
+      ['hmac_sha256(key, msg) -> ptr', 'Keyed digest.'],
+      ['crc32(data) -> int', 'Checksum; crc32_extend continues one.'],
+      ['eq(a, b) -> bool', 'Constant-time string comparison.'],
+      ['wipe(buf, n)', 'Zero secret bytes.'],
+    ],
+  },
+  {
+    pkg: 'std.bytes',
+    desc: 'Growable mutable byte buffers (ptr) plus hex rendering.',
+    fns: [
+      ['buffer(cap) -> ptr', 'Allocate a buffer.'],
+      ['len(b) -> int', 'Used length.'],
+      ['push(b, v) -> int', 'Append one byte (auto-grows).'],
+      ['get(b, i) / set(b, i, v)', 'Random access.'],
+      ['append_str(b, s)', 'Append text.'],
+      ['slice(b, start, n) -> ptr', 'Copy a window.'],
+      ['find(b, v) / search / rfind', 'Byte search.'],
+      ['truncate(b, n) / clear(b) / fill(b, v, n)', 'Reshape in place.'],
+      ['hex(b) -> str', 'Lowercase hex rendering.'],
+      ['raw(b) -> ptr', 'Pointer for FFI calls.'],
+    ],
+  },
+  {
+    pkg: 'std.test',
+    desc: 'Assertions for snc test.',
+    fns: [
+      ['assert_true(c) / assert_false(c)', 'Boolean checks.'],
+      ['assert_eq_int(a, b)', 'Integer equality.'],
+      ['assert_eq_str(a, b)', 'String equality.'],
+      ['assert_neq_int(a, b)', 'Integer inequality.'],
+    ],
+  },
+  {
+    pkg: 'std.web',
+    desc: 'HTTP servers: routing, middleware, static files.',
+    fns: [
+      ['App.create()', 'New application.'],
+      ['app.get/post/put/delete(path, fn)', 'Register a handler.'],
+      ['app.mount(prefix, router)', 'Attach a sub-router.'],
+      ['app.middleware(fn)', 'Run an interceptor on every request.'],
+      ['app.serve_static(url, dir)', 'Serve files from disk.'],
+      ['app.listen(port)', 'Start the reactor loop.'],
+      ['Router.create()', 'Isolated route table.'],
+      ['Response.ok/json/html/text(body)', 'Status factories (plus created, redirect, bad_request, unauthorized, forbidden, not_found, server_error).'],
+      ['req.param(name)', 'A :token from the route.'],
+      ['req.query(name) / req.header(name)', 'Query string and headers.'],
+      ['req.cookie(name) / req.bearer_token()', 'Auth inputs.'],
+    ],
+  },
+];
+
+export const CLI = [
+  {
+    cmd: 'snc file.sn -o app',
+    desc: 'Compile a program to a native binary, then run it.',
+    code: './snc examples/hello_world.sn -o hello\n./hello',
+  },
+  {
+    cmd: 'snc [options]',
+    desc: 'Build flags: -o output, --emit-llvm for IR inspection, --target triple, --clang path, -O 0-3/s/z, repeatable -L lib for linking.',
+    code: './snc app.sn -o app -O2\n./snc app.sn --emit-llvm -o app.ll',
+  },
+  {
+    cmd: 'snc fmt',
+    desc: 'Format .sn files: trim trailing space, normalize indent, ensure final newline.',
+    code: './snc fmt\n./snc fmt main.sn',
+  },
+  {
+    cmd: 'snc test',
+    desc: 'Discover and run *_test.sn files, with optional line coverage and name filtering.',
+    code: './snc test\n./snc test --coverage\n./snc test math --root tests',
+  },
+  {
+    cmd: 'snc pkg',
+    desc: 'Local package manager. init creates sn.toml; add records deps; build compiles with resolution; publish packs dist/.tar.gz.',
+    code: './snc pkg init --name myapp\n./snc pkg add mylib --path packages/mylib\n./snc pkg list\n./snc pkg build -o app',
+  },
+  {
+    cmd: 'snc translate --from <lang>',
+    desc: 'Map a Python / JS / Go / C subset into SNlang. A migration aid, not a full frontend.',
+    code: './snc translate --from python script.py -o script.sn',
+  },
+  {
+    cmd: 'snc lsp',
+    desc: 'Language server over stdio: diagnostics, completion, hover, go-to-definition, references, rename, symbols.',
+    code: './snc lsp',
+  },
+  {
+    cmd: 'snc debug',
+    desc: 'Build with debug symbols and print the lldb workflow.',
+    code: './snc debug app.sn -o app_dbg',
+  },
+];
+
+// Curated repo examples: every file below compiles AND runs clean.
+// Opened live from /api/docs/examples/<name> so the UI never drifts.
+export const CURATED = [
+  { name: 'hello_world.sn', title: 'Hello, World!', desc: 'The smallest complete program.', tags: ['start'] },
+  { name: 'compound_ops.sn', title: 'Compound assignment', desc: '+=, -=, *= in action.', tags: ['basics'] },
+  { name: 'else_if.sn', title: 'Else-if ladder', desc: 'Multi-branch conditions.', tags: ['control'] },
+  { name: 'for_loop.sn', title: 'Counted loops', desc: 'for with start, condition, step.', tags: ['loops'] },
+  { name: 'fib_iter.sn', title: 'Iterative Fibonacci', desc: 'Loop with two running values.', tags: ['loops', 'dsa'] },
+  { name: 'functions.sn', title: 'Functions tour', desc: 'Params, returns, forward calls.', tags: ['functions'] },
+  { name: 'default_params.sn', title: 'Default parameters', desc: 'Omitting trailing arguments.', tags: ['functions'] },
+  { name: 'string_methods.sn', title: 'String methods', desc: 'The whole string toolbox.', tags: ['strings'] },
+  { name: 'in_operator.sn', title: 'Membership with in', desc: 'Lists, strings, and substrings.', tags: ['collections'] },
+  { name: 'map_basic.sn', title: 'Maps', desc: 'Literals, access, update, length.', tags: ['collections'] },
+  { name: 'nullable_basic.sn', title: 'Nullable values', desc: 'T? holders and iteration.', tags: ['null'] },
+  { name: 'error_demo.sn', title: 'Error tuples', desc: '(int, error) without exceptions.', tags: ['errors'] },
+  { name: 'use_std_math.sn', title: 'Using std.math', desc: 'One import, six helpers.', tags: ['modules'] },
+  { name: 'blueprint_point.sn', title: 'First blueprint', desc: 'Fields, methods, construction.', tags: ['oop'] },
+  { name: 'blueprint_inherit.sn', title: 'Inheritance', desc: 'blueprint Dog from Animal.', tags: ['oop'] },
+  { name: 'oop_poly.sn', title: 'Polymorphism', desc: 'One list, many behaviors.', tags: ['oop'] },
+  { name: 'algebraic_enums.sn', title: 'Enums with data', desc: 'Token.Ident(name) style payloads and match.', tags: ['oop', 'control'] },
+  { name: 'closures.sn', title: 'Closures & fn values', desc: 'Passing behavior as fn(int) -> int.', tags: ['functions'] },
+  { name: 'goroutine_spawn.sn', title: 'First channel', desc: 'send in a goroutine, receive in main.', tags: ['concurrency'] },
+  { name: 'spawn_chan.sn', title: 'Spawn + channel', desc: 'Streaming values across threads.', tags: ['concurrency'] },
+  { name: 'chan_select.sn', title: 'select with timeout', desc: 'Waiting on two channels.', tags: ['concurrency'] },
+  { name: 'lock_counter.sn', title: 'Locks', desc: 'Synchronized shared counter.', tags: ['concurrency'] },
+  { name: 'json_time.sn', title: 'JSON + time', desc: 'parse/encode and the clock.', tags: ['stdlib'] },
+  { name: 'file_io.sn', title: 'File I/O', desc: 'Write then read back. (Writes a file when run.)', tags: ['stdlib'] },
+  { name: 'hash_crypto.sn', title: 'Hashing', desc: 'std.crypto digests.', tags: ['stdlib'] },
+  { name: 'gc_cycles.sn', title: 'Cycle collection', desc: 'gc_collect reclaiming a reference cycle.', tags: ['memory'] },
+];
+
+export const DSA = [
+  { id: 'kadane', title: "Kadane's algorithm", cat: 'Dynamic Programming', diff: 'Medium', time: 'O(N)', snippet: 'dsa_kadane', desc: 'Maximum subarray sum in one pass.' },
+  { id: 'binary-search', title: 'Binary search', cat: 'Searching', diff: 'Easy', time: 'O(log N)', snippet: 'dsa_binsearch', desc: 'Halving a sorted list to find a target.' },
+  { id: 'two-sum', title: 'Two sum', cat: 'Arrays', diff: 'Easy', time: 'O(N^2)', snippet: 'dsa_twosum', desc: 'Index pairs that hit a target, via tuple returns.' },
+  { id: 'quicksort', title: 'Quicksort', cat: 'Sorting', diff: 'Medium', time: 'O(N log N)', snippet: 'dsa_quicksort', desc: 'Recursive functional quicksort with push-built partitions.' },
+  { id: 'lru-cache', title: 'LRU cache', cat: 'Data Structures', diff: 'Hard', time: 'O(1)', snippet: 'dsa_lru', desc: 'A capacity-bounded cache as a blueprint.' },
+  { id: 'goroutine-pool', title: 'Worker pool', cat: 'Concurrency', diff: 'Medium', time: 'O(N/P)', snippet: 'dsa_workers', desc: 'Two spawn workers sharing job/result channels. Output order varies.', unordered: true },
+];

@@ -1,0 +1,14 @@
+fn main() {
+    int score = 10
+    str player = "Ada"
+    bool alive = true
+    print(player)
+    print(score)
+    print(alive)
+    score = score + 5
+    print(score)
+    score += 5
+    score -= 3
+    score *= 4
+    print(score)
+}

@@ -14,11 +14,11 @@ fn generate_ai_tutor_reply(str query) -> str {
     }
 
     if (q.contains("goroutine") or q.contains("concur") or q.contains("channel") or q.contains("thread")) {
-        return "SNlang Concurrency Model:\n\n1. Multiplexed M:N Model: Goroutines are spawned using the `go` keyword or `spawn` built-in, backed by pthreads with a 1MB segmented stack.\n2. Communication via Channels: `chan<T>` provides unbuffered and buffered message passing.\n3. Synchronization: Lock blueprints (`lock`) ensure thread-safe memory mutations.\n\nExample SNlang Concurrency:\n\n```sn\nfn worker(chan<int> ch, int id) \{\n    int val = id * 10\n    ch <- val\n\}\n\nfn main() \{\n    chan<int> ch = make(chan<int>, 4)\n    go worker(ch, 1)\n    go worker(ch, 2)\n    int r1 = <-ch\n    int r2 = <-ch\n    print(\"Results: \" + cast(r1, str) + \", \" + cast(r2, str))\n\}\n```"
+        return "SNlang Concurrency Model:\n\n1. Threads as blocks: `spawn \{ \}` runs an OS thread, `goroutine \{ \}` runs on the shared scheduler. There is no `go` keyword and no `<-` operator.\n2. Communication via channels: declare `chan<int> ch`, then `ch.send(value)` and `ch.receive()`. `ch.close()` closes a channel and `select(a, b, ms)` waits on two channels with a timeout.\n3. Synchronization: the `lock` type plus blueprint methods keep shared state safe.\n\nExample SNlang Concurrency:\n\n```sn\nfn main() \{\n    chan<int> ch\n    goroutine \{\n        ch.send(21 * 2)\n    \}\n    int answer = ch.receive()\n    print(\"Answer: \" + cast(answer, str))\n\}\n```"
     }
 
     if (q.contains("web") or q.contains("http") or q.contains("router") or q.contains("middleware")) {
-        return "SNlang `std.web` Enterprise Architecture:\n\n- Reactor Event Loop: Non-blocking socket multiplexing via epoll/kqueue.\n- Interceptor Pipeline: `app.middleware(fn(Request) -> Response)` implements Django / Spring Boot filter chains.\n- Sub-Routers: `Router.create()` and `app.mount(\"/api\", router)` enable clean modularization.\n- Dynamic Route Matching: `:param` tokens are automatically extracted via `req.param(\"key\")`.\n- Status Factories: `Response.ok()`, `Response.created()`, `Response.unauthorized()` produce strict HTTP status responses."
+        return "SNlang `std.web` Architecture:\n\n- Reactor Event Loop: non-blocking socket multiplexing over the same reactor that drives timers.\n- Middleware pipeline: `app.middleware(fn)` runs every request through your interceptor chain, and `app.mount(\"/api\", router)` keeps routes modular.\n- Dynamic Route Matching: `:param` tokens are extracted with `req.param(\"key\")`.\n- Status Factories: `Response.ok()`, `Response.created()`, `Response.unauthorized()` produce strict HTTP status responses."
     }
 
     if (q.contains("db") or q.contains("database") or q.contains("sqlite") or q.contains("sql")) {
@@ -26,7 +26,7 @@ fn generate_ai_tutor_reply(str query) -> str {
     }
 
     if (q.contains("crypto") or q.contains("auth") or q.contains("hash") or q.contains("password")) {
-        return "SNlang Cryptographic Security (`std.crypto` & `std.bytes`):\n\n- Passwords must never be stored in plain text.\n- Salt Generation: Generate cryptographic entropy with timestamp + seed.\n- Hash computation: `ptr digest = sha256(password + \":\" + salt)`.\n- Hex representation: `bytes.hex(digest)` yields 64-character lowercase hex.\n- Constant-time verification: `crypto.eq(hash_a, hash_b)` mitigates timing attacks."
+        return "SNlang Cryptographic Security (`std.crypto` & `std.bytes`):\n\n- Passwords must never be stored in plain text.\n- Salt Generation: Generate cryptographic entropy with timestamp + seed.\n- Hash computation: `ptr digest = sha256(password + \":\" + salt)`.\n- Hex representation: `hex(digest)` from `std.bytes` yields lowercase hex.\n- Constant-time verification: `eq(hash_a, hash_b)` from `std.crypto` mitigates timing attacks."
     }
 
     if (q.contains("compiler") or q.contains("llvm") or q.contains("architecture")) {

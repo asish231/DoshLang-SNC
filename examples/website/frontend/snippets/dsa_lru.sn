@@ -1,0 +1,48 @@
+blueprint LRUCache {
+    int capacity
+    map<str, int> store
+    list<str> order
+
+    fn get(str key) -> int {
+        if (self.store.contains(key)) {
+            return self.store[key]
+        }
+        return -1
+    }
+
+    fn put(str key, int value) {
+        if (not self.store.contains(key)) {
+            if (self.order.length() >= self.capacity) {
+                str victim = self.order[0]
+                map<str, int> kept_store = {}
+                for (k in self.store.keys()) {
+                    if (k != victim) {
+                        kept_store[k] = self.store[k]
+                    }
+                }
+                self.store = kept_store
+                list<str> kept = []
+                int i = 1
+                while (i < self.order.length()) {
+                    kept.push(self.order[i])
+                    i = i + 1
+                }
+                self.order = kept
+            }
+            self.order.push(key)
+        }
+        self.store[key] = value
+    }
+}
+
+fn main() {
+    new LRUCache cache(capacity: 2)
+    cache.store = {}
+    cache.order = []
+    cache.put("a", 1)
+    cache.put("b", 2)
+    print(cache.get("a"))
+    cache.put("c", 3)
+    print(cache.get("b"))
+    print(cache.get("c"))
+}

@@ -1,0 +1,69 @@
+use std.web
+use std.ai
+use common
+use middleware
+
+// Bring-your-own-key SDK demo: POST /api/ai/try
+// Body: {"provider":"google|openai|anthropic","key":"...","input":"...","model":"..."}
+// Runs the std.ai call with the CALLER's key (your quota, never stored or
+// logged server-side) and returns {"reply":"..."}.
+
+fn handle_ai_try(Request req) -> Response {
+    let doc, err = parse(req.body)
+    if (err != none) {
+        return Response.bad_request("Invalid JSON request")
+    }
+
+    str provider = doc.get("provider").as_str()
+    str key = doc.get("key").as_str()
+    str input = doc.get("input").as_str()
+    str model = doc.get("model").as_str()
+
+    if (provider != "google" and provider != "openai" and provider != "anthropic") {
+        return Response.bad_request("provider must be google, openai, or anthropic")
+    }
+    if (key.length() == 0 or key.length() > 256) {
+        return Response.bad_request("API key missing or too long")
+    }
+    if (input.length() == 0 or input.length() > 2000) {
+        return Response.bad_request("input must be 1..2000 chars")
+    }
+    if (model.length() > 64) {
+        return Response.bad_request("model name too long")
+    }
+
+    let allowed, used, remaining = check_rate_limit("ai_try", 10, 60000)
+    if (not allowed) {
+        return Response.make(429, "application/problem+json", rfc7807_error(429, "Too Many Requests", "SDK demo limit is 10 req/min shared."))
+    }
+
+    str reply = ""
+    if (provider == "google") {
+        str m = model
+        if (m.length() == 0) {
+            m = "gemini-3.8-flash"
+        }
+        GoogleClient gc = google_client_with(key, m)
+        reply = gc.interactions_create(input)
+    }
+    if (provider == "openai") {
+        str m = model
+        if (m.length() == 0) {
+            m = "gpt-5"
+        }
+        OpenAIClient oc = openai_client_with(key, m)
+        reply = oc.responses_create(input)
+    }
+    if (provider == "anthropic") {
+        str m = model
+        if (m.length() == 0) {
+            m = "claude-sonnet-4-6"
+        }
+        AnthropicClient ac = anthropic_client_with(key, m)
+        reply = ac.messages_create(input)
+    }
+    if (reply.length() == 0) {
+        return Response.server_error("Provider request failed: check the key, model, and try again")
+    }
+    return Response.ok("\{" + "\"reply\":\"" + json_escape(reply) + "\"" + "\}")
+}

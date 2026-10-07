@@ -1,0 +1,57 @@
+use std.web
+use std.file
+use common
+
+// Only plain `*.sn` filenames inside examples/ may be served.
+// This blocks path traversal (no `/`, `\` or `..`) and non-SNlang files.
+fn safe_example_name(str name) -> bool {
+    if (name.length() < 4 or name.length() > 64) {
+        return false
+    }
+    if (name.contains("/") or name.contains("\\") or name.contains("..")) {
+        return false
+    }
+    list<str> parts = name.split(".")
+    if (parts.length() != 2) {
+        return false
+    }
+    if (parts[1] != "sn") {
+        return false
+    }
+    return true
+}
+
+fn handle_examples_list(Request req) -> Response {
+    let entries, err = list_dir("examples")
+    if (err != none) {
+        return Response.server_error("Unable to list examples directory")
+    }
+    str acc = "["
+    bool first = true
+    for (name in entries) {
+        if (safe_example_name(name)) {
+            if (not first) {
+                acc = acc + ","
+            }
+            first = false
+            acc = acc + "\{" + "\"name\":\"" + json_escape(name) + "\"" + "\}"
+        }
+    }
+    acc = acc + "]"
+    return Response.json(acc)
+}
+
+fn handle_example_get(Request req) -> Response {
+    str name = req.param("name")
+    if (not safe_example_name(name)) {
+        return Response.bad_request("Invalid example name")
+    }
+    let content, err = read("examples/" + name)
+    if (err != none) {
+        return Response.not_found("Example not found")
+    }
+    if (content.length() > 65536) {
+        return Response.bad_request("Example too large to preview")
+    }
+    return Response.ok("\{" + "\"name\":\"" + json_escape(name) + "\",\"code\":\"" + json_escape(content) + "\"" + "\}")
+}

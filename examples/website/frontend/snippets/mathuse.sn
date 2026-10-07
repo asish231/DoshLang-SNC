@@ -1,0 +1,9 @@
+use std.math
+
+fn main() {
+    print(abs(0 - 5))
+    print(max(3, 9))
+    print(min(3, 9))
+    print(clamp(15, 0, 10))
+    print(pow(2, 8))
+}

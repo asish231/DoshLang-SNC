@@ -1,0 +1,26 @@
+fn main() {
+    str status = "active"
+    match (status) {
+        "active" {
+            print("User is active")
+        }
+        "banned" {
+            print("User is banned")
+        }
+        default {
+            print("Unknown status")
+        }
+    }
+    int code = 2
+    match (code) {
+        1 {
+            print("one")
+        }
+        2 {
+            print("two")
+        }
+        default {
+            print("other")
+        }
+    }
+}

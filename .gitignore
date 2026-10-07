@@ -39,4 +39,6 @@ website_server
 *.db-wal
 node_modules/
 sandbox_*
+.gemini_*.json
+.playwright-cli/
 
