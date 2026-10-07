@@ -327,6 +327,23 @@ pub fn parse_lockfile(src: &str) -> Lockfile {
 }
 
 pub fn repo_root() -> PathBuf {
+    // Release archives keep stdlib/ next to the snc binary, so look there
+    // first: walk up from the running executable for a dir containing it.
+    // Dev checkouts resolve the same way (…/compiler/target/release/snc
+    // walks up to the repo root), then fall back to the build-time path.
+    let mut dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    for _ in 0..6 {
+        let d = match dir {
+            Some(d) => d,
+            None => break,
+        };
+        if d.join("stdlib").exists() {
+            return d;
+        }
+        dir = d.parent().map(Path::to_path_buf);
+    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap_or(Path::new("."))

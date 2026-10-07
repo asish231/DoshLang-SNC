@@ -30,6 +30,22 @@ Windows: `./build.ps1` then `./snc.exe …`.
 make test     # cargo test + hello smoke run
 ```
 
+## Download (prebuilt binaries)
+
+Grab `snlang-<os>-<arch>.tar.gz` / `.zip` from
+[GitHub Releases](../../releases) — macOS (arm64 + x64), Linux (x64),
+Windows (x64). Each archive ships `snc`, `stdlib/`, sample `packages/`,
+`runtime.c`, and a hello world:
+
+```sh
+./snc --version   # snc 0.2.0
+./snc hello_world.sn -o hello && ./hello
+```
+
+You still need **clang on `PATH`** (Xcode command-line tools, `apt install
+clang`, or LLVM for Windows) because `snc` links through it. Keep the
+extracted folder together — or add it to `PATH` — and compile from anywhere.
+
 ## Quickstart
 
 ```sn

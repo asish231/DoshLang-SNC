@@ -1,0 +1,53 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  compiler:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Compiler tests
+        run: cargo test --release --manifest-path compiler/Cargo.toml
+      - name: Build snc
+        run: cargo build --release --manifest-path compiler/Cargo.toml
+      - name: Hello-world smoke test
+        run: |
+          ./compiler/target/release/snc --version
+          ./compiler/target/release/snc examples/hello_world.sn -o /tmp/ci_hello
+          /tmp/ci_hello
+      - name: Upload snc for snippet check
+        uses: actions/upload-artifact@v4
+        with:
+          name: snc-linux
+          path: compiler/target/release/snc
+
+  website:
+    needs: compiler
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: examples/website/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download snc
+        uses: actions/download-artifact@v4
+        with:
+          name: snc-linux
+          path: /tmp/sncbin
+      - name: Place snc at repo root (module resolution matches the sandbox)
+        run: cp /tmp/sncbin/snc ../../snc && chmod +x ../../snc
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: examples/website/frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: node scripts/verify-snippets.mjs
+      - run: npm run build

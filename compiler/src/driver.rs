@@ -304,6 +304,22 @@ fn link_libraries(
 }
 
 fn runtime_c_path() -> PathBuf {
+    // Release archives keep runtime.c next to the snc binary; dev checkouts
+    // resolve it the same way (…/target/release/snc walks up to compiler/).
+    let mut dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    for _ in 0..6 {
+        let d = match dir {
+            Some(d) => d,
+            None => break,
+        };
+        let cand = d.join("runtime.c");
+        if cand.exists() {
+            return cand;
+        }
+        dir = d.parent().map(Path::to_path_buf);
+    }
     let here = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runtime.c");
     if here.exists() {
         here

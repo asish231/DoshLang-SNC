@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 #[derive(Parser, Debug)]
-#[command(name = "snc", about = "SNlang compiler (LLVM)")]
+#[command(name = "snc", about = "SNlang compiler (LLVM)", version)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Cmd>,

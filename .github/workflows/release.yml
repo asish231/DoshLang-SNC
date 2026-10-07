@@ -1,0 +1,97 @@
+name: release
+
+# Cut a release: git tag v0.2.0 && git push origin v0.2.0
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            pkg: snlang-linux-x64
+            archive: tar.gz
+          - os: macos-14
+            target: aarch64-apple-darwin
+            pkg: snlang-macos-arm64
+            archive: tar.gz
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            pkg: snlang-macos-x64
+            archive: tar.gz
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            pkg: snlang-windows-x64
+            archive: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust target
+        run: rustup target add ${{ matrix.target }}
+      - name: Install LLVM clang (Windows smoke test)
+        if: runner.os == 'Windows'
+        run: choco install llvm -y --no-progress
+      - name: Build snc
+        run: cargo build --release --target ${{ matrix.target }} --manifest-path compiler/Cargo.toml
+      - name: Hello-world smoke test
+        shell: bash
+        run: |
+          BIN="compiler/target/${{ matrix.target }}/release/snc"
+          if [ "${{ runner.os }}" = "Windows" ]; then BIN="$BIN.exe"; fi
+          "$BIN" --version
+          "$BIN" examples/hello_world.sn -o /tmp/rel_hello
+          /tmp/rel_hello
+      - name: Package archive
+        shell: bash
+        run: |
+          rm -rf dist-stage && mkdir -p dist-stage/${{ matrix.pkg }}
+          D="dist-stage/${{ matrix.pkg }}"
+          BIN="compiler/target/${{ matrix.target }}/release/snc"
+          if [ "${{ runner.os }}" = "Windows" ]; then cp "$BIN.exe" "$D/snc.exe"; else cp "$BIN" "$D/snc"; fi
+          cp compiler/runtime.c "$D/"
+          cp -r stdlib packages "$D/"
+          cp examples/hello_world.sn "$D/"
+          cp README.md LICENSE "$D/"
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            (cd dist-stage && powershell -NoProfile -Command "Compress-Archive -Path '${{ matrix.pkg }}' -DestinationPath '${{ matrix.pkg }}.zip'")
+          else
+            tar -czf "dist-stage/${{ matrix.pkg }}.tar.gz" -C dist-stage "${{ matrix.pkg }}"
+          fi
+      - name: Upload archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.pkg }}
+          path: dist-stage/${{ matrix.pkg }}.${{ matrix.archive }}
+
+  publish:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: archives
+          merge-multiple: true
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: archives/*
+          generate_release_notes: true
+          body: |
+            Prebuilt `snc` for macOS (arm64 + x64), Linux (x64), and Windows (x64).
+
+            Each archive ships the compiler, `stdlib/`, sample `packages/`,
+            `runtime.c`, and a hello world. You still need **clang on PATH**
+            (Xcode tools / `apt install clang` / LLVM for Windows) because
+            `snc` links through it. Keep the extracted folder together and run
+            from anywhere:
+
+            ```
+            ./snc hello_world.sn -o hello && ./hello
+            ```
