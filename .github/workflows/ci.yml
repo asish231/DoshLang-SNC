@@ -47,7 +47,7 @@ jobs:
           name: snc-linux
           path: /tmp/sncbin
       - name: Place snc at repo root (module resolution matches the sandbox)
-        run: cp /tmp/sncbin/snc ../../snc && chmod +x ../../snc
+        run: cp /tmp/sncbin/snc ../../../snc && chmod +x ../../../snc
       - uses: actions/setup-node@v4
         with:
           node-version: 22
