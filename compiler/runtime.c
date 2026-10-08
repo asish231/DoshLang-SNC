@@ -1,6 +1,11 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE /* pthread_getattr_np: report worker stack bounds */
 #endif
+#ifdef _WIN32
+#ifndef _CRT_SECURE_NO_WARNINGS
+#define _CRT_SECURE_NO_WARNINGS /* fopen/getenv/strerror are fine for snc */
+#endif
+#endif
 #include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
@@ -32,7 +37,10 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || \
+    defined(__NetBSD__) || defined(__DragonFly__)
 #include <sys/sysctl.h>
+#endif
 #include <unistd.h>
 #include <sys/wait.h>
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || \
@@ -50,6 +58,16 @@ typedef struct Obj {
 
 void sn_gc_register_thread(void *lo, void *hi);
 static int gc_stack_bounds(void **lo, void **hi);
+
+#ifdef _WIN32
+#define SN_POPEN _popen
+#define SN_PCLOSE _pclose
+#define SN_NULL_REDIR "2>nul"
+#else
+#define SN_POPEN popen
+#define SN_PCLOSE pclose
+#define SN_NULL_REDIR "2>/dev/null"
+#endif
 
 enum {
     KIND_STR = 1,
@@ -142,6 +160,27 @@ static pthread_cond_t g_spawn_cv = PTHREAD_COND_INITIALIZER;
 
 static int g_argc = 0;
 static char **g_argv = NULL;
+
+#ifdef _WIN32
+/* Forward declarations: the real definitions live with the channel/scheduler
+   sections below, but sn_rt_init() (also below) initializes them at startup.
+   Tentative definitions coalesce, so this is legal C on MSVC and clang. */
+static CRITICAL_SECTION g_evt_mu;
+static CONDITION_VARIABLE g_evt_cv;
+static CRITICAL_SECTION g_go_mu;
+static CONDITION_VARIABLE g_go_cv;
+static CRITICAL_SECTION g_go_evt_mu;
+static CONDITION_VARIABLE g_go_evt_cv;
+
+/* Portable current-thread identity for GC thread tracking. */
+static void *sn_thread_self(void) {
+    return (void *)(uintptr_t)GetCurrentThreadId();
+}
+#else
+static void *sn_thread_self(void) {
+    return (void *)pthread_self();
+}
+#endif
 
 
 /* ---- endianness / byte swapping (network-order / host conversion) ---- */
@@ -354,7 +393,7 @@ static int gc_stack_bounds(void **lo, void **hi) {
 }
 
 void sn_gc_register_thread(void *lo, void *hi) {
-    void *owner = (void *)pthread_self();
+    void *owner = sn_thread_self();
     gc_lock();
     for (int64_t i = 0; i < g_gc_nthreads; i++) {
         if (g_gc_threads[i].owner == owner) {
@@ -521,7 +560,7 @@ void sn_gc_collect(void) {
        inside that range. */
     volatile char anchor = 0;
     void *sp = (void *)&anchor;
-    void *me = (void *)pthread_self();
+    void *me = sn_thread_self();
     void *top = NULL;
     for (int64_t t = 0; t < g_gc_nthreads; t++) {
         if (g_gc_threads[t].owner == me) {
@@ -627,7 +666,7 @@ void sn_gc_enter(void) {
 void sn_gc_leave(void) {
     gc_lock();
     g_active_threads--;
-    void *owner = (void *)pthread_self();
+    void *owner = sn_thread_self();
     for (int64_t i = 0; i < g_gc_nthreads; i++) {
         if (g_gc_threads[i].owner == owner) {
             g_gc_threads[i] = g_gc_threads[g_gc_nthreads - 1];
@@ -1739,6 +1778,10 @@ static void *spawn_tramp(void *p) {
     char anchor = 0;
     {
         void *lo = NULL, *hi = NULL;
+#ifndef _WIN32
+        /* POSIX only: g_spawn_attr records the about-to-be-created thread's
+           stack so its frames count as GC roots. Windows threads created via
+           _beginthreadex fall back to the anchor window below. */
         if (g_spawn_attr) {
             void *addr = NULL;
             size_t sz = 0;
@@ -1747,6 +1790,7 @@ static void *spawn_tramp(void *p) {
                 hi = (char *)addr + sz;
             }
         }
+#endif
         if (lo && hi) {
             sn_gc_register_thread(lo, hi);
         } else {
@@ -2369,14 +2413,14 @@ static void http_via_curl(const char *method, const char *url, const char *body,
     if (body && body[0]) {
         sn_shell_single_quote(qbody, sizeof(qbody), body);
         snprintf(cmd, sizeof(cmd),
-                 "curl -sS -L --max-time %d -A %s%s -X %s -H 'Content-Type: application/octet-stream' -d %s %s 2>/dev/null",
-                 timeout, qua, insecure, method, qbody, qurl);
+                 "curl -sS -L --max-time %d -A %s%s -X %s -H 'Content-Type: application/octet-stream' -d %s %s %s",
+                 timeout, qua, insecure, method, qbody, qurl, SN_NULL_REDIR);
     } else {
         snprintf(cmd, sizeof(cmd),
-                 "curl -sS -L --max-time %d -A %s%s -X %s %s 2>/dev/null",
-                 timeout, qua, insecure, method, qurl);
+                 "curl -sS -L --max-time %d -A %s%s -X %s %s %s",
+                 timeout, qua, insecure, method, qurl, SN_NULL_REDIR);
     }
-    FILE *fp = popen(cmd, "r");
+    FILE *fp = SN_POPEN(cmd, "r");
     if (!fp) {
         if (out_body) *out_body = sn_str_from_cstr("");
         if (out_err) *out_err = sn_error_new(sn_str_from_cstr("curl failed"));
@@ -2390,7 +2434,7 @@ static void http_via_curl(const char *method, const char *url, const char *body,
         buf[n++] = (char)c;
     }
     buf[n] = 0;
-    rc = pclose(fp);
+    rc = SN_PCLOSE(fp);
     if (rc != 0 && n == 0) {
         if (out_body) *out_body = sn_str_from_cstr("");
         if (out_err) *out_err = sn_error_new(sn_str_from_cstr("curl failed (check TLS/certs; set SN_HTTP_INSECURE=1 only if needed)"));
@@ -2918,7 +2962,7 @@ static int g_rx_kq = -1;
 #ifdef _WIN32
 static CRITICAL_SECTION g_rx_mu;
 static CONDITION_VARIABLE g_rx_cv;
-typedef HANDLE g_rx_thread;
+static HANDLE g_rx_thread;
 static WSAPOLLFD g_rx_poll[RX_MAX_OPS + 1];
 static int64_t g_rx_next_deadline;
 static void *g_rx_next_op;
@@ -4559,6 +4603,7 @@ static int sn_nproc(void) {
 #endif
 }
 
+#ifndef _WIN32 /* POSIX work-stealing pool; on Windows sn_go_spawn falls back to sn_spawn */
 typedef struct GoDeque {
     void (*fn[GO_QUEUE])(void *);
     void *arg[GO_QUEUE];
@@ -4566,12 +4611,15 @@ typedef struct GoDeque {
     pthread_mutex_t mu;
     pthread_cond_t cv;
 } GoDeque;
+#endif /* _WIN32: no work-stealing pool; sn_go_spawn falls back to sn_spawn */
 
+#ifndef _WIN32
 static GoDeque g_deques[GO_MAX_WORKERS];
 static pthread_t g_go_workers[GO_MAX_WORKERS];
 static int g_go_nworkers = 0;
 static int g_go_started = 0;
 static int g_go_rr = 0;
+#endif
 
 
 /* global wake line: go_spawn broadcasts so workers re-scan their deques */
@@ -4595,6 +4643,7 @@ static void go_evt_wake(void) {
 #endif
 }
 
+#ifndef _WIN32 /* POSIX pool internals; Windows uses sn_spawn directly */
 static int deque_push(GoDeque *d, void (*fn)(void *), void *arg) {
     pthread_mutex_lock(&d->mu);
     if (d->count >= GO_QUEUE) { pthread_mutex_unlock(&d->mu); return 0; }
@@ -4691,6 +4740,7 @@ static void go_pool_init(void) {
     g_go_started = 1;
     pthread_mutex_unlock(&g_go_init_mu);
 }
+#endif /* POSIX pool internals */
 
 void sn_go_spawn(void (*fn)(void *), void *arg) {
 #ifndef _WIN32

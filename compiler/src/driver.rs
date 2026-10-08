@@ -240,6 +240,14 @@ pub fn compile(opts: &CompileOptions) -> Result<CompileResult, String> {
         .arg("-o")
         .arg(&out_bin)
         .arg("-Wno-override-module");
+    // Old clang (e.g. Ubuntu 22.04's clang 14) defaults to typed pointers and
+    // rejects the opaque `ptr` IR snc emits. The probe below passes the
+    // transition flag only when the toolchain honors it (new clangs that
+    // dropped the flag misparse it as `-o paque-pointers`, so a `--version`
+    // check is not sufficient).
+    if clang_accepts_opaque_pointers(&opts.clang) {
+        cmd.arg("-opaque-pointers");
+    }
     if !triple.contains("windows") {
         cmd.arg("-pthread");
     } else {
@@ -328,6 +336,64 @@ fn runtime_c_path() -> PathBuf {
     }
 }
 
+/// Old clang (e.g. Ubuntu 22.04's clang 14) defaults to typed pointers and
+/// rejects the opaque `ptr` IR snc emits, so it needs the `-opaque-pointers`
+/// transition flag. New clangs are opaque-by-default and some (e.g. Apple
+/// clang 21) removed the flag entirely -- worse, an unknown `-opaque-pointers`
+/// is misparsed as `-o paque-pointers`, silently redirecting output.
+/// A `--version` probe cannot catch that, so compile a tiny opaque-pointer
+/// `.ll` for real and accept the flag only when the object file appears.
+fn clang_accepts_opaque_pointers(clang: &str) -> bool {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, bool>>> =
+        std::sync::OnceLock::new();
+    // Fast path: the probe result is cached per clang executable.
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Ok(map) = cache.lock() {
+        if let Some(hit) = map.get(clang) {
+            return *hit;
+        }
+    }
+    let ok = clang_accepts_opaque_pointers_uncached(clang);
+    if let Ok(mut map) = cache.lock() {
+        map.insert(clang.to_string(), ok);
+    }
+    ok
+}
+
+fn clang_accepts_opaque_pointers_uncached(clang: &str) -> bool {
+    let dir = std::env::temp_dir().join(format!("snc-opaque-probe-{}", std::process::id()));
+    if std::fs::create_dir_all(&dir).is_err() {
+        return false;
+    }
+    let ll = dir.join("probe.ll");
+    let obj = dir.join("probe.o");
+    // Opaque `ptr` types: rejected by typed-pointer-era clang without the flag.
+    const PROBE_LL: &str = "declare ptr @sn_probe_fn(ptr, i64)\n\
+         define i32 @main() {\n  ret i32 0\n}\n";
+    if std::fs::write(&ll, PROBE_LL).is_err() {
+        return false;
+    }
+    let status = std::process::Command::new(clang)
+        // NB: the flag goes AFTER `-o`, mirroring the real build command.
+        // Drivers that dropped the flag misparse it as `-o paque-pointers`,
+        // which would clobber the output; running with the temp dir as CWD
+        // keeps any such stray file inside the probe dir we delete below.
+        .current_dir(&dir)
+        .arg(&ll)
+        .arg("-c")
+        .arg("-o")
+        .arg(&obj)
+        .arg("-Wno-override-module")
+        .arg("-opaque-pointers")
+        .output();
+    let ok = status.map(|o| o.status.success()).unwrap_or(false) && obj.exists();
+    let _ = std::fs::remove_dir_all(&dir);
+    // Belt and braces: never leave a misdirected output behind in the
+    // caller's directory if the driver ignored `current_dir` somehow.
+    let _ = std::fs::remove_file(dir.join("paque-pointers"));
+    ok
+}
+
 /// Translate a deduplicated library list into clang arguments, recording an
 /// rpath for explicit files so the loader finds them at run time.
 fn push_link_args(cmd: &mut Command, libs: &[String]) {
@@ -412,6 +478,9 @@ pub fn compile_debug(input: &Path, output: &Path, clang: &str) -> Result<(), Str
 
     let mut cc = Command::new(clang);
     cc.arg("-c").arg(&ll).arg("-O0").arg("-g").arg("-o").arg(&sn_o).arg("-Wno-override-module");
+    if clang_accepts_opaque_pointers(clang) {
+        cc.arg("-opaque-pointers");
+    }
     run(cc, "clang -c sn.ll")?;
 
     let mut cc = Command::new(clang);
