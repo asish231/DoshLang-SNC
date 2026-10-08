@@ -41,6 +41,12 @@ jobs:
         working-directory: examples/website/frontend
     steps:
       - uses: actions/checkout@v4
+      - name: clang 15 (same requirement as the compiler job)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang-15
+          sudo ln -sf /usr/bin/clang-15 /usr/local/bin/clang
+          clang --version | head -1
       - name: Download snc
         uses: actions/download-artifact@v4
         with:
