@@ -171,6 +171,11 @@ static CRITICAL_SECTION g_go_mu;
 static CONDITION_VARIABLE g_go_cv;
 static CRITICAL_SECTION g_go_evt_mu;
 static CONDITION_VARIABLE g_go_evt_cv;
+/* Reactor lock: POSIX uses static initializers, so Windows must init here
+   in sn_rt_init -- rx_stop() locks unconditionally even when the reactor
+   never started. Tentative definitions coalesce with the later ones. */
+static CRITICAL_SECTION g_rx_mu;
+static CONDITION_VARIABLE g_rx_cv;
 
 /* Portable current-thread identity for GC thread tracking. */
 static void *sn_thread_self(void) {
@@ -224,6 +229,8 @@ void sn_rt_init(int argc, char **argv) {
         InitializeConditionVariable(&g_go_cv);
         InitializeCriticalSection(&g_go_evt_mu);
         InitializeConditionVariable(&g_go_evt_cv);
+        InitializeCriticalSection(&g_rx_mu);
+        InitializeConditionVariable(&g_rx_cv);
         g_rt_ready = 1;
         WSADATA wsa;
         WSAStartup(MAKEWORD(2, 2), &wsa);
@@ -3133,9 +3140,7 @@ typedef void (*RxFire)(RxOp *op, int revents);
 #ifdef _WIN32
 static void *rx_thread_main(void *unused) {
     (void)unused;
-    rx_lock();
-    InitializeCriticalSection(&g_rx_mu);
-    rx_unlock();
+    /* g_rx_mu/g_rx_cv are initialized once in sn_rt_init. */
     for (;;) {
         int64_t tmo;
         rx_lock();
