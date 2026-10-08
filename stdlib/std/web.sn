@@ -275,6 +275,9 @@ fn mime_type(str path) -> str {
     if (path.contains(".wasm")) {
         return "application/wasm"
     }
+    if (path.contains(".xml")) {
+        return "application/xml; charset=utf-8"
+    }
     return "text/plain; charset=utf-8"
 }
 

@@ -1,0 +1,47 @@
+# SNlang
+
+> SNlang is a typed, high-performance programming language designed with clean syntax (`fn`, braces, `and` / `or` / `not`) that compiles directly to native machine code via LLVM IR and Clang.
+
+- **Website:** https://snlang.safarnow.in
+- **Repository:** https://github.com/asish231/DoshLang-SNC
+- **Releases:** https://github.com/asish231/DoshLang-SNC/releases
+- **License:** Apache License 2.0
+- **Author:** Asish Sharma / SafarNow
+
+## Core Highlights
+
+1. **Compilation Pipeline:**
+   - Compiler `snc` is implemented in Rust.
+   - Emits optimized LLVM IR and invokes `clang` to produce native ELF, Mach-O, or PE executables.
+   - Zero-overhead C FFI for SQLite and POSIX system calls.
+
+2. **Syntax & Type System:**
+   - Primitives: `int`, `bool`, `str`, `list<T>`, `map<K,V>`, `T?` (nullable), `(T, error)` tuples, `chan`, `ref`, `lock`.
+   - Object-Oriented: `blueprint` definitions, inheritance, encapsulation, and trait bounds.
+   - Concurrency: Goroutine-style lightweight green threads with `spawn`, channels (`chan`), and mutex locks (`lock`).
+   - Error Handling: Value-based `(T, error)` tuples and `try` statements instead of heavyweight exceptions.
+
+3. **Standard Library Packages:**
+   - `std.web`: Non-blocking HTTP server with router mounting, middleware pipeline, and static file serving.
+   - `std.db`: SQLite database integration via WAL mode and prepared statements.
+   - `std.crypto`: SHA-256, HMAC, CRC32, and constant-time comparisons.
+   - `std.json`: Fast JSON serialization and parsing.
+   - `std.time`, `std.file`, `std.path`, `std.os`, `std.math`, `std.string`, `std.test`.
+
+## Quickstart
+
+```sn
+fn main() {
+    str name = "Developer"
+    print("Welcome to SNlang, {name}!")
+    list<int> numbers = [1, 2, 3, 4, 5]
+    for (n in numbers) {
+        print(n * 2)
+    }
+}
+```
+
+Compile and run:
+```bash
+./snc main.sn -o app && ./app
+```

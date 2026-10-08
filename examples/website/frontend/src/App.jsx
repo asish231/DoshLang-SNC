@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { nav, useRoute } from './sn.jsx';
 import { CHAPTERS } from './data/guide.js';
 import Home from './pages/Home.jsx';
@@ -22,6 +23,20 @@ const TOP = [
 
 export default function App() {
   const route = useRoute();
+
+  useEffect(() => {
+    const titles = {
+      home: 'SNlang — High-Performance Native Systems Programming Language',
+      start: 'Install & Get Started — SNlang Documentation',
+      guide: route.param ? `Language Guide: ${route.param} — SNlang` : 'Complete Language Guide — SNlang',
+      playground: 'Interactive Live Compiler Playground — SNlang',
+      ai: 'AI Playground & Intelligent Code Assistant — SNlang',
+      stdlib: 'Standard Library Reference (std.*) — SNlang',
+      examples: 'Curated Code Examples & Algorithms — SNlang',
+      tooling: 'Compiler Tooling, Package Manager & CLI — SNlang',
+    };
+    document.title = titles[route.page] || 'SNlang — High-Performance Native Systems Programming Language';
+  }, [route]);
 
   let body;
   if (route.page === 'start') body = <Start />;

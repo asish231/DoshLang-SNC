@@ -1,0 +1,31 @@
+User-agent: *
+Allow: /
+Disallow: /api/sandbox/run
+Disallow: /api/auth/
+
+# Dedicated rules for AI Search Engines & Answer Engines (AEO)
+User-agent: GPTBot
+Allow: /
+
+User-agent: ChatGPT-User
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: Google-Extended
+Allow: /
+
+User-agent: Applebot
+Allow: /
+
+User-agent: Bingbot
+Allow: /
+
+User-agent: Googlebot
+Allow: /
+
+Sitemap: https://snlang.safarnow.in/sitemap.xml

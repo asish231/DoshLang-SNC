@@ -3,13 +3,129 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="SNlang starter and documentation: install the compiler, learn the language from scratch with runnable examples, and browse the standard library." />
-    <title>SNlang — Starter &amp; Docs</title>
+    <title>SNlang — High-Performance Native Systems Programming Language</title>
+    
+    <!-- Primary Meta Tags -->
+    <meta name="title" content="SNlang — High-Performance Native Systems Programming Language" />
+    <meta name="description" content="SNlang is a modern typed systems programming language with clean syntax compiling to native machine code via LLVM IR and Clang. Features zero-cost abstractions, goroutines, memory safety, and standard library." />
+    <meta name="keywords" content="SNlang, programming language, LLVM, native compiler, systems programming, Rust compiler, typed language, Goroutines, concurrency, SafarNow, Asish Sharma, open source programming language, Apache 2.0, Web development, SQLite, LLVM IR, Clang, modern web, online compiler, playground" />
+    <meta name="author" content="Asish Sharma / SafarNow" />
+    <meta name="copyright" content="Copyright © 2026 Asish Sharma / SafarNow" />
+    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" />
+    <meta name="theme-color" content="#2e7d43" />
+    <link rel="canonical" href="https://snlang.safarnow.in/" />
+
+    <!-- Open Graph / Facebook / LinkedIn / Discord -->
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://snlang.safarnow.in/" />
+    <meta property="og:site_name" content="SNlang" />
+    <meta property="og:locale" content="en_US" />
+    <meta property="og:title" content="SNlang — High-Performance Native Systems Programming Language" />
+    <meta property="og:description" content="A small typed language compiling to native code via LLVM and Clang. Interactive live compiler playground, full standard library docs, and language guide." />
+    <meta property="og:image" content="https://snlang.safarnow.in/mascot.png" />
+    <meta property="og:image:alt" content="SNlang Logo and Mascot" />
+
+    <!-- Twitter / X -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:url" content="https://snlang.safarnow.in/" />
+    <meta name="twitter:title" content="SNlang — High-Performance Native Systems Programming Language" />
+    <meta name="twitter:description" content="A small typed language compiling to native code via LLVM and Clang. Live playground, comprehensive standard library, and docs." />
+    <meta name="twitter:image" content="https://snlang.safarnow.in/mascot.png" />
+
+    <!-- Favicon & Icons -->
     <link rel="icon" type="image/png" href="/mascot.png" />
+    <link rel="apple-touch-icon" href="/mascot.png" />
+
+    <!-- Typography Preconnect -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <script type="module" crossorigin src="/assets/index-BOiw5G2y.js"></script>
+
+    <!-- JSON-LD Structured Data for AEO / Search Engines / LLMs -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@graph": [
+        {
+          "@type": "SoftwareApplication",
+          "@id": "https://snlang.safarnow.in/#software",
+          "name": "SNlang",
+          "url": "https://snlang.safarnow.in",
+          "applicationCategory": "DeveloperApplication",
+          "operatingSystem": "Linux, macOS, Windows",
+          "softwareVersion": "0.2.0",
+          "license": "https://www.apache.org/licenses/LICENSE-2.0",
+          "downloadUrl": "https://github.com/asish231/DoshLang-SNC/releases",
+          "codeRepository": "https://github.com/asish231/DoshLang-SNC",
+          "description": "SNlang is a small typed systems programming language with clear syntax that compiles to native machine code via LLVM IR and Clang.",
+          "author": {
+            "@type": "Person",
+            "name": "Asish Sharma",
+            "url": "https://github.com/asish231"
+          },
+          "publisher": {
+            "@type": "Organization",
+            "name": "SafarNow",
+            "url": "https://safarnow.in"
+          },
+          "offers": {
+            "@type": "Offer",
+            "price": "0",
+            "priceCurrency": "USD"
+          }
+        },
+        {
+          "@type": "WebSite",
+          "@id": "https://snlang.safarnow.in/#website",
+          "url": "https://snlang.safarnow.in/",
+          "name": "SNlang Documentation & Compiler Playground",
+          "publisher": {
+            "@type": "Organization",
+            "name": "SafarNow"
+          }
+        },
+        {
+          "@type": "FAQPage",
+          "@id": "https://snlang.safarnow.in/#faq",
+          "mainEntity": [
+            {
+              "@type": "Question",
+              "name": "What is SNlang?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "SNlang is a typed compiled programming language with clean syntax (fn, braces, and, or, not) whose compiler is written in Rust, generating native binaries through LLVM IR and Clang."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "What license is SNlang under?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "SNlang is licensed under the Apache License 2.0, providing free usage, modification, and strict attribution and trademark protection."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "How does SNlang execute code?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "SNlang compiles to LLVM Intermediate Representation (IR) and produces optimized native Mach-O, ELF, and PE executables via Clang."
+              }
+            },
+            {
+              "@type": "Question",
+              "name": "Does SNlang support concurrency?",
+              "acceptedAnswer": {
+                "@type": "Answer",
+                "text": "Yes, SNlang includes built-in concurrency with goroutine-style green threads, channel communication (chan), and mutex locks (lock)."
+              }
+            }
+          ]
+        }
+      ]
+    }
+    </script>
+    <script type="module" crossorigin src="/assets/index-BG_KXz2D.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-BlQUXzbm.css">
   </head>
   <body>
