@@ -42,8 +42,9 @@ Windows (x64). Each archive ships `snc`, `stdlib/`, sample `packages/`,
 ./snc hello_world.sn -o hello && ./hello
 ```
 
-You still need **clang on `PATH`** (Xcode command-line tools, `apt install
-clang`, or LLVM for Windows) because `snc` links through it. Keep the
+You still need **clang 15+ on `PATH`** (Xcode command-line tools,
+`apt install clang-15`, or LLVM for Windows) because `snc` links through it
+— stock Ubuntu 22.04 clang 14 cannot parse the IR. Keep the
 extracted folder together — or add it to `PATH` — and compile from anywhere.
 
 ## Quickstart

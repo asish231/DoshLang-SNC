@@ -264,11 +264,19 @@ pub fn compile(opts: &CompileOptions) -> Result<CompileResult, String> {
     let status = cmd.output().map_err(|e| format!("failed to run clang: {e}"))?;
     let _ = fs::remove_file(&tmp);
     if !status.status.success() {
-        return Err(format!(
+        let stderr = String::from_utf8_lossy(&status.stderr);
+        let mut msg = format!(
             "clang failed:\n{}\n{}",
             String::from_utf8_lossy(&status.stdout),
-            String::from_utf8_lossy(&status.stderr)
-        ));
+            stderr
+        );
+        if stderr.contains("opaque-pointers") {
+            msg.push_str(
+                "\nsnc emits opaque-pointer LLVM IR, which needs clang 15 or newer \
+                 (Ubuntu 22.04: `apt install clang-15`; macOS: Xcode tools; Windows: LLVM).",
+            );
+        }
+        return Err(msg);
     }
     if cache::cache_enabled() {
         if let Ok(bytes) = fs::read(&out_bin) {

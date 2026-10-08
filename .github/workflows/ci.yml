@@ -12,6 +12,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      - name: clang 15 (snc emits opaque-pointer IR; stock clang 14 cannot parse it)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang-15
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 100
+          clang --version | head -1
       - name: Compiler tests
         run: cargo test --release --manifest-path compiler/Cargo.toml
       - name: Build snc

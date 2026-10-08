@@ -38,6 +38,13 @@ jobs:
       - name: Install LLVM clang (Windows smoke test)
         if: runner.os == 'Windows'
         run: choco install llvm -y --no-progress
+      - name: clang 15 on Ubuntu (stock clang 14 cannot parse opaque-pointer IR)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang-15
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 100
+          clang --version | head -1
       - name: Build snc
         run: cargo build --release --target ${{ matrix.target }} --manifest-path compiler/Cargo.toml
       - name: Hello-world smoke test
@@ -87,8 +94,8 @@ jobs:
             Prebuilt `snc` for macOS (arm64 + x64), Linux (x64), and Windows (x64).
 
             Each archive ships the compiler, `stdlib/`, sample `packages/`,
-            `runtime.c`, and a hello world. You still need **clang on PATH**
-            (Xcode tools / `apt install clang` / LLVM for Windows) because
+            `runtime.c`, and a hello world. You still need **clang 15+ on PATH**
+            (Xcode tools / `apt install clang-15` / LLVM for Windows) because
             `snc` links through it. Keep the extracted folder together and run
             from anywhere:
 
