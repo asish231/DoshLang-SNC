@@ -397,21 +397,19 @@ fn sqlite_driver() {
 /// read back through `ptr_load`.
 #[test]
 fn ffi_extern() {
-    // Build the tiny C shim the example links against.
+    // Build the tiny C shim the example links against, directly at the
+    // absolute path the example names. (No temp+copy: when TMPDIR is /tmp,
+    // as on Linux CI, a copy would truncate the file onto itself.)
     let root = repo_root();
-    let obj = std::env::temp_dir().join("sn_ffi_shim.o");
+    let linked = PathBuf::from("/tmp/sn_ffi_shim.o");
     let cc = Command::new("clang")
         .arg("-c")
         .arg("-o")
-        .arg(&obj)
+        .arg(&linked)
         .arg(root.join("compiler/tests/shim.c"))
         .output()
         .expect("run clang");
     assert!(cc.status.success(), "shim compile failed");
-
-    // The example names the object by absolute path, so link it there too.
-    let linked = PathBuf::from("/tmp/sn_ffi_shim.o");
-    let _ = std::fs::copy(&obj, &linked);
 
     assert_out(
         "examples/ffi_extern.sn",
