@@ -245,9 +245,7 @@ pub fn compile(opts: &CompileOptions) -> Result<CompileResult, String> {
     // transition flag only when the toolchain honors it (new clangs that
     // dropped the flag misparse it as `-o paque-pointers`, so a `--version`
     // check is not sufficient).
-    if clang_accepts_opaque_pointers(&opts.clang) {
-        cmd.arg("-opaque-pointers");
-    }
+    push_opaque_pointer_flag(&mut cmd, &opts.clang);
     if !triple.contains("windows") {
         cmd.arg("-pthread");
     } else {
@@ -336,15 +334,25 @@ fn runtime_c_path() -> PathBuf {
     }
 }
 
+/// How to enable opaque-pointer IR parsing on this toolchain, if needed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OpaquePtrFlag {
+    /// Driver-level `-opaque-pointers` (transition-era clang that knows it).
+    Driver,
+    /// `-Xclang -opaque-pointers` passthrough (driver never misparses this
+    /// as `-o`, so it is safe to probe on toolchains that dropped the flag).
+    Xclang,
+}
+
 /// Old clang (e.g. Ubuntu 22.04's clang 14) defaults to typed pointers and
-/// rejects the opaque `ptr` IR snc emits, so it needs the `-opaque-pointers`
-/// transition flag. New clangs are opaque-by-default and some (e.g. Apple
-/// clang 21) removed the flag entirely -- worse, an unknown `-opaque-pointers`
-/// is misparsed as `-o paque-pointers`, silently redirecting output.
-/// A `--version` probe cannot catch that, so compile a tiny opaque-pointer
-/// `.ll` for real and accept the flag only when the object file appears.
-fn clang_accepts_opaque_pointers(clang: &str) -> bool {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, bool>>> =
+/// rejects the opaque `ptr` IR snc emits. New clangs are opaque-by-default
+/// and some (e.g. Apple clang 21) removed the flag entirely -- worse, an
+/// unknown `-opaque-pointers` is misparsed as `-o paque-pointers`, silently
+/// redirecting output. A `--version` probe cannot catch that, so compile a
+/// tiny opaque-pointer `.ll` for real (flag positioned after `-o`, exactly
+/// like the build command) and use whichever spelling yields the object.
+fn opaque_pointer_flag(clang: &str) -> Option<OpaquePtrFlag> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Option<OpaquePtrFlag>>>> =
         std::sync::OnceLock::new();
     // Fast path: the probe result is cached per clang executable.
     let cache = CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
@@ -353,14 +361,34 @@ fn clang_accepts_opaque_pointers(clang: &str) -> bool {
             return *hit;
         }
     }
-    let ok = clang_accepts_opaque_pointers_uncached(clang);
+    // Try the driver flag first (single arg), then the cc1 passthrough.
+    let found = if probe_opaque_flag(clang, &["-opaque-pointers"]) {
+        Some(OpaquePtrFlag::Driver)
+    } else if probe_opaque_flag(clang, &["-Xclang", "-opaque-pointers"]) {
+        Some(OpaquePtrFlag::Xclang)
+    } else {
+        None
+    };
     if let Ok(mut map) = cache.lock() {
-        map.insert(clang.to_string(), ok);
+        map.insert(clang.to_string(), found);
     }
-    ok
+    found
 }
 
-fn clang_accepts_opaque_pointers_uncached(clang: &str) -> bool {
+/// Append the working opaque-pointer flag for `clang` to `cmd`, if any.
+fn push_opaque_pointer_flag(cmd: &mut Command, clang: &str) {
+    match opaque_pointer_flag(clang) {
+        Some(OpaquePtrFlag::Driver) => {
+            cmd.arg("-opaque-pointers");
+        }
+        Some(OpaquePtrFlag::Xclang) => {
+            cmd.arg("-Xclang").arg("-opaque-pointers");
+        }
+        None => {}
+    }
+}
+
+fn probe_opaque_flag(clang: &str, flag_args: &[&str]) -> bool {
     let dir = std::env::temp_dir().join(format!("snc-opaque-probe-{}", std::process::id()));
     if std::fs::create_dir_all(&dir).is_err() {
         return false;
@@ -384,7 +412,7 @@ fn clang_accepts_opaque_pointers_uncached(clang: &str) -> bool {
         .arg("-o")
         .arg(&obj)
         .arg("-Wno-override-module")
-        .arg("-opaque-pointers")
+        .args(flag_args)
         .output();
     let ok = status.map(|o| o.status.success()).unwrap_or(false) && obj.exists();
     let _ = std::fs::remove_dir_all(&dir);
@@ -478,9 +506,7 @@ pub fn compile_debug(input: &Path, output: &Path, clang: &str) -> Result<(), Str
 
     let mut cc = Command::new(clang);
     cc.arg("-c").arg(&ll).arg("-O0").arg("-g").arg("-o").arg(&sn_o).arg("-Wno-override-module");
-    if clang_accepts_opaque_pointers(clang) {
-        cc.arg("-opaque-pointers");
-    }
+    push_opaque_pointer_flag(&mut cc, clang);
     run(cc, "clang -c sn.ll")?;
 
     let mut cc = Command::new(clang);

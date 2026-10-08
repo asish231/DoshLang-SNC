@@ -3310,6 +3310,15 @@ static void *rx_thread_main(void *unused) {
 }
 #endif
 
+#ifdef _WIN32
+/* CreateThread needs DWORD WINAPI (*)(LPVOID); the reactor body is shared
+   with the pthread variant, so adapt it here (defined after both variants). */
+static DWORD WINAPI rx_thread_win(LPVOID unused) {
+    rx_thread_main(unused);
+    return 0;
+}
+#endif
+
 static void rx_start(void) {
     rx_lock();
     if (g_rx_started) {
@@ -3321,7 +3330,7 @@ static void rx_start(void) {
 #ifdef _WIN32
     InitializeCriticalSection(&g_rx_mu);
     InitializeConditionVariable(&g_rx_cv);
-    g_rx_thread = CreateThread(NULL, 0, rx_thread_main, NULL, 0, NULL);
+    g_rx_thread = CreateThread(NULL, 0, rx_thread_win, NULL, 0, NULL);
 #else
     pthread_create(&g_rx_thread, NULL, rx_thread_main, NULL);
 #endif
@@ -3592,7 +3601,7 @@ void *sn_async_http_get(void *url) {
         rx_set_nonblock(fd);
         int r = connect(fd, ai->ai_addr, (socklen_t)ai->ai_addrlen);
         if (r == 0 || errno == EINPROGRESS || errno == EWOULDBLOCK) break;
-        close(fd);
+        sn_closesocket(fd);
         fd = -1;
     }
     freeaddrinfo(res);
@@ -3611,7 +3620,7 @@ void *sn_async_http_get(void *url) {
     rx_lock();
     if (!rx_set(fd, op)) {
         rx_unlock();
-        close(fd);
+        sn_closesocket(fd);
         rx_http_free(h);
         rx_free_op(op);
         future_complete(f, 0, sn_str_from_cstr("async http: reactor full"));
