@@ -35,7 +35,15 @@ export default function App() {
       examples: 'Curated Code Examples & Algorithms — SNlang',
       tooling: 'Compiler Tooling, Package Manager & CLI — SNlang',
     };
-    document.title = titles[route.page] || 'SNlang — High-Performance Native Systems Programming Language';
+    const title = titles[route.page] || 'SNlang — High-Performance Native Systems Programming Language';
+    document.title = title;
+    if (typeof window !== 'undefined' && typeof window.gtag === 'function') {
+      window.gtag('event', 'page_view', {
+        page_title: title,
+        page_location: window.location.href,
+        page_path: window.location.hash || '#/',
+      });
+    }
   }, [route]);
 
   let body;
