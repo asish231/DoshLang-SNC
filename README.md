@@ -9,7 +9,7 @@ SNlang is a small typed language with plain syntax (`fn`, braces, `and` / `or` /
 that compiles to **native code** through **LLVM IR** + `clang`. The compiler is written
 in Rust.
 
-**License:** [MIT](LICENSE) — Copyright (c) 2026 Asish Sharma / SafarNow.
+**License:** [Apache-2.0](LICENSE) — Copyright (c) 2026 Asish Sharma / SafarNow.
 
 ## Install
 
@@ -144,7 +144,7 @@ Not a full frontend for those languages.
 - `docs/` — packages, HTTP, language tour
 - `tests/` — extra samples
 - `vscode-snlang/` — editor grammar
-- `LICENSE` — MIT
+- `LICENSE` — Apache-2.0
 
 ## Docs
 

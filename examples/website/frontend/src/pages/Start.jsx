@@ -16,8 +16,29 @@ export default function Start() {
         code={'# Rust toolchain (provides cargo)\ncurl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh\n\n# clang: macOS ships it with Xcode tools; Debian/Ubuntu:\n# sudo apt install clang\n\ncargo --version\nclang --version'}
       />
 
-      <h2>2 · Build the compiler</h2>
-      <p>Clone the repository and run make. This produces <code>./snc</code> in the project root:</p>
+      <h2>2 · Prebuilt binaries or build from source</h2>
+      <div className="callout good" style={{marginBottom: '20px'}}>
+        <b>Download prebuilt binaries</b>
+        <p style={{margin: '6px 0 12px'}}>
+          Standalone release archives for <b>macOS (arm64 + x64)</b>, <b>Linux (x64)</b>, and <b>Windows (x64)</b> are available on GitHub Releases:
+        </p>
+        <a
+          className="btn primary"
+          href="https://github.com/asish231/DoshLang-SNC/releases"
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{display: 'inline-flex', alignItems: 'center', gap: '8px'}}
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
+          </svg>
+          Download Releases (GitHub) →
+        </a>
+      </div>
+
+      <p>Or clone the repository and build from source using <code>make</code> (produces <code>./snc</code> in the project root):</p>
       <CodeBlock
         lang="sh"
         code={'export PATH="$HOME/.cargo/bin:$PATH"\nmake          # builds ./snc\nmake test   # compiler tests + hello-world smoke run'}

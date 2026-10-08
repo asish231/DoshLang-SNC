@@ -51,6 +51,34 @@ export default function App() {
           ))}
         </nav>
         <span className="spacer" />
+        <div className="topbar-actions">
+          <a
+            href="https://github.com/asish231/DoshLang-SNC/releases"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="btn-download-nav"
+            title="Download prebuilt binaries"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+            Download
+          </a>
+          <a
+            href="https://github.com/asish231/DoshLang-SNC"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="btn-github-nav"
+            title="GitHub Repository"
+          >
+            <svg width="15" height="15" viewBox="0 0 19 19" fill="currentColor">
+              <use href="/icons.svg#github-icon" />
+            </svg>
+            GitHub
+          </a>
+        </div>
       </div>
 
       <div className="shell">
@@ -68,13 +96,49 @@ export default function App() {
           <SideLink to="#/stdlib" active={route.page === 'stdlib'} label="Standard library" />
           <SideLink to="#/examples" active={route.page === 'examples'} label="Examples" />
           <SideLink to="#/tooling" active={route.page === 'tooling'} label="Tooling & API" />
+          <h5>Project</h5>
+          <a href="https://github.com/asish231/DoshLang-SNC/releases" target="_blank" rel="noopener noreferrer">
+            <span className="n">↓</span>Downloads
+          </a>
+          <a href="https://github.com/asish231/DoshLang-SNC" target="_blank" rel="noopener noreferrer">
+            <span className="n">★</span>GitHub
+          </a>
+          <a href="https://github.com/asish231/DoshLang-SNC/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">
+            <span className="n">§</span>Apache 2.0
+          </a>
         </aside>
         <main className="content">
           {body}
           <footer className="site">
-            <span>SNlang starter &amp; docs — every snippet compiler-verified.</span>
+            <div className="footer-left">
+              <div className="footer-title">
+                <b>SNlang</b> — A small typed language that compiles to native code via LLVM &amp; Clang.
+              </div>
+              <div className="footer-meta">
+                <span>© 2026 Asish Sharma / SafarNow</span>
+                <span className="dot">·</span>
+                <span>Licensed under the <a href="https://github.com/asish231/DoshLang-SNC/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">Apache License 2.0</a></span>
+                <span className="dot">·</span>
+                <span>All snippets compiler-verified</span>
+              </div>
+            </div>
             <span className="spacer" />
-            <span>Guide text: docs/LANGUAGE.md · Full status: SNLANG_SPEC.md</span>
+            <div className="footer-links">
+              <a href="https://github.com/asish231/DoshLang-SNC/releases" target="_blank" rel="noopener noreferrer" className="footer-btn">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <line x1="12" y1="15" x2="12" y2="3" />
+                </svg>
+                Download Releases
+              </a>
+              <a href="https://github.com/asish231/DoshLang-SNC" target="_blank" rel="noopener noreferrer" className="footer-btn github">
+                <svg width="15" height="15" viewBox="0 0 19 19" fill="currentColor">
+                  <use href="/icons.svg#github-icon" />
+                </svg>
+                GitHub Repo
+              </a>
+            </div>
           </footer>
         </main>
       </div>

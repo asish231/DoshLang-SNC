@@ -20,6 +20,32 @@ export default function Home() {
       />
       <div className="home-cta">
         <a className="btn primary big" href="#/start">Get started</a>
+        <a
+          className="btn big"
+          href="https://github.com/asish231/DoshLang-SNC/releases"
+          target="_blank"
+          rel="noopener noreferrer"
+          title="Download prebuilt binaries for macOS, Linux, and Windows"
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{marginRight: '6px', verticalAlign: '-2px'}}>
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
+          </svg>
+          Download v0.2.0
+        </a>
+        <a
+          className="btn big"
+          href="https://github.com/asish231/DoshLang-SNC"
+          target="_blank"
+          rel="noopener noreferrer"
+          title="GitHub Repository"
+        >
+          <svg width="16" height="16" viewBox="0 0 19 19" fill="currentColor" style={{marginRight: '6px', verticalAlign: '-2px'}}>
+            <use href="/icons.svg#github-icon" />
+          </svg>
+          GitHub
+        </a>
         <a className="btn big" href="#/guide/basics">Language guide</a>
         <a className="btn big" href="#/playground">Playground</a>
       </div>

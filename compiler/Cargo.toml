@@ -3,7 +3,7 @@ name = "snc"
 version = "0.2.0"
 edition = "2021"
 description = "SNlang compiler — emits LLVM IR and links with clang"
-license = "MIT"
+license = "Apache-2.0"
 authors = ["Asish Kumar Sharma"]
 
 [[bin]]

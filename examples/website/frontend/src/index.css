@@ -269,8 +269,57 @@ table.ref td.sig { font-family: var(--font-mono); font-size: 12.5px; color: #8a5
 .search:focus { outline: none; box-shadow: var(--shadow-sm), 0 0 0 3px var(--accent-tint); }
 .two-col { display: grid; grid-template-columns: 330px 1fr; gap: 18px; align-items: start; }
 
-footer.site { border-top: 1px solid var(--line); margin-top: 60px; padding: 20px 0; color: var(--faint); font-size: 13px; display: flex; gap: 16px; flex-wrap: wrap; }
+/* ---------- topbar actions ---------- */
+.topbar-actions { display: flex; align-items: center; gap: 8px; }
+.btn-download-nav {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--accent); color: #fff !important;
+  font-size: 13px; font-weight: 600; padding: 6px 14px;
+  border-radius: 999px;
+  box-shadow: 0 1px 2px rgba(31, 97, 50, 0.4);
+  transition: all 0.15s ease;
+}
+.btn-download-nav:hover { background: var(--accent-deep); transform: translateY(-1px); text-decoration: none; }
+.btn-github-nav {
+  display: inline-flex; align-items: center; gap: 6px;
+  color: var(--text) !important; background: var(--card);
+  font-size: 13px; font-weight: 600; padding: 6px 14px;
+  border-radius: 999px; border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+  transition: all 0.15s ease;
+}
+.btn-github-nav:hover { background: var(--panel-2); transform: translateY(-1px); text-decoration: none; }
+
+footer.site {
+  border-top: 1px solid var(--line);
+  margin-top: 60px;
+  padding: 24px 0 36px;
+  color: var(--muted);
+  font-size: 13.5px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+}
 footer.site .spacer { flex: 1; }
+.footer-left { display: flex; flex-direction: column; gap: 5px; }
+.footer-title { color: var(--text); font-size: 14px; }
+.footer-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; color: var(--faint); font-size: 12.5px; }
+.footer-meta a { color: var(--muted); font-weight: 500; text-decoration: underline; }
+.footer-meta a:hover { color: var(--text); }
+.footer-links { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.footer-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 14px; border-radius: 999px;
+  background: var(--card); color: var(--text) !important;
+  border: 1px solid var(--border); font-size: 13px; font-weight: 600;
+  box-shadow: var(--shadow-sm); transition: all 0.15s ease;
+}
+.footer-btn:hover { background: var(--panel-2); transform: translateY(-1px); text-decoration: none; }
+.footer-btn.github { background: #24292f; color: #fff !important; border-color: #24292f; }
+.footer-btn.github:hover { background: #1b1f23; }
+.dot { color: var(--faint); }
 
 @media (max-width: 1000px) {
   .sidebar { display: none; }

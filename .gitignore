@@ -42,3 +42,5 @@ sandbox_*
 .gemini_*.json
 .playwright-cli/
 
+# Keys & certificates
+*.pem
