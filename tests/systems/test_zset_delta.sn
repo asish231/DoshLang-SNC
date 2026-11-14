@@ -1,0 +1,98 @@
+// Systems Test: Tier-G Z-Set Delta Collections (std.delta) — P5 slice 1
+//
+// Verifies the stdlib surface over the runtime Z-set engine: add/remove
+// (exact retraction), merge, delta (the 𝒟), apply (the ⊕), count/total/len,
+// and the group law — the W2C §1.1 Tier-G carrier semantics.
+
+use std.delta
+
+fn main() {
+    print("=== Systems Test: Tier-G Z-Set Delta Collections ===")
+
+    let a = ZSet.new()
+    a.add(10, 3)
+    a.add(10, 2)        // accumulate: count[10] = 5
+    a.add(20, 4)
+    print("a count(10): " + cast(a.count(10), str))       // 5
+    print("a len: " + cast(a.len(), str))                  // 2
+    print("a total: " + cast(a.total(), str))              // 9
+
+    a.remove(10, 5)      // EXACT retraction → zero pruned
+    print("a count(10) after exact retraction: " + cast(a.count(10), str))  // 0
+    print("a len after prune: " + cast(a.len(), str))       // 1
+
+    a.remove(20, 6)      // retraction past zero → -2 (a ℤ[X] coefficient)
+    print("a count(20) past zero: " + cast(a.count(20), str))  // -2
+    print("a len with negative coeff: " + cast(a.len(), str))  // 1 (support = {20})
+
+    // Merge: pointwise add
+    let m1 = ZSet.new()
+    m1.add(1, 2)
+    m1.add(2, 1)
+    let m2 = ZSet.new()
+    m2.add(2, 3)
+    m2.add(3, 5)
+    m1.merge(m2)
+    print("m1 count(1): " + cast(m1.count(1), str))         // 2
+    print("m1 count(2): " + cast(m1.count(2), str))         // 4
+    print("m1 count(3): " + cast(m1.count(3), str))         // 5
+    print("m1 len: " + cast(m1.len(), str))                 // 3
+    print("m1 total: " + cast(m1.total(), str))             // 11
+
+    // Delta + apply — the primitive pair the view machinery composes
+    // a = {10:0(pruned), 20:-2}; b = {10:5, 30:4}
+    let b = ZSet.new()
+    b.add(10, 5)
+    b.add(30, 4)
+
+    let d = b.delta(a)   // 𝒟: b − a = {10:+5, 20:+2, 30:+4}
+    print("d len: " + cast(d.len(), str))                   // 3
+    print("d total: " + cast(d.total(), str))               // 11
+
+    let c = a.apply(d)   // ⊕: a + d = b (ILC's law a⊕(b⊖a)=b)
+    print("c count(10): " + cast(c.count(10), str))         // 5
+    print("c count(20): " + cast(c.count(20), str))          // 0
+    print("c count(30): " + cast(c.count(30), str))          // 4
+    print("c len: " + cast(c.len(), str))                   // 2
+    print("c total: " + cast(c.total(), str))               // 9
+
+    // Quiescence: 𝒟(a) = 0 — the Tier-G fixpoint test (W4C Repair 3)
+    let q = a.delta(a)
+    print("quiescence len: " + cast(q.len(), str))           // 0
+    print("quiescence total: " + cast(q.total(), str))       // 0
+
+    // The group law A + dA - dA = A via primitives only
+    // (a = {20:-2}: the support left after the exact retractions above)
+    let e = ZSet.new()
+    let da = a.delta(e)          // dA = a − ∅ = a
+    let neg = e.delta(da)        // −dA = ∅ − dA
+    let x = a.apply(da).apply(neg)
+    print("group law len: " + cast(x.len(), str))            // 1
+    print("group law count(20): " + cast(x.count(20), str))  // -2
+
+    bool ok = true
+    if (a.count(10) != 0 or a.count(20) != -2 or a.len() != 1 or a.total() != -2) {
+        ok = false
+    }
+    if (m1.count(1) != 2 or m1.count(2) != 4 or m1.count(3) != 5 or m1.len() != 3 or m1.total() != 11) {
+        ok = false
+    }
+    if (d.len() != 3 or d.total() != 11) {
+        ok = false
+    }
+    if (c.count(10) != 5 or c.count(20) != 0 or c.count(30) != 4 or c.len() != 2 or c.total() != 9) {
+        ok = false
+    }
+    if (q.len() != 0 or q.total() != 0) {
+        ok = false
+    }
+    if (x.len() != 1 or x.count(20) != -2 or x.total() != -2) {
+        ok = false
+    }
+
+    if (ok) {
+        print("PASS: test_zset_delta")
+    } else {
+        print("FAIL: test_zset_delta")
+    }
+}

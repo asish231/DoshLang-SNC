@@ -3692,6 +3692,90 @@ impl Cx<'_> {
                 self.line(&format!("{r} = call i64 @sn_pool_len(ptr {p})"));
                 (r, Type::Int)
             }
+            /* Tier-G Z-set builtins (SWARM RABBIT HOLE, P5 slice 1; W2C §1.1):
+               count += delta / count -= delta (exact retraction, O(1)/key),
+               merge = pointwise ⊕, delta = the 𝒟 (dst − prev), apply = ⊕. */
+            "zset_new" => {
+                let kk = vs.first().map(|x| x.0.clone()).unwrap_or("0".into());
+                let r = self.t();
+                self.line(&format!("{r} = call ptr @sn_zset_new(i64 {kk})"));
+                (r, Type::Ptr)
+            }
+            "zset_add" | "zset_remove" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let p = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let key = vs.get(1).cloned().unwrap_or(("0".into(), Type::Int));
+                let kb = self.as_bits(key.0, &key.1);
+                let d = vs.get(2).map(|x| x.0.clone()).unwrap_or("0".into());
+                if n == "zset_add" {
+                    self.line(&format!("call void @sn_zset_add(ptr {p}, i64 {kb}, i64 {d})"));
+                } else {
+                    self.line(&format!("call void @sn_zset_remove(ptr {p}, i64 {kb}, i64 {d})"));
+                }
+                ("0".into(), Type::Void)
+            }
+            "zset_merge" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let dst = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let s1 = vs.get(1).map(|x| x.0.clone()).unwrap_or("null".into());
+                let src = self.as_ptr(s1, vs.get(1).map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                self.line(&format!("call void @sn_zset_merge(ptr {dst}, ptr {src})"));
+                ("0".into(), Type::Void)
+            }
+            "zset_delta" | "zset_apply" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let a = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let p1 = vs.get(1).map(|x| x.0.clone()).unwrap_or("null".into());
+                let b = self.as_ptr(p1, vs.get(1).map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let r = self.t();
+                if n == "zset_delta" {
+                    self.line(&format!("{r} = call ptr @sn_zset_delta(ptr {a}, ptr {b})"));
+                } else {
+                    self.line(&format!("{r} = call ptr @sn_zset_apply(ptr {a}, ptr {b})"));
+                }
+                (r, Type::Ptr)
+            }
+            "zset_copy" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let p = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let r = self.t();
+                self.line(&format!("{r} = call ptr @sn_zset_copy(ptr {p})"));
+                (r, Type::Ptr)
+            }
+            "zset_count" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let p = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let key = vs.get(1).cloned().unwrap_or(("0".into(), Type::Int));
+                let kb = self.as_bits(key.0, &key.1);
+                let r = self.t();
+                self.line(&format!("{r} = call i64 @sn_zset_count(ptr {p}, i64 {kb})"));
+                (r, Type::Int)
+            }
+            "zset_total" | "zset_len" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let p = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let r = self.t();
+                if n == "zset_total" {
+                    self.line(&format!("{r} = call i64 @sn_zset_total(ptr {p})"));
+                } else {
+                    self.line(&format!("{r} = call i64 @sn_zset_len(ptr {p})"));
+                }
+                (r, Type::Int)
+            }
+            "zset_keys" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let p = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let r = self.t();
+                self.line(&format!("{r} = call ptr @sn_zset_keys(ptr {p})"));
+                (r, Type::List(Box::new(Type::Int)))
+            }
+            "zset_set_prune" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let p = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let f = vs.get(1).map(|x| x.0.clone()).unwrap_or("1".into());
+                self.line(&format!("call void @sn_zset_set_prune(ptr {p}, i64 {f})"));
+                ("0".into(), Type::Void)
+            }
             "alloc" => {
                 let r = self.t();
                 self.line(&format!("{r} = call ptr @sn_alloc(i64 {})", vs[0].0));

@@ -295,9 +295,103 @@ else
 fi
 
 echo ""
+
+# 12. Tier-G Z-set delta collections — the stdlib surface (P5 slice 1).
+echo "-----------------------------------------------------------------"
+echo "12. TIER-G Z-SET DELTA COLLECTIONS, STDLIB (test_zset_delta.sn)"
+echo "-----------------------------------------------------------------"
+OUT_ZSET_SN="/tmp/snc_test_zset_delta_sn"
+rm -f "$OUT_ZSET_SN"
+if "$SNC" "$DIR/test_zset_delta.sn" -o "$OUT_ZSET_SN"; then
+    OUTPUT=$("$OUT_ZSET_SN")
+    echo "$OUTPUT"
+    if echo "$OUTPUT" | grep -q "PASS: test_zset_delta"; then
+        echo ">>> test_zset_delta(.sn): PASSED"
+    else
+        echo ">>> test_zset_delta(.sn): FAILED (output did not contain PASS)"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> test_zset_delta(.sn): COMPILATION FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+echo ""
+
+# 13. Tier-G Z-set engine — the runtime mechanics (P5 slice 1; W2C §1.1).
+#     Built twice: plain, then ASan (the UAF/no-heap-error stress pass
+#     over the swap-with-last removal and the prune/retain paths). LSan is
+#     not supported on arm64 darwin; leak-freedom is checked with `leaks`.
+echo "-----------------------------------------------------------------"
+echo "13. TIER-G Z-SET DELTA, RUNTIME MECHANICS (test_zset_delta.c)"
+echo "-----------------------------------------------------------------"
+OUT_ZSET_C="/tmp/snc_test_zset_delta_c"
+rm -f "$OUT_ZSET_C"
+if clang -O1 -g -o "$OUT_ZSET_C" "$DIR/test_zset_delta.c" "$ROOT/compiler/runtime.c" -lpthread 2>/dev/null; then
+    OUTPUT=$("$OUT_ZSET_C")
+    echo "$OUTPUT"
+    if echo "$OUTPUT" | grep -q "PASS:"; then
+        echo ">>> test_zset_delta(.c): PASSED"
+    else
+        echo ">>> test_zset_delta(.c): FAILED"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> test_zset_delta(.c): BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+echo ""
+
+# 13b. The ASan stress pass of the same runtime z-set test
+echo "-----------------------------------------------------------------"
+echo "13b. TIER-G Z-SET DELTA, ASAN STRESS (test_zset_delta.c)"
+echo "-----------------------------------------------------------------"
+OUT_ZSET_ASAN="/tmp/snc_test_zset_delta_c_asan"
+rm -f "$OUT_ZSET_ASAN"
+if clang -O1 -g -fsanitize=address -o "$OUT_ZSET_ASAN" "$DIR/test_zset_delta.c" "$ROOT/compiler/runtime.c" -lpthread 2>/dev/null; then
+    OUTPUT=$(ASAN_OPTIONS=detect_leaks=0 "$OUT_ZSET_ASAN" 2>&1)
+    echo "$OUTPUT"
+    if echo "$OUTPUT" | grep -q "PASS:"; then
+        echo ">>> test_zset_delta(.c ASan): PASSED (no ASan reports over the z-set engine)"
+    else
+        echo ">>> test_zset_delta(.c ASan): FAILED"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> test_zset_delta(.c ASan): BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+echo ""
+
+# 13c. Leak check of the runtime z-set test via macOS `leaks`. The test
+#      pauses on SN_ZSET_LEAK_PAUSE so `leaks` can attach.
+echo "-----------------------------------------------------------------"
+echo "13c. TIER-G Z-SET DELTA, LEAK CHECK (macOS leaks(1))"
+echo "-----------------------------------------------------------------"
+if command -v leaks >/dev/null 2>&1; then
+    ZSET_PID=""
+    MallocStackLogging=1 SN_ZSET_LEAK_PAUSE=15 "$OUT_ZSET_C" > /tmp/snc_zset_leaks_out.txt 2>&1 &
+    ZSET_PID=$!
+    sleep 7
+    LEAK_LINE=$(leaks "$ZSET_PID" 2>/dev/null | grep -E "[0-9]+ leaks? for [0-9]+ total leaked bytes" | head -1)
+    wait "$ZSET_PID" 2>/dev/null
+    echo "$LEAK_LINE"
+    if echo "$LEAK_LINE" | grep -q "0 leaks for 0 total leaked bytes"; then
+        echo ">>> test_zset_delta(leaks): PASSED (0 leaked bytes)"
+    else
+        echo ">>> test_zset_delta(leaks): FAILED (leaks reported)"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> test_zset_delta(leaks): SKIPPED (leaks(1) unavailable)"
+fi
+
+echo ""
 echo "================================================================="
 if [ $FAILURES -eq 0 ]; then
-    echo "  ALL SYSTEMS & SECURITY TESTS PASSED (13 checks)"
+    echo "  ALL SYSTEMS & SECURITY TESTS PASSED (17 checks)"
     exit 0
 else
     echo "  $FAILURES SYSTEMS TESTS FAILED"

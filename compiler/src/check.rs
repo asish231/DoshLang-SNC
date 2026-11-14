@@ -2762,6 +2762,18 @@ impl Checker<'_> {
                     || n == "pool_remove"
                     || n == "pool_is_valid"
                     || n == "pool_len"
+                    || n == "zset_new"
+                    || n == "zset_add"
+                    || n == "zset_remove"
+                    || n == "zset_merge"
+                    || n == "zset_delta"
+                    || n == "zset_apply"
+                    || n == "zset_copy"
+                    || n == "zset_count"
+                    || n == "zset_total"
+                    || n == "zset_len"
+                    || n == "zset_keys"
+                    || n == "zset_set_prune"
                 {
                     Type::Named(format!("builtin:{n}"))
                 } else {
@@ -3534,6 +3546,13 @@ impl Checker<'_> {
             "lane_restore" | "lane_freeze" | "lane_unfreeze" | "pool_set" | "pool_remove" => Type::Void,
             "lane_used" | "pool_len" => Type::Int,
             "pool_is_valid" => Type::Bool,
+            /* Tier-G Z-set builtins (SWARM RABBIT HOLE, P5 slice 1; W2C §1.1).
+               zset_merge mutates dst; zset_add/zset_remove mutate the Z-set's
+               coefficients (count += delta / count -= delta, O(1)/key). */
+            "zset_new" | "zset_copy" | "zset_delta" | "zset_apply" => Type::Ptr,
+            "zset_keys" => Type::List(Box::new(Type::Int)),
+            "zset_add" | "zset_remove" | "zset_merge" | "zset_set_prune" => Type::Void,
+            "zset_count" | "zset_total" | "zset_len" => Type::Int,
             "pool_insert" => {
                 if let Some(Arg::Pos(p_expr)) = args.first() {
                     let pt = self.db.expr_ty.get(&(p_expr.span.file, p_expr.span.start, p_expr.span.end)).cloned().unwrap_or(Type::Ptr);

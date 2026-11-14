@@ -1,0 +1,99 @@
+// Tier-G Z-set delta collections — the P5 differential calculus's ground
+// carrier (SWARM RABBIT HOLE, Wave 7, P5 slice 1).
+//
+// W2C §1.1: G[X] = the direct sum over the key universe with finite
+// support — a group-valued multiset { key -> ℤ coefficient }. The state
+// space IS the change space (both are Z-sets); negative counts are
+// retraction; zero counts are pruned (the canonical finite-support form).
+//
+// Retraction: EXACT — the Tier-G capability label (W4C Repair 1's
+// capability order O ⊑ L ⊑ G: G is the strongest; a pipeline's honest
+// label is the meet, and any Z-set join stays G).
+//
+//   use std.delta
+//   let a = ZSet.new()
+//   a.add(10, 3)          // count[10] += 3
+//   a.remove(10, 3)       // count[10] -= 3 — EXACT retraction, O(1)/key
+//   let d = b.delta(a)    // 𝒟: b − a as a new Z-set (pure)
+//   let c = a.apply(d)    // ⊕: a + d — ILC's law a⊕(b⊖a)=b
+//   a.merge(b)            // pointwise add
+//   int n = a.count(10)   // the ℤ coefficient at a key
+//   int t = a.total()     // Σ counts
+//   int s = a.len()       // the support size
+//
+// The wrapper is the std.pool pattern: a blueprint over the runtime raw
+// pointer. Like Pool, the raw Z-set is freed with the process (no close());
+// the runtime test (tests/systems/test_zset_delta.c) owns the explicit
+// sn_release/ASan/leaks story.
+
+blueprint ZSet {
+    ptr raw
+
+    static fn new() -> ZSet {
+        new ZSet p()
+        p.raw = zset_new(0)
+        return p
+    }
+
+    static fn wrap(ptr raw) -> ZSet {
+        new ZSet p()
+        p.raw = raw
+        return p
+    }
+
+    // count[key] += delta (the ⊕ primitive; zero counts pruned)
+    fn add(int key, int delta) {
+        zset_add(self.raw, key, delta)
+    }
+
+    // count[key] -= delta — EXACT retraction (the Tier-G guarantee)
+    fn remove(int key, int delta) {
+        zset_remove(self.raw, key, delta)
+    }
+
+    // pointwise add of src into self
+    fn merge(ZSet src) {
+        zset_merge(self.raw, src.raw)
+    }
+
+    // 𝒟: self − prev as a new Z-set (pure)
+    fn delta(ZSet prev) -> ZSet {
+        return ZSet.wrap(zset_delta(self.raw, prev.raw))
+    }
+
+    // ⊕: self + d as a new Z-set (pure)
+    fn apply(ZSet d) -> ZSet {
+        return ZSet.wrap(zset_apply(self.raw, d.raw))
+    }
+
+    fn copy() -> ZSet {
+        return ZSet.wrap(zset_copy(self.raw))
+    }
+
+    // the ℤ coefficient at key (0 when absent)
+    fn count(int key) -> int {
+        return zset_count(self.raw, key)
+    }
+
+    // Σ counts over the support
+    fn total() -> int {
+        return zset_total(self.raw)
+    }
+
+    // the support size
+    fn len() -> int {
+        return zset_len(self.raw)
+    }
+
+    fn keys() -> list<int> {
+        return zset_keys(self.raw)
+    }
+}
+
+fn zset() -> ZSet {
+    return ZSet.new()
+}
+
+fn new_zset() -> ZSet {
+    return ZSet.new()
+}

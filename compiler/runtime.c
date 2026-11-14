@@ -114,6 +114,33 @@ typedef struct Map {
     int64_t *buckets;
 } Map;
 
+/* --------------------------------------------------------------------- */
+/*  Tier-G Z-set (SWARM RABBIT HOLE, P5 slice 1; W2C §1.1, W4C Repair 1). */
+/*  G[X] = the direct sum over the key universe with FINITE SUPPORT:     */
+/*  a group-valued multiset { key -> ℤ coefficient }. The state space   */
+/*  is the change space (𝒟/ℐ are both Z-sets); negative counts are       */
+/*  retraction; retraction is EXACT (the Tier-G capability label under   */
+/*  the capability order O ⊑ L ⊑ G). Zero counts are pruned in the      */
+/*  canonical form (prune=1) or kept per the flag — the direct sum's    */
+/*  finite-support discipline is the pruned form. Shares the O(1)       */
+/*  open-addressing scheme of the Map (T1.1): hcap buckets storing      */
+/*  entry-index+1, stored hashes, linear probing.                       */
+/* --------------------------------------------------------------------- */
+typedef struct SnZSet {
+    int64_t rc;
+    int64_t kind;     /* KIND_ZSET */
+    int64_t key_kind; /* 0=i64, 1=Str* (content-equal keys) — Map's convention */
+    int64_t prune;    /* 1: zero counts pruned (canonical), 0: kept */
+    int64_t len;      /* support size |supp(Z)| */
+    int64_t cap;
+    int64_t hcap;
+    int64_t *keys;
+    int64_t *counts;  /* the ℤ coefficient per key */
+    uint64_t *hashes;
+    int64_t *buckets;
+    int64_t total;    /* running Σ counts — sn_zset_total is O(1) */
+} SnZSet;
+
 typedef struct Err {
     int64_t rc;
     int64_t kind;
@@ -343,7 +370,7 @@ typedef struct Sb {
     char *buf;
 } Sb;
 
-enum { KIND_BYTEARRAY = 20, KIND_POOL = 21, KIND_STRBUILDER = 22 };
+enum { KIND_BYTEARRAY = 20, KIND_POOL = 21, KIND_STRBUILDER = 22, KIND_ZSET = 23 };
 
 typedef struct SnPool {
     int64_t rc;
@@ -543,6 +570,13 @@ static void gc_mark(void *p) {
         }
         break;
     }
+    case KIND_ZSET: {
+        SnZSet *z = (SnZSet *)p;
+        if (z->key_kind == 1) {
+            for (int64_t i = 0; i < z->len; i++) gc_mark((void *)(intptr_t)z->keys[i]);
+        }
+        break;
+    }
     case KIND_ERR: {
         Err *e = (Err *)p;
         gc_mark(e->msg);
@@ -623,6 +657,14 @@ static void gc_free(void *p) {
         free(m->vals);
         free(m->hashes);
         free(m->buckets);
+        break;
+    }
+    case KIND_ZSET: {
+        SnZSet *z = (SnZSet *)p;
+        free(z->keys);
+        free(z->counts);
+        free(z->hashes);
+        free(z->buckets);
         break;
     }
     case KIND_ERR: {
@@ -841,6 +883,18 @@ void sn_release(void *p) {
         free(m->hashes);
         free(m->buckets);
         free(m);
+        break;
+    }
+    case KIND_ZSET: {
+        SnZSet *z = (SnZSet *)p;
+        if (z->key_kind == 1) {
+            for (int64_t i = 0; i < z->len; i++) sn_release((void *)(intptr_t)z->keys[i]);
+        }
+        free(z->keys);
+        free(z->counts);
+        free(z->hashes);
+        free(z->buckets);
+        free(z);
         break;
     }
     case KIND_ERR: {
@@ -1274,9 +1328,11 @@ void sn_list_clear(void *p) {
     l->len = 0;
 }
 
-static uint64_t map_hash_key(Map *m, int64_t key) {
+/* Kind-parameterized hash/equality shared by Map and SnZSet (T1.1 O(1)
+   machinery; the Z-set slice reuses it verbatim). */
+static uint64_t key_hash(int64_t key_kind, int64_t key) {
     uint64_t h;
-    if (m->key_kind == 1 && key != 0) {
+    if (key_kind == 1 && key != 0) {
         Str *s = (Str *)(intptr_t)key;
         h = 14695981039346656037ULL;
         for (int64_t i = 0; i < s->len; i++) {
@@ -1292,9 +1348,17 @@ static uint64_t map_hash_key(Map *m, int64_t key) {
     return h | 1ULL;
 }
 
-static int key_eq(Map *m, int64_t a, int64_t b) {
-    if (m->key_kind == 1) return (int)sn_str_eq((void *)(intptr_t)a, (void *)(intptr_t)b);
+static int key_equal(int64_t key_kind, int64_t a, int64_t b) {
+    if (key_kind == 1) return (int)sn_str_eq((void *)(intptr_t)a, (void *)(intptr_t)b);
     return a == b;
+}
+
+static uint64_t map_hash_key(Map *m, int64_t key) {
+    return key_hash(m->key_kind, key);
+}
+
+static int key_eq(Map *m, int64_t a, int64_t b) {
+    return key_equal(m->key_kind, a, b);
 }
 
 static void map_rehash(Map *m, int64_t new_hcap) {
@@ -1419,6 +1483,202 @@ void *sn_map_values(void *p) {
     for (int64_t i = 0; i < m->len; i++) {
         if (m->val_kind == 1) sn_list_push_ptr(l, (void *)(intptr_t)m->vals[i]);
         else sn_list_push_i64(l, m->vals[i]);
+    }
+    return l;
+}
+
+/* --------------------------------------------------------------------- */
+/*  SnZSet — the Tier-G Z-set engine (W2C §1.1: G[X] = direct sum with   */
+/*  finite support; negative counts = retraction; zero counts pruned).   */
+/* --------------------------------------------------------------------- */
+static void zset_rehash(SnZSet *z, int64_t new_hcap) {
+    int64_t *nb = (int64_t *)calloc((size_t)new_hcap, sizeof(int64_t));
+    if (!nb) {
+        fprintf(stderr, "out of memory\n");
+        exit(1);
+    }
+    uint64_t mask = (uint64_t)new_hcap - 1;
+    for (int64_t i = 0; i < z->len; i++) {
+        uint64_t slot = z->hashes[i] & mask;
+        while (nb[slot] != 0) {
+            slot = (slot + 1) & mask;
+        }
+        nb[slot] = i + 1;
+    }
+    free(z->buckets);
+    z->buckets = nb;
+    z->hcap = new_hcap;
+}
+
+static int64_t zset_find_index(SnZSet *z, int64_t key, uint64_t h, uint64_t *out_bucket) {
+    uint64_t mask = (uint64_t)z->hcap - 1;
+    uint64_t slot = h & mask;
+    for (;;) {
+        int64_t b = z->buckets[slot];
+        if (b == 0) {
+            if (out_bucket) *out_bucket = slot;
+            return -1;
+        }
+        int64_t idx = b - 1;
+        if (z->hashes[idx] == h && key_equal(z->key_kind, z->keys[idx], key)) {
+            if (out_bucket) *out_bucket = slot;
+            return idx;
+        }
+        slot = (slot + 1) & mask;
+    }
+}
+
+/* Swap-with-last removal: exactly one bucket holds the last entry's
+   index; repoint it at the moved slot. Counts as freed never enter this
+   path (the caller prunes only zero coefficients). */
+static void zset_remove_at(SnZSet *z, int64_t idx) {
+    int64_t last = z->len - 1;
+    if (idx != last) {
+        uint64_t mask = (uint64_t)z->hcap - 1;
+        uint64_t slot = z->hashes[last] & mask;
+        while (z->buckets[slot] != last + 1) {
+            slot = (slot + 1) & mask;
+        }
+        z->keys[idx] = z->keys[last];
+        z->counts[idx] = z->counts[last];
+        z->hashes[idx] = z->hashes[last];
+        z->buckets[slot] = idx + 1;
+    }
+    z->len--;
+}
+
+void *sn_zset_new(int64_t key_kind) {
+    SnZSet *z = (SnZSet *)xmalloc(sizeof(SnZSet));
+    z->rc = 1;
+    z->kind = KIND_ZSET;
+    gc_track(z, (int64_t)sizeof(SnZSet));
+    z->key_kind = key_kind;
+    z->prune = 1;
+    z->len = 0;
+    z->cap = 8;
+    z->hcap = 16;
+    z->keys = (int64_t *)xmalloc(sizeof(int64_t) * 8);
+    z->counts = (int64_t *)xmalloc(sizeof(int64_t) * 8);
+    z->hashes = (uint64_t *)xmalloc(sizeof(uint64_t) * 8);
+    z->buckets = (int64_t *)calloc(16, sizeof(int64_t));
+    z->total = 0;
+    return z;
+}
+
+void sn_zset_set_prune(void *p, int64_t flag) {
+    if (!p) return;
+    SnZSet *z = (SnZSet *)p;
+    z->prune = flag ? 1 : 0;
+}
+
+/* The ⊕ primitive: count[key] += delta. A zeroed coefficient leaves the
+   support when pruning is on (the canonical finite-support form). */
+void sn_zset_add(void *p, int64_t key, int64_t delta) {
+    if (!p || delta == 0) return;
+    SnZSet *z = (SnZSet *)p;
+    if ((z->len + 1) * 4 >= z->hcap * 3) {
+        zset_rehash(z, z->hcap * 2);
+    }
+    uint64_t h = key_hash(z->key_kind, key);
+    uint64_t bucket = 0;
+    int64_t idx = zset_find_index(z, key, h, &bucket);
+    if (idx >= 0) {
+        z->counts[idx] += delta;
+        z->total += delta;
+        if (z->counts[idx] == 0 && z->prune) {
+            if (z->key_kind == 1) sn_release((void *)(intptr_t)z->keys[idx]);
+            zset_remove_at(z, idx);
+        }
+        return;
+    }
+    if (z->len == z->cap) {
+        z->cap *= 2;
+        z->keys = (int64_t *)realloc(z->keys, sizeof(int64_t) * (size_t)z->cap);
+        z->counts = (int64_t *)realloc(z->counts, sizeof(int64_t) * (size_t)z->cap);
+        z->hashes = (uint64_t *)realloc(z->hashes, sizeof(uint64_t) * (size_t)z->cap);
+    }
+    if (z->key_kind == 1) sn_retain((void *)(intptr_t)key);
+    z->keys[z->len] = key;
+    z->counts[z->len] = delta;
+    z->hashes[z->len] = h;
+    z->buckets[bucket] = z->len + 1;
+    z->len++;
+    z->total += delta;
+}
+
+/* EXACT retraction — the Tier-G guarantee (W2C §1.1: deletion = −[x];
+   the group inverse makes retraction first-class, O(1)/key). */
+void sn_zset_remove(void *p, int64_t key, int64_t delta) {
+    sn_zset_add(p, key, -delta);
+}
+
+/* Pointwise add of src into dst (the ⊕ of two Z-sets). */
+void sn_zset_merge(void *dst, void *src) {
+    if (!dst || !src) return;
+    SnZSet *s = (SnZSet *)src;
+    for (int64_t i = 0; i < s->len; i++) {
+        sn_zset_add(dst, s->keys[i], s->counts[i]);
+    }
+}
+
+int64_t sn_zset_count(void *p, int64_t key) {
+    if (!p) return 0;
+    SnZSet *z = (SnZSet *)p;
+    if (z->len == 0) return 0;
+    uint64_t h = key_hash(z->key_kind, key);
+    int64_t idx = zset_find_index(z, key, h, NULL);
+    return idx >= 0 ? z->counts[idx] : 0;
+}
+
+int64_t sn_zset_total(void *p) { return p ? ((SnZSet *)p)->total : 0; }
+int64_t sn_zset_len(void *p) { return p ? ((SnZSet *)p)->len : 0; }
+
+void *sn_zset_copy(void *p) {
+    if (!p) return NULL;
+    SnZSet *z = (SnZSet *)p;
+    SnZSet *out = (SnZSet *)sn_zset_new(z->key_kind);
+    out->prune = z->prune;
+    for (int64_t i = 0; i < z->len; i++) {
+        sn_zset_add(out, z->keys[i], z->counts[i]);
+    }
+    return out;
+}
+
+/* The per-timestamp 𝒟: dst − prev as a NEW Z-set (pure; both operands
+   untouched). Canonical: only changed keys survive (zero differences are
+   pruned), so len(δ) = the size of the change, not of the state. */
+void *sn_zset_delta(void *dst, void *prev) {
+    SnZSet *d = (SnZSet *)dst;
+    SnZSet *pv = (SnZSet *)prev;
+    SnZSet *out = (SnZSet *)sn_zset_new(d ? d->key_kind : (pv ? pv->key_kind : 0));
+    if (d) {
+        for (int64_t i = 0; i < d->len; i++) {
+            sn_zset_add(out, d->keys[i], d->counts[i]);
+        }
+    }
+    if (pv) {
+        for (int64_t i = 0; i < pv->len; i++) {
+            sn_zset_add(out, pv->keys[i], -pv->counts[i]);
+        }
+    }
+    return out;
+}
+
+/* The ⊕ composition: base + delta as a NEW Z-set (pure). */
+void *sn_zset_apply(void *base, void *delta) {
+    SnZSet *b = (SnZSet *)base;
+    SnZSet *out = (SnZSet *)sn_zset_copy(b);
+    sn_zset_merge(out, delta);
+    return out;
+}
+
+void *sn_zset_keys(void *p) {
+    SnZSet *z = (SnZSet *)p;
+    List *l = (List *)sn_list_new(z ? z->key_kind : 0);
+    if (!z) return l;
+    for (int64_t i = 0; i < z->len; i++) {
+        if (z->key_kind == 1) sn_list_push_ptr(l, (void *)(intptr_t)z->keys[i]);
+        else sn_list_push_i64(l, z->keys[i]);
     }
     return l;
 }
