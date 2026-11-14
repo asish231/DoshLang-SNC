@@ -105,6 +105,72 @@ run_ns() {  # run_ns binary n [env...]  (kept for ad-hoc single-row runs)
     done
 }
 
+# ---------- pinned-lane rows (Wave 8, Impl-K) ----------
+# bench/pinned_lane_bench.sn — the compiler's pinned-lane coloring (e1f3b72)
+# end-to-end: recursive inout-accumulator rounds pre-colored onto pinned
+# lane L2 vs the default heap-backed list. bench/pinned_lane_bench.c — the
+# identical recursive shape against the runtime API on an ns clock (SNlang's
+# only clock is ms-resolution; the reclaim phases are sub-ms there, so the
+# precise alloc/read/reclaim rows live in the C twin). PIN_CHAINS rounds
+# (default 200: each round pushes N=100_000 elements across a depth-D=100
+# recursive chain — every timed phase totals >= 100x the .sn ms clock, per
+# the W2F discipline). Results: bench/RESULTS_PINNED_LANE.md.
+# PIN_ONLY=1 ./run_bench.sh runs just these rows without re-running the
+# five-language suite (which would need N=10M and would rewrite results/).
+pinned_lane_rows() {
+    echo "-- building pinned-lane bench (Wave 8, Impl-K)"
+    "$SNC" pinned_lane_bench.sn -o "$OUT/sn_pinned_lane_bench" || exit 1
+    $CLANG $CFLAGS -Wall -o "$OUT/c_pinned_lane_bench" \
+        pinned_lane_bench.c "$ROOT/compiler/runtime.c" -pthread || exit 1
+    local chains="${PIN_CHAINS:-200}"
+    local warm=$((chains / 10))
+    local b f r kb spec
+    for b in sn_pinned_lane_bench c_pinned_lane_bench; do
+        f="$OUT/$b.txt"
+        : > "$f"
+        echo "-- warmup $b (chains=$warm)" >&2
+        "$OUT/$b" "$warm" >/dev/null 2>&1
+        echo "-- timed $b x$RUNS (chains=$chains)" >&2
+        for r in $(seq "$RUNS"); do
+            "$OUT/$b" "$chains" >> "$f" 2>/dev/null
+        done
+    done
+    echo "-- pinned-lane peak RSS (KB, chains=$chains)"
+    for b in sn_pinned_lane_bench c_pinned_lane_bench; do
+        kb=$(peak_rss_kb "$OUT/$b" "$chains")
+        echo "rss $b $kb" >> "$OUT/rss.txt"
+        echo "  $b: $kb KB"
+    done
+    echo "-- pinned-lane medians (chains=$chains, median of $RUNS):"
+    for spec in \
+        "sn_pinned_lane_bench timer ns_per_elem" \
+        "sn_pinned_lane_bench pin_build ns_per_elem" \
+        "sn_pinned_lane_bench pin_read ns_per_elem" \
+        "sn_pinned_lane_bench pin_resetpair ns_per_elem" \
+        "sn_pinned_lane_bench heap_build ns_per_elem" \
+        "c_pinned_lane_bench timer clock_ns" \
+        "c_pinned_lane_bench pin elem_alloc_ns" \
+        "c_pinned_lane_bench pin elem_read_ns" \
+        "c_pinned_lane_bench pin chain_reclaim_ns" \
+        "c_pinned_lane_bench heap elem_alloc_ns" \
+        "c_pinned_lane_bench heap elem_read_ns" \
+        "c_pinned_lane_bench heap chain_reclaim_ns" \
+        "c_pinned_lane_bench heap_gc gc_ns" \
+        "c_pinned_lane_bench pin_resetpair pair_ns" \
+        "c_pinned_lane_bench pin_life cycle_ns" \
+        "c_pinned_lane_bench heap_life cycle_ns"; do
+        set -- $spec
+        echo "  $2.$3 = $(median_row "$OUT/$1.txt" "$2" "$3")"
+    done
+}
+
+if [ -n "${PIN_ONLY:-}" ]; then
+    pinned_lane_rows
+    echo
+    echo "== done (PIN_ONLY). raw runs in $OUT/*.txt ; see RESULTS_PINNED_LANE.md =="
+    exit 0
+fi
+
 # ---------- run + collect ----------
 collect() {  # collect NAME -- cmd...
     local name="$1"; shift; shift
@@ -124,6 +190,9 @@ collect sn_heap            -- "$OUT/sn_heap_bench"
 collect c_malloc           -- "$OUT/c_malloc_bench"
 collect rust_bumpalo       -- "$OUT/rust_bumpalo_bench"
 collect go_escape          -- "$OUT/go_escape_bench"
+
+# pinned-lane rows (Wave 8, Impl-K): see pinned_lane_rows above
+pinned_lane_rows
 
 # per-run peak RSS (one run each; RSS is stable)
 echo "-- peak RSS (KB)"

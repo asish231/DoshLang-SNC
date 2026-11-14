@@ -1,0 +1,194 @@
+// SWARM RABBIT HOLE — Wave 8 / Impl-K (Cohort Delta, benchmarkers).
+// The pinned-lane vs heap recursion benchmark, in-language: the e1f3b72
+// pinned-lane coloring (commit "check+ir: pinned-lane coloring + the real
+// lane feed to IR") exercised end-to-end vs the default heap-backed list.
+//
+// Shape (identical element machinery in both variants; the C twin
+// bench/pinned_lane_bench.c drives the same shape against the runtime API
+// with an ns clock — SNlang's only clock is the ms-resolution
+// time_now_ms, and every timed phase below totals >= 100x that, per the
+// W2F discipline):
+//   CHAINS rounds; each round builds ONE list of N = depth*per int
+//   elements grown by a recursive inout accumulator (depth D = 100
+//   levels, per = 1000 pushes per level). Values are level*per+k — the
+//   exact set {0..N-1}: len = N and sum = N*(N-1)/2 are the
+//   deterministic checksums, printed and matched against the C twin.
+//
+// Rows:
+//   timer    — 100_000 time_now_ms() call pairs: the clock overhead row.
+//   pin_build — CHAINS x { wm = lane_save(2); `list<int> acc = []` (the
+//               coloring pre-colors the SCC accumulator's allocation site
+//               onto pinned lane L2: sn_list_new_lane → the header is
+//               lane bump memory); grow(inout acc, D-1, per); length
+//               check; lane_restore(2, wm) } — construct + push + the
+//               O(1) reclaim, per element. The per-chain restore itself
+//               reads 0 ms at this clock; pin_resetpair bounds it and
+//               the C twin prices it in ns.
+//   pin_read  — the same rounds with a full sum pass over the N elements
+//               before the restore: the read split = pin_read −
+//               pin_build (the amort16/amort16x precedent, RESULTS.md §2).
+//   pin_resetpair — 1M lane_save(2) + lane_restore(2, wm) pairs: the O(1)
+//               reclaim bound on the actual pinned lane.
+//   heap_build — CHAINS x { `list<int> h = []` (sn_list_new, the default
+//               heap path — h never flows inout into the growing SCC, so
+//               the coloring leaves it heap-backed); a plain push loop of
+//               N; length check } — the same push/list_grow/pool-backed
+//               element machinery, heap header. In-language the reclaim
+//               is the collector's job (no per-object free intrinsic
+//               exists): the heap_gc row times one pass, and the C twin
+//               prices the per-list rc death (sn_release).
+//   heap_gc  — one gc_collect() pass over the heap rounds' dead lists
+//               (loop-local lists are not rooted at the call site; the
+//               counters below report what the pass actually swept).
+//
+// GC control: gc_set_threshold(2_000_000_000) up front keeps threshold
+// collections out of every timed phase (the sn_heap_bench.sn protocol);
+// the heap_gc row measures the explicit pass.
+//
+// Protocol: one warmup at CHAINS/10 then RUNS timed runs (driver,
+// median of 5); len_total/sum_total must match across runs and the C twin.
+
+use std.os
+
+// Non-tail BY CONSTRUCTION (a per-level local read after the recursive
+// call: the frame must live across the call, so the depth-D chain is
+// materialized): clang -O2 tail-call-optimizes a void tail recursion into
+// a loop, and even `return f(n-1) + 1` gets rewritten into an
+// accumulator — both verified on built binaries (0 self-calls). The
+// post-call read defeats the accumulator rewrite (LLVM's tailr only folds
+// constant accumulators), verified in the disassembly; the C twin uses the
+// same shape. The returned depth checksum is chains * 4950 (sum 0..D-1).
+fn grow(inout list<int> xs, int n, int per) -> int {
+    int k = 0
+    while (k < per) {
+        xs.push(n * per + k)
+        k = k + 1
+    }
+    int here = n
+    int r = 0
+    if (n > 0) {
+        r = grow(inout xs, n - 1, per)
+    }
+    return r + here
+}
+
+fn report(str row, int ns_per_elem, int phase_ms, int ops, int ck) {
+    print("BENCH row=" + row + " ns_per_elem=" + cast(ns_per_elem, str)
+        + " phase_ms=" + cast(phase_ms, str)
+        + " ops=" + cast(ops, str)
+        + " checksum=" + cast(ck, str))
+}
+
+fn main() {
+    int depth = 100
+    int per = 1000
+    int n = depth * per
+    int chains = 200
+    list<str> a = args()
+    if (a.length() > 1) {
+        int v = cast(a[1], int)
+        if (v > 0) {
+            chains = v
+        }
+    }
+    int elems = chains * n
+    gc_set_threshold(2000000000)
+
+    // ---- timer overhead: 100_000 time_now_ms() call pairs
+    int t0 = time_now_ms()
+    int kt = 0
+    int acct = 0
+    while (kt < 100000) {
+        acct = acct + time_now_ms()
+        kt = kt + 1
+    }
+    int t1 = time_now_ms()
+    report("timer", (t1 - t0) * 1000000 / 100000, t1 - t0, 100000, acct)
+
+    // ---- pin_build: recursive SCC accumulator rounds, pre-colored onto
+    // pinned lane L2 by the e1f3b72 coloring
+    int ck = 0
+    int lu = 0
+    int c = 0
+    int dt = 0
+    int tp0 = time_now_ms()
+    while (c < chains) {
+        ptr wm = lane_save(2)
+        list<int> acc = []
+        dt = dt + grow(inout acc, depth - 1, per)
+        if (c == 0) {
+            lu = lane_used(2)
+        }
+        ck = ck + acc.length()
+        lane_restore(2, wm)
+        c = c + 1
+    }
+    int tp1 = time_now_ms()
+    report("pin_build", (tp1 - tp0) * 1000000 / elems, tp1 - tp0, elems, ck)
+    print("pin_lane_used_bytes=" + cast(lu, str))
+    print("pin_depth_total=" + cast(dt, str))
+
+    // ---- pin_read: the same rounds with a full sum pass over the N
+    // elements before the restore (read split = pin_read - pin_build)
+    int ck2 = 0
+    int s2 = 0
+    int c2 = 0
+    int tq0 = time_now_ms()
+    while (c2 < chains) {
+        ptr wm = lane_save(2)
+        list<int> acc = []
+        dt = dt + grow(inout acc, depth - 1, per)
+        int j = 0
+        while (j < n) {
+            s2 = s2 + acc[j]
+            j = j + 1
+        }
+        ck2 = ck2 + acc.length()
+        lane_restore(2, wm)
+        c2 = c2 + 1
+    }
+    int tq1 = time_now_ms()
+    report("pin_read", (tq1 - tq0) * 1000000 / elems, tq1 - tq0, elems, ck2 + s2)
+
+    // ---- pin_resetpair: 1M save+restore pairs on the pinned lane
+    int tr0 = time_now_ms()
+    int kp = 0
+    while (kp < 1000000) {
+        ptr wm = lane_save(2)
+        lane_restore(2, wm)
+        kp = kp + 1
+    }
+    int tr1 = time_now_ms()
+    report("pin_resetpair", (tr1 - tr0) * 1000000 / 1000000, tr1 - tr0, 1000000, 0)
+
+    // ---- heap_build: the default heap-backed list, same element machinery
+    int hk = 0
+    int c3 = 0
+    int th0 = time_now_ms()
+    while (c3 < chains) {
+        list<int> h = []
+        int k = 0
+        while (k < n) {
+            h.push(k)
+            k = k + 1
+        }
+        hk = hk + h.length()
+        c3 = c3 + 1
+    }
+    int th1 = time_now_ms()
+    report("heap_build", (th1 - th0) * 1000000 / elems, th1 - th0, elems, hk)
+
+    // ---- heap_gc: one collector pass over the heap rounds' dead lists
+    int g0 = gc_count()
+    int tg0 = time_now_ms()
+    gc_collect()
+    int tg1 = time_now_ms()
+    int g1 = gc_count()
+    print("BENCH row=heap_gc gc_ms=" + cast(tg1 - tg0, str)
+        + " gc_objs_before=" + cast(g0, str)
+        + " gc_objs_after=" + cast(g1, str)
+        + " gc_freed=" + cast(g0 - g1, str))
+
+    print("len_total=" + cast(ck, str) + " sum_total=" + cast(s2, str))
+    print("PINNED_LANE_BENCH_DONE")
+}
