@@ -130,10 +130,13 @@ to sub-ns is the TLS prefix, exactly as W2F's Darwin table predicted.
    "current ~10–16 ns → 3-instr ≈ 1.1–1.4 ns (~10×)". On macOS it arrives in two stages:
    heap → opaque lane = 4.7× (shipped today), opaque → inline = 3× amortized / 6× per
    region construct (now measured directly in SNlang, §5).
-3. **The ~50× region-cached claim is structurally plausible but not directly measured
-   here** — it needs the IR-level inline (D0 gap #2/#3). Its direction is visible: Rust's
-   inlined `alloc+reset` per iteration (fresh16 = 0 ns/op measured, sub-clock) vs
-   SNlang's opaque 6 ns.
+3. **The ~50× region-cached claim: half-landed.** §5 measured Impl-A's inline
+   (opaque 6 → inline 1 ns per region construct = 6×; amortized bump 3 → 1 ns),
+   and the remaining distance to the ~0.2 ns "1-add" figure is the Darwin TLS
+   prefix + loop overhead — W2F's own tables predicted exactly this floor.
+   The full ~50× (vs the opaque heap path, 14 ns → 0.2 ns) would need the
+   region-cached register path (call-free bodies), which no current lowering
+   provides.
 4. **The memset dominated the pre-DIFF-6 lane path — DIFF-6 was worth 12× at 4 KB**
    (fresh4k 6 vs 73 ns) and 3× at LCG sizes (7 vs 22) — W2F's "the memset alone defeats
    O(1)" is now a measured row, not an estimate.
