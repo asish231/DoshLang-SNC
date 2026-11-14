@@ -142,6 +142,65 @@ typedef struct Chan {
 #endif
 } Chan;
 
+/* --------------------------------------------------------------------- */
+/*  Linear message envelopes (SWARM RABBIT HOLE: W2-E DIFF-3, amended by   */
+/*  W4A repairs 4 & 6c). The amended STRATA §2.5.2 Mode B: a lane-backed   */
+/*  payload packs into a self-contained slab the receiver ADOPTS, exactly */
+/*  once ("or copies" is deleted — a copied-and-adopted slab double-frees */
+/*  and a never-adopted copy leaks; linearity is the only sound           */
+/*  discipline). The slab is a malloc'd detached buffer — NEVER a lane,    */
+/*  NEVER gc_track'd — so the atomic header below is the only ownership   */
+/*  record.                                                               */
+/* --------------------------------------------------------------------- */
+enum {
+    SN_ENV_PACKED   = 0,  /* sender built the slab; not yet queued          */
+    SN_ENV_QUEUED   = 1,  /* published to a channel queue (release@send)   */
+    SN_ENV_RECEIVED = 2,  /* popped by a receiver; not yet adopted/dropped */
+    SN_ENV_ADOPTED  = 3,  /* terminal: receiver adopted the bytes onto its */
+                          /* own lane/frame; the slab was freed           */
+    SN_ENV_FREED    = 4   /* terminal: freed without adoption (drop /      */
+                          /* failed send / task-group drain)               */
+};
+
+typedef struct SnMsgEnvelope {
+    /* W4A repair 4: the CAS on `state` is the single linearization point
+       between a racing receiver and the task-group join/abort drain. */
+    int64_t state;   /* atomic; SN_ENV_* above */
+    int64_t refs;    /* atomic; holders: channel queue, task-group registry,
+                        receiver — the HEADER is freed at 0 */
+    void *slab;      /* detached malloc'd payload (never a lane, never GC-tracked) */
+    int64_t len;     /* payload bytes */
+    void *chan;      /* the Chan this envelope was queued on (W4A repair 4
+                        residual: the supervisor reaches every channel a
+                        group's tasks sent to through the registry) */
+    struct SnMsgEnvelope *next_group; /* intrusive task-group registry link */
+} SnMsgEnvelope;
+
+/* Portable atomics via compiler builtins (clang on every supported target,
+   including the Windows cross builds — build.ps1/Makefile pin clang).
+   Memory orders per W4A repair 6c: release-store at send, acquire-load at
+   adopt, acquire-release CAS on every state transition (seq_cst subsumes
+   acq_rel; acq_rel is the specified minimum). */
+static int64_t sn_atomic_load_acq(int64_t *p) {
+    return __atomic_load_n(p, __ATOMIC_ACQUIRE);
+}
+static void sn_atomic_store_rel(int64_t *p, int64_t v) {
+    __atomic_store_n(p, v, __ATOMIC_RELEASE);
+}
+static int sn_atomic_cas_acqrel(int64_t *p, int64_t expected, int64_t desired) {
+    int64_t e = expected;
+    return __atomic_compare_exchange_n(p, &e, desired, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+}
+static void sn_atomic_retain(int64_t *p) {
+    __atomic_fetch_add(p, 1, __ATOMIC_ACQ_REL);
+}
+/* Returns 1 when this release dropped the count to zero (caller frees). */
+static int sn_atomic_release_is_last(int64_t *p) {
+    return __atomic_fetch_sub(p, 1, __ATOMIC_ACQ_REL) == 1;
+}
+
+
 typedef struct Lock {
     int64_t rc;
     int64_t kind;
@@ -219,9 +278,16 @@ int64_t sn_ntoh64(int64_t v) { return SN_IS_LE ? (int64_t)sn_swap64((uint64_t)v)
 int64_t sn_swap16_i64(int64_t v) { return (int64_t)sn_swap16((uint16_t)v); }
 int64_t sn_swap32_i64(int64_t v) { return (int64_t)sn_swap32((uint32_t)v); }
 int64_t sn_swap64_i64(int64_t v) { return (int64_t)sn_swap64((uint64_t)v); }
+/* SWARM RABBIT HOLE DIFF-6 (W2-E spec): lane poison-fill mode, resolved once
+   here — single-threaded at startup — so sn_lane_alloc's fast path never
+   races the lazy fallback in sn_lane_poison_on(). Definition lives with the
+   lane machinery below sn_lane_ensure(). */
+static int sn_lane_poison_on(void);
+
 void sn_rt_init(int argc, char **argv) {
     g_argc = argc;
     g_argv = argv;
+    sn_lane_poison_on(); /* DIFF-6: resolve poison mode before any task starts */
 
 #ifdef _WIN32
     if (!g_rt_ready) {
@@ -2021,18 +2087,29 @@ typedef struct SnNursery {
     CRITICAL_SECTION mu;
     CONDITION_VARIABLE cv;
     int64_t active_tasks;
+    /* SWARM RABBIT HOLE DIFF-3 / W4A repair 4: the supervisor's registry
+       anchor — every envelope a task of this group sent but no receiver has
+       adopted yet sits on this intrusive list; sn_nursery_wait drains it
+       (queue-drain rule) so a join frees exactly the un-adopted slabs. */
+    SnMsgEnvelope *env_head;
 } SnNursery;
 #else
 typedef struct SnNursery {
     pthread_mutex_t mu;
     pthread_cond_t cv;
     int64_t active_tasks;
+    /* SWARM RABBIT HOLE DIFF-3 / W4A repair 4: the supervisor's registry
+       anchor — every envelope a task of this group sent but no receiver has
+       adopted yet sits on this intrusive list; sn_nursery_wait drains it
+       (queue-drain rule) so a join frees exactly the un-adopted slabs. */
+    SnMsgEnvelope *env_head;
 } SnNursery;
 #endif
 
 void *sn_nursery_new(void) {
     SnNursery *n = (SnNursery *)xmalloc(sizeof(SnNursery));
     n->active_tasks = 0;
+    n->env_head = NULL; /* DIFF-3: registry starts empty */
 #ifdef _WIN32
     InitializeCriticalSection(&n->mu);
     InitializeConditionVariable(&n->cv);
@@ -2077,6 +2154,243 @@ void sn_nursery_leave_task(void *nursery) {
 #endif
 }
 
+/* --------------------------------------------------------------------- */
+/*  Linear message envelopes — DIFF-3 runtime slice (W4A repairs 4 & 6c) */
+/*                                                                        */
+/*  State machine (extends STRATA §2.5.3 to envelopes, W2-E DIFF-3):      */
+/*    sn_msg_pack()        : Uninit -> Packed                             */
+/*    sn_msg_send(g,c,e)   : Packed -> Queued  (release-store, W4A 6c)    */
+/*    sn_msg_recv(c)       : Queued -> Received (acquire CAS = HB edge)   */
+/*    sn_msg_adopt(e,dst)  : Received -> Adopted (bytes land on the       */
+/*                           receiver's own lane/frame; slab freed;       */
+/*                           exactly once)                                */
+/*    sn_msg_drop(e)       : Received -> Freed                            */
+/*    group join/abort     : Queued -> Freed (CAS under the queue lock,    */
+/*                           W4A repair 4 queue-drain rule)               */
+/*                                                                        */
+/*  A single holder owns the Live state at every point; the atomic `refs` */
+/*  count guards only the HEADER against the one race the CAS cannot      */
+/*  order: a receiver that popped the pointer but has not yet CAS'd while */
+/*  the drain frees the slab (the failed-CAS receiver then releases the    */
+/*  header exactly once itself).                                          */
+/* --------------------------------------------------------------------- */
+
+static void sn_env_retain(SnMsgEnvelope *env) {
+    if (env) sn_atomic_retain(&env->refs);
+}
+
+static void sn_env_release(SnMsgEnvelope *env) {
+    if (env && sn_atomic_release_is_last(&env->refs)) free(env);
+}
+
+void *sn_msg_pack(int64_t len) {
+    SnMsgEnvelope *env = (SnMsgEnvelope *)xmalloc(sizeof(SnMsgEnvelope));
+    env->state = SN_ENV_PACKED;
+    env->refs = 1; /* the packer's reference; sn_msg_send consumes it */
+    env->len = len > 0 ? len : 0;
+    env->chan = NULL;
+    env->next_group = NULL;
+    /* DIFF-3: malloc'd detached buffer — NEVER a lane, NEVER gc_track'd.
+       NOT zeroed: zeroing is exactly the O(n) cost DIFF-6 drops; the sender
+       writes the payload before send's release-store publishes it. */
+    env->slab = NULL;
+    if (env->len > 0) {
+        env->slab = malloc((size_t)env->len);
+        if (!env->slab) {
+            fprintf(stderr, "out of memory\n");
+            exit(1);
+        }
+    }
+    return env;
+}
+
+/* DIFF-3: sender-side payload surface. The sender writes the slab bytes
+   through this pointer BEFORE sn_msg_send's release-store publishes them
+   (W4A repair 6c: the release at send orders the initialization writes
+   before the state publication). Read-only accessors for diagnostics. */
+void *sn_msg_slab(void *envp) {
+    SnMsgEnvelope *env = (SnMsgEnvelope *)envp;
+    return env ? env->slab : NULL;
+}
+
+int64_t sn_msg_len(void *envp) {
+    SnMsgEnvelope *env = (SnMsgEnvelope *)envp;
+    return env ? env->len : 0;
+}
+
+int64_t sn_msg_send(void *group, void *chan, void *envp) {
+    SnMsgEnvelope *env = (SnMsgEnvelope *)envp;
+    if (!env) return 0;
+    env->chan = chan;
+    /* DIFF-3 Rule 3b: register with the supervisor (the structured spawn
+       scope's task group) BEFORE publishing, so the envelope can never be
+       invisible to the join-time drain. The registry reference keeps the
+       header alive until the group's join releases it. */
+    if (group) {
+        SnNursery *n = (SnNursery *)group;
+#ifdef _WIN32
+        EnterCriticalSection(&n->mu);
+        env->next_group = n->env_head;
+        n->env_head = env;
+        LeaveCriticalSection(&n->mu);
+#else
+        pthread_mutex_lock(&n->mu);
+        env->next_group = n->env_head;
+        n->env_head = env;
+        pthread_mutex_unlock(&n->mu);
+#endif
+        sn_env_retain(env); /* the registry's reference */
+    }
+    /* W4A repair 6c: release-store the header AFTER all slab writes at
+       pack/send — the release publishes the sender's initialization; the
+       receiver's acquire at recv/adopt forms the HB edge (the send-publish /
+       adopt-observe pair plays for slab transfer the role join() plays for
+       task results). */
+    sn_atomic_store_rel(&env->state, SN_ENV_QUEUED);
+    int64_t ok = sn_chan_send(chan, (int64_t)(intptr_t)env);
+    if (ok) {
+        sn_env_retain(env); /* the queue's reference (travels with the value) */
+    } else {
+        /* The value never entered a queue, so no receiver can exist: the
+           send consumed the envelope (DIFF-3 linearity) — retire it here;
+           the registry (if any) releases its header at group join. */
+        (void)sn_atomic_cas_acqrel(&env->state, SN_ENV_QUEUED, SN_ENV_FREED);
+        free(env->slab);
+        env->slab = NULL;
+    }
+    sn_env_release(env); /* the sender's reference: send consumes it */
+    return ok;
+}
+
+int64_t sn_msg_recv(void *chan) {
+    int64_t v = 0;
+    if (!sn_chan_recv_ok(chan, &v) || v == 0) return 0;
+    SnMsgEnvelope *env = (SnMsgEnvelope *)(intptr_t)v;
+    /* The queue's reference is now ours (it traveled with the popped value).
+       W4A repair 6c: acquire-load the header before any adopt-side read of
+       the slab bytes; the CAS (Queued -> Received) is the single
+       linearization point against the drain's Queued -> Freed (repair 4):
+       a racing drain's CAS fails, so the receiver never sees a freed slab. */
+    int64_t st = sn_atomic_load_acq(&env->state);
+    if (st != SN_ENV_QUEUED ||
+        !sn_atomic_cas_acqrel(&env->state, SN_ENV_QUEUED, SN_ENV_RECEIVED)) {
+        /* The group's join-time drain freed the slab while it sat queued;
+           the header is spent — release the popped reference. */
+        sn_env_release(env);
+        return 0;
+    }
+    return (int64_t)(intptr_t)env;
+}
+
+int64_t sn_msg_adopt(void *envp, void *dst, int64_t cap) {
+    SnMsgEnvelope *env = (SnMsgEnvelope *)envp;
+    if (!env) return 0;
+    /* W4A repair 6c: acquire-load before any slab read. Adopt is exactly-once
+       (DIFF-3): re-use of a Consumed envelope is E0806 at compile time; at
+       runtime it aborts rather than alias (double-adopt = cross-thread UAF,
+       the G1 A4b hole this machine closes). */
+    int64_t st = sn_atomic_load_acq(&env->state);
+    if (st != SN_ENV_RECEIVED ||
+        !sn_atomic_cas_acqrel(&env->state, SN_ENV_RECEIVED, SN_ENV_ADOPTED)) {
+        fprintf(stderr, "runtime error: adopt of a non-Received message envelope\n");
+        exit(1);
+    }
+    int64_t n = env->len;
+    if (cap >= 0 && n > cap) n = cap;
+    if (n > 0 && dst && env->slab) memcpy(dst, env->slab, (size_t)n);
+    /* DIFF-3: the bytes re-enter Stratum 0/1 at the receiver — the slab is
+       freed and the envelope is spent. */
+    free(env->slab);
+    env->slab = NULL;
+    env->len = 0;
+    sn_env_release(env); /* the receiver's reference */
+    return n;
+}
+
+void sn_msg_drop(void *envp) {
+    SnMsgEnvelope *env = (SnMsgEnvelope *)envp;
+    if (!env) return;
+    /* DIFF-3 env.drop(): explicit discard of a Received envelope; the slab
+       is freed and the envelope is spent. Any use of a Consumed envelope is
+       E0806 at compile time; at runtime it aborts rather than double-free
+       (mirrors sn_msg_adopt's exactly-once guard). */
+    if (!sn_atomic_cas_acqrel(&env->state, SN_ENV_RECEIVED, SN_ENV_FREED)) {
+        fprintf(stderr, "runtime error: drop of a non-Received message envelope\n");
+        exit(1);
+    }
+    free(env->slab);
+    env->slab = NULL;
+    env->len = 0;
+    sn_env_release(env);
+}
+
+static void sn_chan_mu_lock(Chan *c) {
+#ifdef _WIN32
+    EnterCriticalSection(&c->mu);
+#else
+    pthread_mutex_lock(&c->mu);
+#endif
+}
+
+static void sn_chan_mu_unlock(Chan *c) {
+#ifdef _WIN32
+    LeaveCriticalSection(&c->mu);
+#else
+    pthread_mutex_unlock(&c->mu);
+#endif
+}
+
+/* W4A repair 4 (queue-drain rule): at task-group join — and, in a later
+   slice, abort — free every QUEUED (sent-but-unreceived) slab by CASing the
+   header Queued -> Freed, then dequeue the buffered value UNDER THE QUEUE
+   LOCK so no late receiver pops a pointer to a spent envelope. The CAS is
+   the single linearization point: a racing receiver's Queued -> Received CAS
+   fails and the receiver never touches the freed slab. The registry's
+   env->chan reaches every channel this group's tasks sent to (W4A repair 4
+   residual: the supervisor holds the channel list through the registry). */
+static void sn_env_drain_group(SnNursery *n) {
+    SnMsgEnvelope *env = n->env_head;
+    n->env_head = NULL;
+    while (env) {
+        SnMsgEnvelope *next = env->next_group;
+        env->next_group = NULL;
+        int64_t st = sn_atomic_load_acq(&env->state);
+        if (st == SN_ENV_QUEUED &&
+            sn_atomic_cas_acqrel(&env->state, SN_ENV_QUEUED, SN_ENV_FREED)) {
+            /* Won the race: no receiver adopted it. Free the slab... */
+            free(env->slab);
+            env->slab = NULL;
+            /* ...and, under the queue lock, remove the buffered value so the
+               queue no longer references the spent header. If the value is
+               already gone, a receiver popped it and holds the queue's
+               reference — its CAS on the FREED state fails and it releases
+               the header itself; the refcount frees the header exactly once
+               either way. */
+            Chan *c = (Chan *)env->chan;
+            if (c) {
+                int64_t want = (int64_t)(intptr_t)env;
+                int found = 0;
+                sn_chan_mu_lock(c);
+                for (int64_t i = 0; i < c->len; i++) {
+                    if (c->buf[(c->head + i) % c->cap] == want) {
+                        for (int64_t j = i; j + 1 < c->len; j++) {
+                            c->buf[(c->head + j) % c->cap] =
+                                c->buf[(c->head + j + 1) % c->cap];
+                        }
+                        c->len--;
+                        found = 1;
+                        break;
+                    }
+                }
+                sn_chan_mu_unlock(c);
+                if (found) sn_env_release(env); /* the queue's reference */
+            }
+        }
+        sn_env_release(env); /* the registry's reference */
+        env = next;
+    }
+}
+
 void sn_nursery_wait(void *nursery) {
     if (!nursery) return;
     SnNursery *n = (SnNursery *)nursery;
@@ -2086,14 +2400,22 @@ void sn_nursery_wait(void *nursery) {
         SleepConditionVariableCS(&n->cv, &n->mu, INFINITE);
     }
     LeaveCriticalSection(&n->mu);
-    DeleteCriticalSection(&n->mu);
-    free(n);
 #else
     pthread_mutex_lock(&n->mu);
     while (n->active_tasks > 0) {
         pthread_cond_wait(&n->cv, &n->mu);
     }
     pthread_mutex_unlock(&n->mu);
+#endif
+    /* DIFF-3 Rule 3b / W4A repair 4 (panic-safe join): before the group dies,
+       drain the registry — free every QUEUED (sent-but-unreceived) slab via
+       the CAS header under the queue lock. All of this group's tasks have
+       left above, so there are no concurrent registrants. */
+    sn_env_drain_group(n);
+#ifdef _WIN32
+    DeleteCriticalSection(&n->mu);
+    free(n);
+#else
     pthread_mutex_destroy(&n->mu);
     pthread_cond_destroy(&n->cv);
     free(n);
@@ -5208,6 +5530,37 @@ void sn_go_spawn(void (*fn)(void *), void *arg) {
 #define SN_LANE_RESERVE_BYTES (256ULL * 1024ULL * 1024ULL) /* 256 MB virtual reservation per lane */
 #define SN_LANE_COMMIT_STEP   (64ULL * 1024ULL)
 
+/* --------------------------------------------------------------------- */
+/*  Lane poison-fill mode (DIFF-6 / T-FIBR, W4A repair 2):                 */
+/*  Release builds hand out UNWRITTEN (garbage) bytes — the bump is O(1); */
+/*  the E0807 full-initialization-before-read checker obligation is what  */
+/*  makes that safe. Debug builds poison-fill with 0xAA so any checker     */
+/*  miss crashes immediately in CI instead of flowing a garbage list      */
+/*  header into bounds arithmetic (silent type confusion). Enabled by     */
+/*  -DSN_DEBUG / -DSN_DEBUG_POISON at compile time, or SN_POISON=1 at     */
+/*  runtime (resolved once in sn_rt_init, before threads start).          */
+/* --------------------------------------------------------------------- */
+#if defined(SN_DEBUG) || defined(SN_DEBUG_POISON)
+#define SN_LANE_POISON_FORCED 1
+#endif
+
+static int g_lane_poison_state = 0; /* 0 unresolved, 1 on, -1 off */
+
+static int sn_lane_poison_on(void) {
+#ifdef SN_LANE_POISON_FORCED
+    return 1;
+#else
+    int s = __atomic_load_n(&g_lane_poison_state, __ATOMIC_RELAXED);
+    if (s != 0) return s > 0;
+    const char *e = getenv("SN_POISON");
+    s = (e && e[0] == '1' && e[1] == '\0') ? 1 : -1;
+    /* Benign race: every racer stores the same value; sn_rt_init resolves
+       the flag single-threaded at startup before this can race in practice. */
+    __atomic_store_n(&g_lane_poison_state, s, __ATOMIC_RELAXED);
+    return s > 0;
+#endif
+}
+
 typedef struct SnLane {
     uint8_t *base;
     uint8_t *top;
@@ -5215,6 +5568,13 @@ typedef struct SnLane {
     uint8_t *limit;
     uint32_t initialized;
     uint32_t frozen_depth;
+    /* SWARM RABBIT HOLE, D0 gap #1 (first half): lane hierarchy for nursery
+       sub-lanes. NULL for thread-root lanes (these g_tls_lanes entries); a
+       child nursery lane points at its parent, enabling the O(1) task-group
+       join reset and the DIFF-3 adopt path's re-anchoring of received bytes
+       onto the receiving frame. Child-lane create/destroy carving is a later
+       slice; this slice only plants the field. */
+    struct SnLane *parent;
 } SnLane;
 
 static SN_TLS SnLane g_tls_lanes[SN_LANE_COUNT];
@@ -5223,7 +5583,19 @@ static SnLane *sn_lane_ensure(int64_t lane_id) {
     if (lane_id < 0 || lane_id >= SN_LANE_COUNT) lane_id = 0;
     SnLane *l = &g_tls_lanes[lane_id];
     if (!l->initialized) {
-        size_t page_sz = 65536;
+        size_t page_sz;
+#ifdef _WIN32
+        /* W2F §6: Windows has no POSIX sysconf; keep the 64 KB
+           reserve-granularity guard (the MEM_RESERVE tail is the real
+           guard on this path). */
+        page_sz = 65536;
+#else
+        /* W2F §6: the POSIX guard must be one OS page — 16 KB on Apple
+           Silicon, 4 KB on Linux; the old hardcoded 64 KB was 4 pages on
+           macOS and 16 on Linux. */
+        long psz = sysconf(_SC_PAGESIZE);
+        page_sz = psz > 0 ? (size_t)psz : 4096;
+#endif
         size_t total = (size_t)SN_LANE_RESERVE_BYTES + page_sz;
 #ifdef _WIN32
         uint8_t *mem = (uint8_t *)VirtualAlloc(NULL, total, MEM_RESERVE, PAGE_NOACCESS);
@@ -5241,6 +5613,7 @@ static SnLane *sn_lane_ensure(int64_t lane_id) {
         l->limit = mem + SN_LANE_RESERVE_BYTES;
         l->initialized = 1;
         l->frozen_depth = 0;
+        l->parent = NULL; /* thread-root lane (D0 gap #1): no parent */
     }
     return l;
 }
@@ -5250,6 +5623,21 @@ void *sn_lane_save(int64_t lane_id) {
     return (void *)l->top;
 }
 
+/* FIBR poison helper (DIFF-6 / T-FIBR, W4A repair 2): fill [from, to) of the
+   lane with 0xAA when poison mode is on; no-op in release builds unless
+   SN_POISON=1. The rewind path calls this over the freed range so rewinds
+   re-poison — a written byte is never trusted across a rewind (the written
+   sets die with the lane-write epoch, tied to S2's invalidation lattice). */
+void sn_lane_poison(int64_t lane_id, void *from, void *to) {
+    if (!sn_lane_poison_on()) return;
+    SnLane *l = sn_lane_ensure(lane_id);
+    uint8_t *lo = (uint8_t *)from;
+    uint8_t *hi = (uint8_t *)to;
+    if (!lo || !hi || hi < lo) return;
+    if (lo < l->base || hi > l->limit) return;
+    memset(lo, 0xAA, (size_t)(hi - lo));
+}
+
 void sn_lane_restore(int64_t lane_id, void *watermark) {
     SnLane *l = sn_lane_ensure(lane_id);
     if (l->frozen_depth > 0) {
@@ -5257,6 +5645,13 @@ void sn_lane_restore(int64_t lane_id, void *watermark) {
         exit(1);
     }
     if (watermark && (uint8_t *)watermark >= l->base && (uint8_t *)watermark <= l->limit) {
+        /* T-FIBR "rewind re-poisons" (W4A repair 2): in debug/poison builds
+           the freed range [watermark, old_top) is re-filled with 0xAA before
+           the top store, so no byte below the new top is ever trusted as
+           written. */
+        if (sn_lane_poison_on()) {
+            sn_lane_poison(lane_id, watermark, (void *)l->top);
+        }
         l->top = (uint8_t *)watermark;
     }
 }
@@ -5284,7 +5679,56 @@ void *sn_lane_alloc(int64_t lane_id, int64_t bytes) {
         exit(1);
     }
 #endif
-    memset((void *)aligned, 0, (size_t)bytes);
+    /* DIFF-6 (W2-E spec, Option A): the bump is O(1) — release builds do NOT
+       zero (the E0807 full-initialization-before-read checker obligation
+       makes unwritten bytes safe to hand out; the only deleted line in the
+       wave was the unconditional memset that was here). Debug/poison builds
+       fill 0xAA so any checker miss crashes in CI instead of producing a
+       garbage list header that could flow into bounds arithmetic. The limit
+       check above stays as-is: POSIX is check-based today (W2F §3 — no
+       SIGSEGV trap handler in this slice). */
+    if (bytes > 0 && sn_lane_poison_on()) {
+        memset((void *)aligned, 0xAA, (size_t)bytes);
+    }
+    l->top = next;
+    return (void *)aligned;
+}
+
+/* DIFF-6 opt-in zeroing twin: same commit/overflow logic as sn_lane_alloc,
+   but the caller receives zeroed bytes (interop / first-touch-dependent
+   code; mirrors bumpalo's alloc_zeroed split so the benchmark plan's
+   zeroed-vs-raw rows are both expressible). The region is fully-written at
+   allocation, so the E0807 checker treats it as covered (the compiler-side
+   intrinsic wiring is a later slice). `align` rounds up to a power of two;
+   align <= 8 behaves exactly like sn_lane_alloc. */
+void *sn_lane_alloc_zeroed(int64_t lane_id, int64_t bytes, int64_t align) {
+    SnLane *l = sn_lane_ensure(lane_id);
+    if (l->frozen_depth > 0) {
+        fprintf(stderr, "runtime error: cannot allocate on frozen Elastic Lane\n");
+        exit(1);
+    }
+    if (bytes < 0) bytes = 0;
+    int64_t a = 8;
+    if (align > 8 && align <= 65536) {
+        while (a < align) a <<= 1;
+    }
+    uintptr_t cur = (uintptr_t)l->top;
+    uintptr_t aligned = (cur + (uintptr_t)a - 1u) & ~((uintptr_t)a - 1u);
+    uint8_t *next = (uint8_t *)(aligned + (size_t)bytes);
+#ifdef _WIN32
+    if (next > l->committed) {
+        if (next > l->limit) { fprintf(stderr, "fatal: SnLane overflow\n"); exit(1); }
+        size_t need = ((size_t)(next - l->committed) + SN_LANE_COMMIT_STEP - 1) & ~(SN_LANE_COMMIT_STEP - 1);
+        VirtualAlloc(l->committed, need, MEM_COMMIT, PAGE_READWRITE);
+        l->committed += need;
+    }
+#else
+    if (next > l->limit) { /* W2F §3: POSIX stays check-based (no trap handler) */
+        fprintf(stderr, "fatal: SnLane overflow\n");
+        exit(1);
+    }
+#endif
+    if (bytes > 0) memset((void *)aligned, 0, (size_t)bytes);
     l->top = next;
     return (void *)aligned;
 }
