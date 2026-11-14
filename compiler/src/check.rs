@@ -2,12 +2,100 @@ use crate::ast::*;
 use crate::diag::Diagnostics;
 use crate::span::Span;
 use crate::types::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 #[derive(Clone, Debug)]
 pub struct EnumVariantInfo {
     pub name: String,
     pub fields: Vec<(String, Type)>,
+}
+
+/// SWARM RABBIT HOLE — Wave 6 (Impl-E), W2A §1.1 / DIFF-2: RegionArena id
+/// (D0 gap #4, first slice). 0 is the function-outer region; ids grow
+/// ⊑ₙₑₛₜ-downward with nesting (an inner region always has a strictly
+/// larger id than its parent). Numbering restarts per function activation
+/// — regions are function-lexical (ρ_s); cross-function facts travel in
+/// FnBorrowSummary, not in RgnIds.
+pub type RgnId = u32;
+
+/// SWARM RABBIT HOLE — Wave 6 (Impl-E), DIFF-1 (STRATA lane classes):
+/// allocation-site lane class of a local. Today the checker records only
+/// ScratchPingPong, and only for `lane_alloc`-backed raw locals — list
+/// locals stay heap-backed (malloc) until the pinned-lane slice; no
+/// PinnedAccumulator lanes exist in the checker yet, so the E0802 wiring
+/// below is real but cannot yet be satisfied, only violated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LaneClass {
+    /// L0/L1 frame-local ping-pong scratch.
+    ScratchPingPong,
+    /// L2..L6 pinned accumulators (scc_accum_params pre-coloring).
+    PinnedAccumulator,
+    /// L7 caller-sret DPS-out.
+    CallerSretOut,
+}
+
+/// SWARM RABBIT HOLE — Wave 6 (Impl-E), DIFF-1: allocation-site lane
+/// assignment, recorded at declaration of a lane-backed local.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LaneAssignment {
+    pub lane: u8,
+    pub class: LaneClass,
+}
+
+/// SWARM RABBIT HOLE — Wave 6 (Impl-E), W2A §1.3 (v3) / DIFF-1: the
+/// interprocedural inout summary. The three v2 fields (STRATA §2.2.3)
+/// are carried for spec conformance but are not computed by the checker
+/// yet; `scc_accum_params` is computed (by `scc_accum_fixpoint`) — it is
+/// the growth axis the shrink-only summary missed (kills G1 A5a).
+#[derive(Clone, Debug, Default)]
+pub struct FnBorrowSummary {
+    /// Params flowing into the return value (spec-carried; uncomputed).
+    pub return_roots_from_params: Vec<usize>,
+    /// (dst_param, src_param) store edges (spec-carried; uncomputed).
+    pub param_store_edges: Vec<(usize, usize)>,
+    /// Inout params shrunk by this function (spec-carried; uncomputed —
+    /// the local case is already covered by list_epochs/
+    /// check_borrow_epoch). W2A §1.3 requires shrinks_params ⊆
+    /// scc_accum_params once this field is computed.
+    pub shrinks_params: Vec<usize>,
+    /// DIFF-1 Rule 1a / W2A §1.3 S6: inout params GROWN
+    /// (push/push_ref/insert) by this function or by any deeper re-entry
+    /// of this function's recursion SCC while an activation of this
+    /// function is suspended at an SCC call edge. Orthogonal to
+    /// shrinks_params — the push-only accumulator appears here and
+    /// nowhere in shrinks_params; that is exactly the hole G1 A5a drove
+    /// through.
+    pub scc_accum_params: Vec<usize>,
+}
+
+/// SWARM RABBIT HOLE — Wave 6 (Impl-E), DIFF-1 Rule 1a steps 2/3: one
+/// inout-argument edge — the caller passes its own inout param
+/// `caller_param` into `callee`'s param `callee_param` (indices in the
+/// callee sig's inout_params space). Consumed by `scc_accum_fixpoint`.
+#[derive(Clone, Debug)]
+pub struct InoutEdge {
+    pub caller: String,
+    pub caller_param: Option<usize>,
+    pub callee: String,
+    pub callee_param: usize,
+}
+
+/// SWARM RABBIT HOLE — Wave 6 (Impl-E), DIFF-1 Rule 1b: a deferred
+/// allocation-site check — a local was passed `inout` into `callee`'s
+/// param `callee_param`. If the fixpoint marks that param ∈
+/// scc_accum_params(callee) and the local's allocation site sits on a
+/// frame-local scratch lane (the current single-lane model: any lane
+/// that isn't pinned — for now, lane 0), E0802 fires after the fixpoint.
+/// `lane` is None for locals with no lane assignment (heap-backed
+/// today) — exempt until the pinned-lane slice records real lanes for
+/// growable locals.
+#[derive(Clone, Debug)]
+pub struct SccAccumSite {
+    pub callee: String,
+    pub callee_param: usize,
+    pub local: String,
+    pub lane: Option<LaneAssignment>,
+    pub span: Span,
 }
 
 pub struct CheckDb {
@@ -32,6 +120,22 @@ pub struct CheckDb {
     pub fn_templates: HashMap<String, FnItem>,
     pub instantiated_funcs: HashMap<String, FnItem>,
     pub resolved_calls: HashMap<(u32, u32, u32), String>,
+    /// SWARM RABBIT HOLE — Wave 6 (Impl-E, D0 gap #4 first slice /
+    /// DIFF-1): module-wide interprocedural state for the region poset's
+    /// scc_accum_params fixpoint (W2A §1.3). Recorded during checking;
+    /// `scc_accum_fixpoint` runs once, after all functions are checked.
+    /// Per-function borrow summaries keyed by the db.funcs key
+    /// ("{blueprint}::{method}" for methods, bare name otherwise).
+    pub fn_summaries: HashMap<String, FnBorrowSummary>,
+    /// pushes(f, i) seeds (DIFF-1 Rule 1a step 1): inout params this
+    /// function grows directly.
+    pub fn_growth_seeds: HashMap<String, BTreeSet<usize>>,
+    /// The module call graph (Tarjan input): caller key -> callee keys.
+    pub call_edges: HashMap<String, BTreeSet<String>>,
+    /// Rule 1a steps 2/3 propagation edges.
+    pub inout_call_edges: Vec<InoutEdge>,
+    /// Rule 1b deferred allocation-site checks (E0802 candidates).
+    pub scc_accum_sites: Vec<SccAccumSite>,
 }
 
 impl CheckDb {
@@ -65,6 +169,33 @@ struct Checker<'a> {
     current_bp_hierarchy: Vec<String>,
     in_async: bool,
     in_static: bool,
+    // --- SWARM RABBIT HOLE — Wave 6 (Impl-E): the region poset skeleton
+    // (W2A §1.1; DIFF-1/DIFF-2; D0 gap #4 first slice). Bookkeeping only
+    // — no checking semantics change in this slice. ---
+    /// W2A §1.1: the region stack IS the ⊑ₙ order (the lexical nesting,
+    /// innermost on top). Index 0 is the function-outer region
+    /// (DIFF-2: RgnId 0); `rgn_exit` pops innermost-first — SR1's
+    /// innermost-first is exactly this LIFO (verified: it runs in
+    /// lockstep with the existing scope pop in push()/pop()).
+    region_stack: Vec<RgnId>,
+    /// Next fresh region id; ids grow ⊑ₙ-downward with nesting.
+    rgn_next: RgnId,
+    /// The poset's parent edges (D0 gap #4's node → parent map): recorded
+    /// at region entry; read at exit to verify the ⊑ₙ chain (SR1).
+    region_parent: HashMap<RgnId, RgnId>,
+    /// DIFF-2 RootOrigin.region_instance, checker side: every borrow's
+    /// provenance carries its region — parallel to `borrow_epoch`; the
+    /// ir.rs side is a later slice.
+    region_instance: HashMap<String, RgnId>,
+    /// DIFF-1: allocation-site lane of a local (only lane_alloc-backed
+    /// raw scratch today — see LaneClass).
+    lane_of: HashMap<String, LaneAssignment>,
+    /// The checked function's summary key; None outside a function body
+    /// (module-level statements, extension-method walks) so nothing is
+    /// misattributed to a stale caller.
+    current_fn_key: Option<String>,
+    /// This function's own inout params: (name, sig-space index).
+    current_inout_params: Vec<(String, usize)>,
 }
 
 pub fn template_param_names(tp: &[crate::ast::TypeParam]) -> Vec<String> {
@@ -157,6 +288,11 @@ pub fn check_programs(programs: &[Program], diag: &mut Diagnostics) -> CheckDb {
         fn_templates: HashMap::new(),
         instantiated_funcs: HashMap::new(),
         resolved_calls: HashMap::new(),
+        fn_summaries: HashMap::new(),
+        fn_growth_seeds: HashMap::new(),
+        call_edges: HashMap::new(),
+        inout_call_edges: Vec::new(),
+        scc_accum_sites: Vec::new(),
     };
     collect(&mut db, programs, diag);
     check_contracts(&mut db, diag);
@@ -179,6 +315,13 @@ pub fn check_programs(programs: &[Program], diag: &mut Diagnostics) -> CheckDb {
             current_bp_hierarchy: vec![],
             in_async: false,
             in_static: false,
+            region_stack: vec![0],
+            rgn_next: 1,
+            region_parent: HashMap::new(),
+            region_instance: HashMap::new(),
+            lane_of: HashMap::new(),
+            current_fn_key: None,
+            current_inout_params: Vec::new(),
         };
         for item in &p.items {
             match item {
@@ -269,6 +412,13 @@ pub fn check_programs(programs: &[Program], diag: &mut Diagnostics) -> CheckDb {
             current_bp_hierarchy: vec![],
             in_async: false,
             in_static: false,
+            region_stack: vec![0],
+            rgn_next: 1,
+            region_parent: HashMap::new(),
+            region_instance: HashMap::new(),
+            lane_of: HashMap::new(),
+            current_fn_key: None,
+            current_inout_params: Vec::new(),
         };
         c.current_bp = Some(inst.name.clone());
         c.current_bp_hierarchy = hierarchy(&c.db.blueprints, &inst.name);
@@ -278,7 +428,200 @@ pub fn check_programs(programs: &[Program], diag: &mut Diagnostics) -> CheckDb {
             c.in_async = false;
         }
     }
+    // SWARM RABBIT HOLE — Wave 6 (Impl-E, DIFF-1): run the scc_accum_params
+    // fixpoint once, after every module function (including monomorphized
+    // instances) has been checked, then evaluate the deferred Rule-1b
+    // allocation-site checks (the E0802 wiring).
+    scc_accum_fixpoint(&mut db, diag);
     db
+}
+
+/// SWARM RABBIT HOLE — Wave 6 (Impl-E), DIFF-1: summary-table key — the
+/// db.funcs key convention ("{blueprint}::{method}" for methods, bare
+/// name otherwise), so producer (check_fn) and consumer (check_arity)
+/// sides agree.
+fn fn_summary_key(bp: Option<&str>, name: &str) -> String {
+    match bp {
+        Some(b) => format!("{b}::{name}"),
+        None => name.to_string(),
+    }
+}
+
+/// The same key, derived from a callee's FuncSig.
+fn summary_key_of(sig: &FuncSig) -> String {
+    fn_summary_key(sig.blueprint.as_deref(), &sig.name)
+}
+
+/// SWARM RABBIT HOLE — Wave 6 (Impl-E), DIFF-1 Rule 1a: Tarjan's
+/// strongly-connected components over the module call graph. Iterative,
+/// so deep call chains cannot overflow the checker stack.
+fn tarjan_sccs(nodes: &[String], edges: &HashMap<String, BTreeSet<String>>) -> Vec<Vec<String>> {
+    let mut idx: HashMap<&String, usize> = HashMap::new();
+    let mut low: HashMap<&String, usize> = HashMap::new();
+    let mut on_stack: HashSet<&String> = HashSet::new();
+    let mut stack: Vec<&String> = Vec::new();
+    let mut sccs: Vec<Vec<String>> = Vec::new();
+    let mut counter = 0usize;
+    for root in nodes {
+        if idx.contains_key(root) {
+            continue;
+        }
+        let mut work: Vec<(&String, usize)> = vec![(root, 0)];
+        while let Some((v, pi)) = work.pop() {
+            if pi == 0 {
+                idx.insert(v, counter);
+                low.insert(v, counter);
+                counter += 1;
+                stack.push(v);
+                on_stack.insert(v);
+            }
+            let succs: Vec<&String> = edges.get(v).map(|s| s.iter().collect()).unwrap_or_default();
+            let mut new_low = *low.get(v).unwrap();
+            if pi > 0 {
+                // Returned from succs[pi-1]: fold the child's low link.
+                let child = succs[pi - 1];
+                new_low = new_low.min(*low.get(child).unwrap());
+            }
+            let mut recursed = false;
+            for i in pi..succs.len() {
+                let w = succs[i];
+                if !idx.contains_key(w) {
+                    low.insert(v, new_low);
+                    work.push((v, i + 1));
+                    work.push((w, 0));
+                    recursed = true;
+                    break;
+                } else if on_stack.contains(w) {
+                    new_low = new_low.min(*idx.get(w).unwrap());
+                }
+            }
+            if recursed {
+                continue;
+            }
+            low.insert(v, new_low);
+            if low.get(v).unwrap() == idx.get(v).unwrap() {
+                let mut comp: Vec<String> = Vec::new();
+                while let Some(w) = stack.pop() {
+                    on_stack.remove(w);
+                    comp.push((*w).clone());
+                    if w == v {
+                        break;
+                    }
+                }
+                sccs.push(comp);
+            }
+        }
+    }
+    sccs
+}
+
+/// SWARM RABBIT HOLE — Wave 6 (Impl-E), DIFF-1 Rule 1a — the SCC
+/// fixed-point propagation rule (W2A §1.3 S6, the refutation-killing
+/// field), plus Rule 1b's deferred allocation-site checks:
+///
+/// 1. **Seed** (Rule 1a step 1+2): pushes(f, i) — an inout param grown
+///    directly by f — lands in scc_accum(f) only when f sits in a
+///    NONTRIVIAL SCC (a self-loop or |C| ≥ 2, i.e. some activation of f
+///    can be suspended at an SCC call edge while a deeper activation
+///    grows the same accumulator). Growth outside any recursion SCC is
+///    single-episode and carries no cross-activation hazard.
+/// 2. **Propagation** (Rule 1a steps 2/3 — one uniform edge rule):
+///    i ∈ scc_accum(g) ∧ the caller passes its own inout param j into
+///    g's param i ⇒ j ∈ scc_accum(caller). Monotone union iterated to
+///    the Knaster–Tarski least fixpoint (W2A §1.3 S5: the "≤ 3 passes"
+///    figure is an empirical remark, not a lattice-height bound).
+/// 3. **Rule 1b** (deferred): every recorded call site that passed a
+///    LOCAL inout into a param that the fixpoint marks ∈ scc_accum is
+///    checked against its allocation-site lane: ScratchPingPong (the
+///    current single-lane model — any lane that isn't pinned, for now
+///    lane 0) → E0802, DIFF-1's buried-top hazard. No pinned lanes exist
+///    in the checker yet, so the only dischargeable states today are
+///    "violation" (lane_alloc-backed scratch) and "not lane-backed"
+///    (heap locals — exempt until the pinned-lane slice).
+fn scc_accum_fixpoint(db: &mut CheckDb, diag: &mut Diagnostics) {
+    // 1. SCCs over the call graph.
+    let mut node_set: BTreeSet<String> = db.call_edges.keys().cloned().collect();
+    for tos in db.call_edges.values() {
+        node_set.extend(tos.iter().cloned());
+    }
+    let nodes: Vec<String> = node_set.into_iter().collect();
+    let sccs = tarjan_sccs(&nodes, &db.call_edges);
+
+    // 2. Seed from growth, gated on nontrivial SCC membership.
+    let mut acc: HashMap<String, BTreeSet<usize>> = HashMap::new();
+    for c in &sccs {
+        let nontrivial = c.len() > 1
+            || db
+                .call_edges
+                .get(&c[0])
+                .map(|s| s.contains(&c[0]))
+                .unwrap_or(false);
+        if !nontrivial {
+            continue;
+        }
+        for f in c {
+            if let Some(seeds) = db.fn_growth_seeds.get(f) {
+                acc.entry(f.clone()).or_default().extend(seeds.iter().copied());
+            }
+        }
+    }
+
+    // 3. Knaster–Tarski fixpoint over the inout edges.
+    loop {
+        let mut changed = false;
+        for e in &db.inout_call_edges {
+            let Some(callee_acc) = acc.get(&e.callee) else { continue };
+            if !callee_acc.contains(&e.callee_param) {
+                continue;
+            }
+            if let Some(j) = e.caller_param {
+                if acc.entry(e.caller.clone()).or_default().insert(j) {
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    // 4. Commit the summaries (scc_accum_params is the one computed field;
+    //    the other three stay spec-carried — see FnBorrowSummary).
+    let mut keys: BTreeSet<String> = db.fn_growth_seeds.keys().cloned().collect();
+    keys.extend(acc.keys().cloned());
+    for k in keys {
+        let mut s = db.fn_summaries.remove(&k).unwrap_or_default();
+        s.scc_accum_params = acc
+            .remove(&k)
+            .map(|x| x.into_iter().collect())
+            .unwrap_or_default();
+        db.fn_summaries.insert(k, s);
+    }
+
+    // 5. Rule 1b: the deferred allocation-site checks → E0802.
+    let sites = std::mem::take(&mut db.scc_accum_sites);
+    for site in &sites {
+        let grows = db
+            .fn_summaries
+            .get(&site.callee)
+            .map(|s| s.scc_accum_params.contains(&site.callee_param))
+            .unwrap_or(false);
+        if !grows {
+            continue;
+        }
+        if let Some(lane) = &site.lane {
+            if lane.class == LaneClass::ScratchPingPong {
+                diag.error(
+                    site.span,
+                    format!(
+                        "SCC accumulator '{}' is allocated on ping-pong scratch (lane L{}) but is passed 'inout' to '{}', whose summary grows it across recursive SCC re-entries while caller frames are suspended; intervening scope exits would truncate its tail while its length still counts the truncated bytes (type-confused reads). Declare it 'pinned' (allocate on L2..L6) or make it pool-backed. [E0802]",
+                        site.local, lane.lane, site.callee
+                    ),
+                );
+            }
+        }
+    }
+    db.scc_accum_sites = sites;
 }
 
 fn hierarchy(bps: &HashMap<String, BlueprintInfo>, name: &str) -> Vec<String> {
@@ -1230,10 +1573,54 @@ impl Checker<'_> {
         }
         self.scopes.pop();
     }
+
+    // --- SWARM RABBIT HOLE — Wave 6 (Impl-E): region poset primitives
+    // (W2A §1.1; DIFF-2; D0 gap #4 first slice). ---
+
+    /// W2A §1.1: the innermost open region — the ⊑ₙ-maximum of the stack.
+    /// The stack is never empty in practice (index 0 is the function-outer
+    /// region); 0 is the safe fallback (the outermost region).
+    fn current_rgn(&self) -> RgnId {
+        self.region_stack.last().copied().unwrap_or(0)
+    }
+
+    /// Enter a lexical region (DIFF-2): allocate a fresh RgnId (ids grow
+    /// ⊑ₙ-downward with nesting), record the parent edge to the previous
+    /// innermost region (the poset's order relation), push it on top of
+    /// the stack. Provenance stamped afterwards with `current_rgn()` is
+    /// attributed to this region.
+    fn rgn_enter(&mut self) -> RgnId {
+        let id = self.rgn_next;
+        self.rgn_next += 1;
+        let parent = self.current_rgn();
+        self.region_parent.insert(id, parent);
+        self.region_stack.push(id);
+        id
+    }
+
+    /// Exit the innermost region: pop innermost-first. SR1 (W2A §1.6)
+    /// requires multi-region exits to reset ⊑ₙ-descending — this pop IS
+    /// that order (the LIFO of the block-structured walk); the parent-edge
+    /// check below verifies the ⊑ₙ chain at every exit.
+    fn rgn_exit(&mut self) {
+        if let Some(out) = self.region_stack.pop() {
+            if let (Some(&parent), Some(&top)) =
+                (self.region_parent.get(&out), self.region_stack.last())
+            {
+                debug_assert_eq!(parent, top, "region stack discipline broken");
+            }
+        }
+    }
     fn declare(&mut self, name: &str, ty: Type, is_const: bool, span: Span) {
         if let Some(frame) = self.local_scopes.last_mut() {
             frame.push(name.to_string());
         }
+        // SWARM RABBIT HOLE — Wave 6 (Impl-E, DIFF-2 / W2A §1.2): every
+        // binding's provenance carries its region — the lexical home
+        // region of the declaration (RootOrigin.region_instance). Borrow
+        // creation copies the ROOT's region into the borrow's provenance,
+        // parallel to how borrow_epoch copies the root's shrink epoch.
+        self.region_instance.insert(name.to_string(), self.current_rgn());
         if let Some(scope) = self.scopes.last_mut() {
             if scope.contains_key(name) {
                 self.diag
@@ -1318,14 +1705,36 @@ impl Checker<'_> {
         self.borrow_owner.clear();
         self.list_epochs.clear();
         self.borrow_epoch.clear();
+        // SWARM RABBIT HOLE — Wave 6 (Impl-E, D0 gap #4 first slice): a
+        // fresh region poset per activation — RgnId 0 is the
+        // function-outer region (DIFF-2); ids restart at 1 and grow
+        // ⊑ₙ-downward with nesting (W2A §1.1).
+        self.region_stack.clear();
+        self.region_stack.push(0);
+        self.rgn_next = 1;
+        self.region_parent.clear();
+        self.region_instance.clear();
+        self.lane_of.clear();
+        // DIFF-1: summaries are keyed module-wide; the fixpoint runs
+        // after all functions are checked. Save/restore so a nested or
+        // monomorphized check never leaks its key into the caller.
+        let prev_fn_key = self.current_fn_key.take();
+        let prev_inout_params = std::mem::take(&mut self.current_inout_params);
+        self.current_fn_key = Some(fn_summary_key(self.current_bp.as_deref(), &f.name));
         self.push();
         if let Some(bp) = &self.current_bp {
             if !f.is_static {
                 self.declare("self", Type::Blueprint(bp.clone()), true, f.span);
             }
         }
-        for p in &f.params {
+        for (i, p) in f.params.iter().enumerate() {
             self.declare(&p.name, resolve_type_ast(&p.ty, self.db), false, f.span);
+            // DIFF-1 Rule 1a seed space: this function's own inout params,
+            // with their sig.inout_params indices — the same space
+            // check_arity's param_offset logic maps call-site args into.
+            if p.is_inout {
+                self.current_inout_params.push((p.name.clone(), i));
+            }
             if let Some(d) = &p.default {
                 let dt = self.check_expr(d);
                 let pt = resolve_type_ast(&p.ty, self.db);
@@ -1348,6 +1757,8 @@ impl Checker<'_> {
         self.in_async = was_async;
         self.pop();
         self.in_static = prev_static;
+        self.current_fn_key = prev_fn_key;
+        self.current_inout_params = prev_inout_params;
     }
 
     fn check_stmt(&mut self, s: &Stmt) {
@@ -1407,6 +1818,32 @@ impl Checker<'_> {
                     }
                     let decl_ty_clone = decl_ty.clone();
                     self.declare(name, decl_ty, *is_const, *span);
+                    // SWARM RABBIT HOLE — Wave 6 (Impl-E, DIFF-1
+                    // insertion point 6): allocation-site lane recording.
+                    // Today only raw `lane_alloc` locals are lane-backed
+                    // (ScratchPingPong on the named literal lane, default
+                    // 0 — the current single-lane model); list locals
+                    // stay heap-backed until the pinned-lane slice records
+                    // their real lanes.
+                    if let Some(Expr { kind: ExprKind::Call { callee, args, .. }, .. }) =
+                        value.as_ref()
+                    {
+                        if let ExprKind::Ident(f) = &callee.kind {
+                            if f == "lane_alloc" {
+                                let lane = match args.first() {
+                                    Some(Arg::Pos(e)) => match e.kind {
+                                        ExprKind::Int(n) => n.clamp(0, 255) as u8,
+                                        _ => 0,
+                                    },
+                                    _ => 0,
+                                };
+                                self.lane_of.insert(
+                                    name.to_string(),
+                                    LaneAssignment { lane, class: LaneClass::ScratchPingPong },
+                                );
+                            }
+                        }
+                    }
                     // Borrow creation and move-out.
                     let exclusive = matches!(decl_ty_clone, Type::Mut(_));
                     if Self::is_borrow_type(&decl_ty_clone) {
@@ -1429,6 +1866,15 @@ impl Checker<'_> {
                                                         self.borrow_owner.insert(name.to_string(), root.clone());
                                                         let ep = self.list_epochs.get(&root).copied().unwrap_or(0);
                                                         self.borrow_epoch.insert(name.to_string(), (root.clone(), ep));
+                                                        // SWARM RABBIT HOLE — Wave 6 (Impl-E, DIFF-2):
+                                                        // the borrow's provenance carries its target's
+                                                        // region (RootOrigin.region_instance).
+                                                        let rgn = self
+                                                            .region_instance
+                                                            .get(&root)
+                                                            .copied()
+                                                            .unwrap_or_else(|| self.current_rgn());
+                                                        self.region_instance.insert(name.to_string(), rgn);
                                                         self.borrowed.insert(root, (name.to_string(), exclusive));
                                                     }
                                                 }
@@ -1441,6 +1887,15 @@ impl Checker<'_> {
                                                 self.borrow_owner.insert(name.to_string(), root.clone());
                                                 let ep = self.list_epochs.get(&root).copied().unwrap_or(0);
                                                 self.borrow_epoch.insert(name.to_string(), (root.clone(), ep));
+                                                // SWARM RABBIT HOLE — Wave 6 (Impl-E, DIFF-2):
+                                                // the borrow's provenance carries its target's
+                                                // region (RootOrigin.region_instance).
+                                                let rgn = self
+                                                    .region_instance
+                                                    .get(&root)
+                                                    .copied()
+                                                    .unwrap_or_else(|| self.current_rgn());
+                                                self.region_instance.insert(name.to_string(), rgn);
                                                 self.borrowed.insert(root, (name.to_string(), exclusive));
                                             }
                                         }
@@ -1468,6 +1923,13 @@ impl Checker<'_> {
                                         }
                                         if let Some(ep) = self.borrow_epoch.get(src).cloned() {
                                             self.borrow_epoch.insert(name.to_string(), ep);
+                                        }
+                                        // SWARM RABBIT HOLE — Wave 6 (Impl-E,
+                                        // DIFF-2): a reborrow aliases the same
+                                        // storage — carry the original borrow's
+                                        // region forward in the provenance.
+                                        if let Some(rgn) = self.region_instance.get(src).cloned() {
+                                            self.region_instance.insert(name.to_string(), rgn);
                                         }
                                         self.moved.insert(src.clone(), *span);
                                     }
@@ -2019,13 +2481,28 @@ impl Checker<'_> {
             }
             Stmt::Defer { body, .. }
             | Stmt::ErrDefer { body, .. }
-            | Stmt::Region { body, .. }
             | Stmt::NurseryBlock { body, .. } => {
                 self.push();
                 for s in body {
                     self.check_stmt(s);
                 }
                 self.pop();
+            }
+            // SWARM RABBIT HOLE — Wave 6 (Impl-E, D0 gap #4 first slice):
+            // `region {}` is a node of the region poset (W2A §1.1) —
+            // enter/exit the RgnId stack in lockstep with the existing
+            // scope machinery. The lexical nesting IS the ⊑ₙ order; the
+            // exit pop is SR1's innermost-first (the existing LIFO,
+            // verified). No semantics change: the ids are bookkeeping
+            // until the escape-checker slice consumes them.
+            Stmt::Region { body, .. } => {
+                self.rgn_enter();
+                self.push();
+                for s in body {
+                    self.check_stmt(s);
+                }
+                self.pop();
+                self.rgn_exit();
             }
             Stmt::Frozen { body, .. } => {
                 self.push();
@@ -2779,6 +3256,21 @@ impl Checker<'_> {
                                 format!("cannot mutate '{root}' while borrowed by '{borrower}'"),
                             );
                         }
+                        // SWARM RABBIT HOLE — Wave 6 (Impl-E, DIFF-1 Rule 1a
+                        // step 1 / W2A §1.3 S6): growth on a path rooted at
+                        // THIS function's own inout param records pushes(f, i)
+                        // — the scc_accum_params seed. Growth is NOT an epoch
+                        // tick (growth never invalidates refs, STRATA:75);
+                        // this is the growth axis the shrinks-only summary
+                        // missed (G1 A5a's hole).
+                        if matches!(name.as_str(), "push" | "push_ref" | "insert") {
+                            if let (Some(key), Some((_, idx))) = (
+                                self.current_fn_key.clone(),
+                                self.current_inout_params.iter().find(|(pn, _)| pn == &root),
+                            ) {
+                                self.db.fn_growth_seeds.entry(key).or_default().insert(*idx);
+                            }
+                        }
                     }
                 }
             }
@@ -3145,6 +3637,16 @@ impl Checker<'_> {
         }
         self.borrowed.insert(owner.to_string(), (borrower.to_string(), exclusive));
         self.borrow_owner.insert(borrower.to_string(), owner.to_string());
+        // SWARM RABBIT HOLE — Wave 6 (Impl-E, DIFF-2): the borrow's
+        // provenance carries its target's region (RootOrigin.
+        // region_instance) — the owner's home region, parallel to
+        // borrow_epoch's target-epoch pairing.
+        let rgn = self
+            .region_instance
+            .get(owner)
+            .copied()
+            .unwrap_or_else(|| self.current_rgn());
+        self.region_instance.insert(borrower.to_string(), rgn);
     }
 
     /// Drop borrow state for everything a scope introduced: leaving a scope
@@ -3160,6 +3662,11 @@ impl Checker<'_> {
             }
             self.borrow_epoch.remove(n);
             self.list_epochs.remove(n);
+            // SWARM RABBIT HOLE — Wave 6 (Impl-E, DIFF-2/DIFF-1): scope
+            // exit drops the region stamps and lane assignments of the
+            // scope's bindings, exactly like the borrow epochs.
+            self.region_instance.remove(n);
+            self.lane_of.remove(n);
             // A moved binding becomes valid again in the enclosing scope only if
             // it was declared here; otherwise the move still stands.
             self.moved.remove(n);
@@ -3248,6 +3755,18 @@ impl Checker<'_> {
         } else {
             &sig.inout_params[..]
         };
+        // SWARM RABBIT HOLE — Wave 6 (Impl-E, DIFF-1 Rule 1a): record the
+        // module call-graph edge (Tarjan input) for the function being
+        // checked — every resolved call, inout or not: the SCC of a
+        // growth seed is defined by the full call graph, not only its
+        // inout edges.
+        if let Some(caller) = self.current_fn_key.clone() {
+            self.db
+                .call_edges
+                .entry(caller)
+                .or_default()
+                .insert(summary_key_of(sig));
+        }
         let mut inout_roots: Vec<String> = Vec::new();
         for (i, a) in args.iter().enumerate() {
             let is_param_inout = inout_flags.get(i).copied().unwrap_or(false);
@@ -3262,6 +3781,11 @@ impl Checker<'_> {
                 );
             }
             if is_param_inout {
+                // SWARM RABBIT HOLE — Wave 6 (Impl-E, DIFF-1 Rules 1a/1b):
+                // record the inout-argument edge and the deferred
+                // allocation-site check; `scc_accum_fixpoint` consumes them
+                // after all functions are checked.
+                self.record_scc_accum_arg(sig, param_offset + i, expr);
                 match &expr.kind {
                     ExprKind::Ident(var) => {
                         if self.lookup(var).map(|(_, is_c)| is_c).unwrap_or(false) {
@@ -3313,6 +3837,46 @@ impl Checker<'_> {
                     }
                 }
             }
+        }
+    }
+
+    /// SWARM RABBIT HOLE — Wave 6 (Impl-E), DIFF-1 Rules 1a/1b bookkeeping
+    /// at an inout call site: the own-param propagation edge (Rule 1a
+    /// steps 2/3 — the pin obligation travels caller-ward along inout
+    /// chains) or, for a plain local, the deferred Rule-1b
+    /// allocation-site candidate whose lane class decides E0802 after
+    /// the fixpoint.
+    fn record_scc_accum_arg(&mut self, sig: &FuncSig, param_idx: usize, arg: &Expr) {
+        if self.current_fn_key.is_none() {
+            return;
+        }
+        let callee = summary_key_of(sig);
+        let root = match &arg.kind {
+            ExprKind::Ident(v) => v.clone(),
+            ExprKind::Index { base, .. } | ExprKind::Member { base, .. } => {
+                match Self::root_var_of_expr(base) {
+                    Some(r) => r,
+                    None => return,
+                }
+            }
+            _ => return,
+        };
+        if let Some((_, j)) = self.current_inout_params.iter().find(|(n, _)| *n == root) {
+            self.db.inout_call_edges.push(InoutEdge {
+                caller: self.current_fn_key.clone().unwrap(),
+                caller_param: Some(*j),
+                callee,
+                callee_param: param_idx,
+            });
+        } else {
+            let lane = self.lane_of.get(&root).cloned();
+            self.db.scc_accum_sites.push(SccAccumSite {
+                callee,
+                callee_param: param_idx,
+                local: root,
+                lane,
+                span: arg.span,
+            });
         }
     }
 

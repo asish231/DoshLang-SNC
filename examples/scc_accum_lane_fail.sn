@@ -1,0 +1,25 @@
+// SWARM RABBIT HOLE — Wave 6 / DIFF-1 Rule 1b (kills G1 §1 A5a).
+//
+// `count_up` is a one-node recursion SCC (a self-loop) whose inout param 0
+// is GROWN (`push`) while a deeper activation of the same SCC is live: its
+// FnBorrowSummary.scc_accum_params = [0] after the Rule-1a fixpoint. The
+// caller then passes a `lane_alloc`-backed raw local — frame-local scratch
+// on lane 0 (the current single-lane model: any lane that isn't pinned) —
+// inout into that accumulator. Intervening scope exits (the region exits
+// between the suspended activations) would truncate the accumulator's
+// tail while its length still counts the truncated bytes: type-confused
+// in-lane reads, exactly the buried-top hazard. Must be rejected: E0802.
+//
+// This file is a compile-FAIL golden case (tests/golden.rs).
+
+fn count_up(inout list<int> xs, int n) {
+    xs.push(n)
+    if (n > 0) {
+        count_up(inout xs, n - 1)
+    }
+}
+
+fn main() {
+    ptr buf = lane_alloc(0, 64)
+    count_up(inout buf, 3)
+}

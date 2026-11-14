@@ -1,0 +1,19 @@
+// SWARM RABBIT HOLE — Wave 6 / DIFF-1 Rule 1b, the DISCHARGE side of the
+// E0802 wiring: the same recursive SCC accumulator, but the caller's
+// allocation site is NOT lane-backed (a plain heap list — exempt until
+// the pinned-lane slice records real lanes for growable locals). Must
+// compile and run: E0802 fires only when an scc_accum_params allocation
+// site actually sits on non-pinned lane scratch.
+
+fn grow_down(inout list<int> xs, int n) {
+    xs.push(n)
+    if (n > 0) {
+        grow_down(inout xs, n - 1)
+    }
+}
+
+fn main() {
+    list<int> acc = []
+    grow_down(inout acc, 3)
+    print(acc.length())
+}

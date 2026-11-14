@@ -331,6 +331,32 @@ fn borrow_lifetimes() {
     );
 }
 
+/// SWARM RABBIT HOLE — Wave 6 / DIFF-1 Rule 1b (kills G1 §1 A5a): an
+/// inout parameter GROWN across recursive SCC re-entries is recorded in
+/// FnBorrowSummary.scc_accum_params by the Rule-1a fixpoint, and passing a
+/// `lane_alloc`-backed raw local (frame-local scratch — the single-lane
+/// model, any lane that isn't pinned) inout into it is the buried-top
+/// hazard: intervening scope exits would truncate its tail while its
+/// length still counts the truncated bytes. → E0802.
+#[test]
+fn scc_accum_lane_scratch_e0802() {
+    let err = compile_err("examples/scc_accum_lane_fail.sn");
+    assert!(err.contains("[E0802]"), "expected E0802, got: {err}");
+    assert!(
+        err.contains("SCC accumulator 'buf'"),
+        "expected the buried-top diagnostic for 'buf', got: {err}"
+    );
+}
+
+/// The discharge side of the same rule: a heap-backed list local passed
+/// inout into the recursive accumulator has no lane assignment, so the
+/// E0802 wiring must NOT over-fire off the lane model — the program
+/// compiles and runs (4 pushes: 3, 2, 1, 0).
+#[test]
+fn scc_accum_heap_list_ok() {
+    assert_out("examples/scc_accum_ok.sn", "4\n");
+}
+
 /// `alloc`/`free` guards: double frees and use-after-free are reported
 /// instead of corrupting the allocator.
 #[test]
