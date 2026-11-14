@@ -119,6 +119,17 @@ SNlang inline: 1 ns. W2F's "~50×" region-cached figure is the *amortized
 fresh16* row: 6 → 1 ns is the measured construct cost, and the remaining gap
 to sub-ns is the TLS prefix, exactly as W2F's Darwin table predicted.
 
+**Fixed (Wave 6, Impl-D — compile-time poison emission):** `snc --poison`
+(and the existing debug gates: -O0, `snc debug`) now makes the compiler emit
+the T-FIBR fill itself — after the 3-instruction bump core on the inline fast
+path (`llvm.memset(p, 0xAA, size)`), after the runtime call on every other
+alloc lowering, and over `[watermark, old_top)` at the inline 1-store region
+restore (Impl-B's re-poison residual). `SN_POISON=1` stays as the runtime
+path's env switch. Re-run of the fresh4k poison shape with `--poison`
+(same protocol, median of 5): **71 ns/op** vs 2 ns raw — the fill cost is now
+paid inline, matching the 73 ns runtime-poison shape (freshlcg 4 → 16,
+fresh16 2 → 4; release rows unchanged — see `run_bench.sh`'s poison twin).
+
 ## 6 · What the numbers mean (against W2F's predicted ~10× / 2–4× / ~50×)
 
 1. **W2F's Darwin-specific 2–4× is confirmed exactly.** SNlang's opaque-call lane

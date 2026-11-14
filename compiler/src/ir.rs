@@ -234,6 +234,18 @@ thread_local! {
     /// operation keeps the checked, poisoning runtime calls there; -O1+
     /// lowers the inline load/gep/store fast path instead.
     static LANE_INLINE: std::cell::Cell<bool> = std::cell::Cell::new(true);
+
+    /// Compile-time 0xAA poison emission (SWARM RABBIT HOLE, Wave 6,
+    /// Impl-D — bench/RESULTS.md §5 "A control the inline path breaks"):
+    /// SN_POISON=1 was a silent no-op on the inline fast path, so the
+    /// T-FIBR debug guarantee (W4A repair 2) vanished for constant-size
+    /// allocations. When the driver sets this, EVERY lane allocation the
+    /// compiler lowers — inline fast path, inline slow path and runtime
+    /// call — emits its own `llvm.memset(p, 0xAA, size)`, and every
+    /// region-exit rewind re-poisons [watermark, old_top) inline: the
+    /// guarantee no longer depends on which codegen path ran or on the
+    /// runtime's env flag. Active for -O0, `snc debug` and `--poison`.
+    static LANE_POISON: std::cell::Cell<bool> = std::cell::Cell::new(false);
 }
 
 /// Enable or disable the inline lane fast path for the next `lower` pass.
@@ -243,6 +255,15 @@ pub fn lane_inline(on: bool) {
 
 fn lane_inline_on() -> bool {
     LANE_INLINE.with(|c| c.get())
+}
+
+/// Enable compile-time poison emission for the next `lower` pass.
+pub fn lane_poison(on: bool) {
+    LANE_POISON.with(|c| c.set(on));
+}
+
+fn lane_poison_on() -> bool {
+    LANE_POISON.with(|c| c.get())
 }
 
 pub fn lower(programs: &[Program], db: &CheckDb, files: &[SourceFile]) -> IrModule {
@@ -744,6 +765,53 @@ impl Cx<'_> {
             "{g} = getelementptr [8 x %sn_lane_t], ptr @g_tls_lanes, i64 0, i64 {lane}, i32 {field}"
         ));
         g
+    }
+
+    /// Poison-fill `[p, p + bytes)` with 0xAA for a compile-time-known
+    /// positive size (SWARM RABBIT HOLE, Wave 6, Impl-D — T-FIBR, W4A
+    /// repair 2: the debug poison-fill guarantee must not depend on which
+    /// codegen path ran). `bytes` here is the *requested* size, matching
+    /// runtime.c's `sn_lane_alloc` (padding to the 8-byte round-up is
+    /// never handed out, so it is not filled).
+    fn emit_poison_const(&mut self, p: &str, bytes: i64) {
+        self.line(&format!(
+            "call void @llvm.memset.p0.i64(ptr {p}, i8 171, i64 {bytes}, i1 false)"
+        ));
+    }
+
+    /// Poison-fill `[p, p + bytes)` where `bytes` is a runtime i64 value:
+    /// negative sizes fill nothing (the runtime call clamps them to 0; a
+    /// raw memset would instead fill ~2^64 bytes).
+    fn emit_poison_dynamic(&mut self, p: &str, bytes: &str) {
+        let pos = self.t();
+        self.line(&format!("{pos} = icmp sgt i64 {bytes}, 0"));
+        let len = self.t();
+        self.line(&format!("{len} = select i1 {pos}, i64 {bytes}, i64 0"));
+        self.line(&format!(
+            "call void @llvm.memset.p0.i64(ptr {p}, i8 171, i64 {len}, i1 false)"
+        ));
+    }
+
+    /// Poison-fill `[from, to)` — the rewind re-poison shape of
+    /// runtime.c's `sn_lane_restore` (T-FIBR "rewind re-poisons": a
+    /// written byte is never trusted across a rewind). An empty or
+    /// inverted range (to < from — e.g. a user `lane_restore` inside the
+    /// region moved top below the watermark) fills nothing, mirroring
+    /// `sn_lane_poison`'s hi<lo guard.
+    fn emit_poison_range(&mut self, from: &str, to: &str) {
+        let neg = self.t();
+        self.line(&format!("{neg} = icmp ult ptr {to}, {from}"));
+        let hi = self.t();
+        self.line(&format!("{hi} = ptrtoint ptr {to} to i64"));
+        let lo = self.t();
+        self.line(&format!("{lo} = ptrtoint ptr {from} to i64"));
+        let d = self.t();
+        self.line(&format!("{d} = sub i64 {hi}, {lo}"));
+        let len = self.t();
+        self.line(&format!("{len} = select i1 {neg}, i64 0, i64 {d}"));
+        self.line(&format!(
+            "call void @llvm.memset.p0.i64(ptr {from}, i8 171, i64 {len}, i1 false)"
+        ));
     }
 
     fn stmt(&mut self, s: &Stmt) {
@@ -1441,12 +1509,31 @@ impl Cx<'_> {
                     self.stmt(s);
                 }
                 if !self.terminated {
+                    // Wave 6 (Impl-D, T-FIBR "rewind re-poisons"): in poison
+                    // emission mode the freed range [watermark, old_top) is
+                    // re-filled with 0xAA at the rewind, on BOTH lowerings —
+                    // the inline 1-store restore used to skip it entirely
+                    // (Impl-B's documented residual), and the runtime call
+                    // path only re-poisons under SN_POISON.
                     if lane_inline_on() && self.frozen_depth == 0 {
                         // 1-store reset (W2F §2: "1 store per lane").
                         let top_addr = self.lane_field_addr("0", 1);
+                        if lane_poison_on() {
+                            let old_top = self.t();
+                            self.line(&format!("{old_top} = load ptr, ptr {top_addr}"));
+                            self.emit_poison_range(&wm, &old_top);
+                        }
                         self.line(&format!("store ptr {wm}, ptr {top_addr}"));
                     } else {
-                        self.line(&format!("call void @sn_lane_restore(i64 0, ptr {wm})"));
+                        if lane_poison_on() {
+                            let top_addr = self.lane_field_addr("0", 1);
+                            let old_top = self.t();
+                            self.line(&format!("{old_top} = load ptr, ptr {top_addr}"));
+                            self.line(&format!("call void @sn_lane_restore(i64 0, ptr {wm})"));
+                            self.emit_poison_range(&wm, &old_top);
+                        } else {
+                            self.line(&format!("call void @sn_lane_restore(i64 0, ptr {wm})"));
+                        }
                     }
                 }
                 self.active_regions.pop();
@@ -3405,8 +3492,13 @@ impl Cx<'_> {
                 // lane (top == limit == null ⇒ ugt) and a frozen lane to
                 // @sn_lane_alloc, which errors loudly (W2F §3: check-based
                 // POSIX design, no trap handlers). Dynamic sizes, other
-                // lanes, lexically frozen bodies and debug builds keep the
-                // runtime call.
+                // lanes and lexically frozen bodies keep the runtime call.
+                //
+                // Wave 6 (Impl-D, bench/RESULTS.md §5): in poison emission
+                // mode every path this arm can take fills 0xAA itself —
+                // the T-FIBR debug guarantee no longer depends on which
+                // codegen path ran (the inline bump used to silently skip
+                // the runtime's SN_POISON fill).
                 let lane0_const = matches!(
                     args.get(0),
                     Some(Arg::Pos(e)) if matches!(e.kind, ExprKind::Int(0))
@@ -3448,12 +3540,18 @@ impl Cx<'_> {
                     self.line(&format!("br i1 {bad}, label %{l_slow}, label %{l_fast}"));
                     self.raw(&format!("{l_fast}:"));
                     self.line(&format!("store ptr {new_top}, ptr {top_addr}"));
+                    if lane_poison_on() {
+                        self.emit_poison_const(&old, sz);
+                    }
                     self.line(&format!("br label %{l_join}"));
                     self.raw(&format!("{l_slow}:"));
                     let slow_r = self.t();
                     self.line(&format!(
                         "{slow_r} = call ptr @sn_lane_alloc(i64 0, i64 {sz})"
                     ));
+                    if lane_poison_on() {
+                        self.emit_poison_const(&slow_r, sz);
+                    }
                     self.line(&format!("br label %{l_join}"));
                     self.raw(&format!("{l_join}:"));
                     let r = self.t();
@@ -3471,6 +3569,9 @@ impl Cx<'_> {
                     };
                     let r = self.t();
                     self.line(&format!("{r} = call ptr @sn_lane_alloc(i64 {lane_id}, i64 {bytes})"));
+                    if lane_poison_on() {
+                        self.emit_poison_dynamic(&r, &bytes);
+                    }
                     (r, Type::Ptr)
                 }
             }

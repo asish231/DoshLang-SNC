@@ -17,6 +17,13 @@ pub struct CompileOptions {
     pub target: Option<String>,
     pub clang: String,
     pub opt: String,
+    /// Compile-time T-FIBR poison emission (Wave 6, Impl-D): every lane
+    /// allocation the compiler lowers fills 0xAA itself and every
+    /// region-exit rewind re-poisons the freed range — the debug
+    /// guarantee no longer depends on the codegen path or on the
+    /// runtime's `SN_POISON` env flag (which stays for the runtime path).
+    /// Implied by `-O0` and `snc debug` even when this is false.
+    pub poison: bool,
     /// Extra link flags from `extern "lib"` blocks (`-l<name>`) plus any
     /// user-supplied libraries.
     pub libs: Vec<String>,
@@ -161,6 +168,12 @@ pub fn compile(opts: &CompileOptions) -> Result<CompileResult, String> {
     // bump/reset fast path; debug builds (-O0) keep the checked, poisoning
     // runtime calls on every lane operation.
     crate::ir::lane_inline(opts.opt != "0");
+    // Wave 6 (Impl-D, bench/RESULTS.md §5): poison emission is a
+    // compiler-level guarantee in debug builds — every lane allocation
+    // fills 0xAA inline, so the T-FIBR guarantee no longer depends on
+    // which codegen path ran (SN_POISON=1 was a silent no-op on the
+    // inline fast path). Release builds without --poison stay O(1).
+    crate::ir::lane_poison(opts.poison || opts.opt == "0");
     let ir = lower(&programs, &db, &files);
     let triple = match &opts.target {
         Some(t) => resolve_target(t)?,
@@ -171,10 +184,17 @@ pub fn compile(opts: &CompileOptions) -> Result<CompileResult, String> {
     let link_libs = link_libraries(&db, &opts.libs);
     let runtime = runtime_c_path();
     let runtime_bytes = fs::read(&runtime).unwrap_or_default();
+    // --poison changes the emitted IR; it must not collide with a cached
+    // build of the same -O level (Wave 6, Impl-D).
+    let opt_key = if opts.poison {
+        format!("{}+poison", opts.opt)
+    } else {
+        opts.opt.clone()
+    };
     let fp = cache::fingerprint(
         &files,
         &triple,
-        &opts.opt,
+        &opt_key,
         &link_libs,
         opts.coverage,
         &opts.clang,
@@ -483,8 +503,11 @@ pub fn compile_debug(input: &Path, output: &Path, clang: &str) -> Result<(), Str
         return Err(diag.render(&files));
     }
     let _ = crate::ir::cov_collect(false);
-    // Debug builds keep the checked runtime lane calls (D0 gap #2, Impl-B).
+    // Debug builds keep the checked runtime lane calls (D0 gap #2, Impl-B)
+    // and poison-fill unconditionally (Wave 6, Impl-D: T-FIBR's debug
+    // guarantee, W4A repair 2).
     crate::ir::lane_inline(false);
+    crate::ir::lane_poison(true);
     let ir = lower(&programs, &db, &files);
     if !ir.has_main {
         return Err("no fn main() found\n".into());

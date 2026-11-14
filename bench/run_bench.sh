@@ -10,12 +10,17 @@
 #
 # Controls implemented (D0 §7 pitfalls, wave-5 brief):
 #   (a) memset asymmetry   — the SNlang lane rows run TWICE: raw (release
-#                            build, post-DIFF-6 O(1) bump) and with
-#                            SN_POISON=1 (0xAA-fill every allocation AND
-#                            re-poison on rewind — the pre-DIFF-6 write-
-#                            every-byte shape). C: malloc vs calloc; Rust:
-#                            alloc_layout vs alloc-with-zero-value; Go: every
-#                            heap row is inherently zeroed (mallocgc zeroes).
+#                            build, post-DIFF-6 O(1) bump) and a second
+#                            binary built with `snc --poison` (Wave 6,
+#                            Impl-D: the compiler emits the T-FIBR 0xAA
+#                            fill itself on every codegen path — inline
+#                            bump, slow call, and the region-rewind
+#                            re-poison — so the debug guarantee no longer
+#                            depends on the path or on SN_POISON, which the
+#                            inline bump never sees; bench/RESULTS.md §5).
+#                            C: malloc vs calloc; Rust: alloc_layout vs
+#                            alloc-with-zero-value; Go: every heap row is
+#                            inherently zeroed (mallocgc zeroes).
 #   (b) predictable branch  — freshlcg rows: sizes 16..63 from a fixed LCG
 #                            (state=(state*1103515245+12345) mod 2^31, seed
 #                            12345, draw before advance). lcg_state_final is
@@ -63,6 +68,9 @@ echo "-- building"
 if [ ! -x "$SNC" ]; then (cd "$ROOT" && make snc) || exit 1; fi
 
 "$SNC" sn_lane_bench.sn -o "$OUT/sn_lane_bench" || exit 1
+# Poison twin (Wave 6): compile-time T-FIBR emission — the fill is paid on
+# the inline fast path too, which the old SN_POISON=1 env row never touched.
+"$SNC" sn_lane_bench.sn --poison -o "$OUT/sn_lane_bench_poison" || exit 1
 "$SNC" sn_heap_bench.sn   -o "$OUT/sn_heap_bench"   || exit 1
 
 $CLANG $CFLAGS -Wall -o "$OUT/c_malloc_bench" c_malloc_bench.c || exit 1
@@ -111,7 +119,7 @@ collect() {  # collect NAME -- cmd...
 }
 
 collect sn_lane_raw        -- "$OUT/sn_lane_bench"
-collect sn_lane_poison     -- env SN_POISON=1 "$OUT/sn_lane_bench"
+collect sn_lane_poison     -- "$OUT/sn_lane_bench_poison"
 collect sn_heap            -- "$OUT/sn_heap_bench"
 collect c_malloc           -- "$OUT/c_malloc_bench"
 collect rust_bumpalo       -- "$OUT/rust_bumpalo_bench"
@@ -125,9 +133,9 @@ for b in sn_lane_bench sn_heap_bench c_malloc_bench rust_bumpalo_bench go_escape
     echo "  $b: $kb KB"
 done
 # poisoned-lane RSS (write pattern identical -> same touched pages)
-kb=$(SN_POISON=1 /usr/bin/time -l "$OUT/sn_lane_bench" "$N" 2>&1 >/dev/null | awk '/maximum resident set size/ {print $1/1024; exit}' | cut -d. -f1)
+kb=$(/usr/bin/time -l "$OUT/sn_lane_bench_poison" "$N" 2>&1 >/dev/null | awk '/maximum resident set size/ {print $1/1024; exit}' | cut -d. -f1)
 echo "rss sn_lane_bench_poison $kb" >> "$OUT/rss.txt"
-echo "  sn_lane_bench (SN_POISON=1): $kb KB"
+echo "  sn_lane_bench_poison (--poison): $kb KB"
 
 # ---------- cachegrind (Linux only) ----------
 if command -v valgrind >/dev/null 2>&1; then

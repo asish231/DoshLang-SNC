@@ -852,3 +852,36 @@ fn generic_fn() {
     );
 }
 
+#[test]
+fn lane_poison_flag_fills_inline_bump() {
+    // SWARM RABBIT HOLE, Wave 6 (Impl-D, bench/RESULTS.md §5): SN_POISON=1
+    // was a silent no-op on the inline fast path (the bump never entered
+    // the runtime). `--poison` must make the 0xAA fill unconditional on
+    // every codegen path. Default -O2 keeps the constant-size bump on the
+    // inline path — exactly the path the finding is about — and the second
+    // region proves the rewind re-poison (Impl-B's inline-restore residual).
+    let root = repo_root();
+    let src = root.join("tests/systems/lane_poison_fill.sn");
+    let out = std::env::temp_dir().join(format!("snc-poison-{}", std::process::id()));
+    let compile = Command::new(snc_bin())
+        .arg(&src)
+        .arg("--poison")
+        .arg("-o")
+        .arg(&out)
+        .current_dir(&root)
+        .output()
+        .expect("run snc --poison");
+    assert!(
+        compile.status.success(),
+        "snc --poison failed: {}",
+        String::from_utf8_lossy(&compile.stderr)
+    );
+    let run = Command::new(&out).output().expect("run poison binary");
+    let _ = std::fs::remove_file(&out);
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout),
+        "poison ok\n",
+        "inline bump poison fill / rewind re-poison failed: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+}

@@ -1,0 +1,41 @@
+// SWARM RABBIT HOLE, Wave 6 (Impl-D) — T-FIBR compile-time poison emission.
+//
+// Compiled with `snc --poison` (see compiler/tests/golden.rs): the inline
+// constant-size bump must fill 0xAA itself (it never enters the runtime,
+// where SN_POISON used to be the only switch — bench/RESULTS.md §5), and
+// the region-exit rewind must re-poison the freed range (Impl-B's inline
+// 1-store restore used to skip it).
+//
+// The reads below are deliberate raw-pointer reads of unwritten lane bytes:
+// the E0807 checker obligation (class (e), W4A repair 2) is a later slice;
+// until it lands, the poison fill is the defense-in-depth that makes any
+// checker miss crash in CI instead of flowing a garbage value onward.
+//
+// NOT run by tests/systems/run_all.sh (it would fail without --poison);
+// wired in via the golden test lane_poison_flag_fills_inline_bump.
+
+use std.os
+
+fn main() {
+    // A fresh lane is a zero-page mmap, so an unfilled bump reads 0.
+    int w0 = 0
+    int w1 = 0
+    int stale = 0
+    region {
+        ptr p = lane_alloc(0, 16)
+        w0 = ptr_load(p, 0)
+        w1 = ptr_load(p, 8)
+        ptr_store(p, 0, 12345)
+    }
+    // The rewind re-poisons [watermark, old_top): the same address comes
+    // back filled with 0xAA, not the 12345 written above.
+    region {
+        ptr q = lane_alloc(0, 16)
+        stale = ptr_load(q, 0)
+    }
+    if (w0 == w1 && w0 != 0 && stale == w0) {
+        print("poison ok")
+    } else {
+        print("poison fail")
+    }
+}

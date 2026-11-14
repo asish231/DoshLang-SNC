@@ -27,6 +27,12 @@ struct Cli {
     /// Optimization level passed to clang (0-3, s, z)
     #[arg(short = 'O', default_value = "2")]
     opt: String,
+    /// Emit T-FIBR 0xAA poison-fills inline (W4A repair 2): every lane
+    /// allocation fills 0xAA and every region rewind re-poisons, on every
+    /// codegen path — the debug guarantee, paid in the emitted code.
+    /// Release builds without this flag stay O(1) (raw bytes).
+    #[arg(long)]
+    poison: bool,
     /// Extra library to link, repeatable (`-L sqlite3`). `extern "lib"` blocks
     /// add these automatically.
     #[arg(short = 'L', long = "link-lib")]
@@ -234,6 +240,7 @@ fn main() -> ExitCode {
                 target: cli.target,
                 clang: cli.clang,
                 opt: cli.opt,
+                poison: cli.poison,
                 libs: cli.libs,
                 coverage: false,
             })
@@ -327,6 +334,7 @@ fn run_pkg(action: PkgCmd) -> Result<String, String> {
                 target: None,
                 clang,
                 opt,
+                poison: false,
                 libs: Vec::new(),
                 coverage: false,
             };

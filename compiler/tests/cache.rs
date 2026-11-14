@@ -18,6 +18,7 @@ fn incremental_cache_reuses_identical_builds() {
         target: None,
         clang: "clang".into(),
         opt: "2".into(),
+        poison: false,
         libs: Vec::new(),
         coverage: false,
     };

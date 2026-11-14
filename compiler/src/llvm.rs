@@ -350,6 +350,12 @@ declare ptr @sn_lane_alloc(i64, i64)
 declare i64 @sn_lane_used(i64)
 declare void @sn_lane_freeze(i64)
 declare void @sn_lane_unfreeze(i64)
+; SWARM RABBIT HOLE, Wave 6 (Impl-D): compile-time T-FIBR poison emission
+; (W4A repair 2). In poison mode (-O0, `snc debug`, --poison) every lane
+; allocation lowered by ir.rs fills 0xAA itself — including the inline bump
+; fast path, which never enters the runtime and therefore ignored SN_POISON
+; (bench/RESULTS.md §5). Unused in release builds; LLVM drops the declare.
+declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)
 ; SWARM RABBIT HOLE — D0 gap #2 (Impl-B, Wave 5): the TLS lane array exposed
 ; to IR for the inline bump/reset fast path (W2F §1(b): the TLS-reloaded
 ; model — no hidden-arg ABI). %sn_lane_t mirrors runtime.c's SnLane; the gep
