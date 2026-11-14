@@ -73,7 +73,7 @@ More: [docs/LANGUAGE.md](docs/LANGUAGE.md) · full reference [SNLANG_SPEC.md](SN
 | Area | Highlights |
 |---|---|
 | Types | `int`, `bool`, `str`, `list<T>`, `map<K,V>`, `T?`, `error`, `chan`, `ref`, `mut`, `lock`, `json`, `any`, `record`, fn types |
-| Safety | Compile-time Rust-grade guarantees: stack escape checks, collection borrow locks, affine UAF/double-free prevention, thread-race checks; **region poset** (RgnId provenance, `scc_accum_params` fixpoint — E0802 fires on recursive inout-accumulator hazards); **Elastic Lanes** (O(1) bump + scope-exit reset, inline at `-O1+`, T-FIBR poison-fill in debug) |
+| Safety | Compile-time Rust-grade guarantees: stack escape checks, collection borrow locks, affine UAF/double-free prevention, thread-race checks; **region poset** (RgnId provenance, `scc_accum_params` fixpoint — E0802 fires on recursive inout-accumulator hazards); **pinned-lane coloring** (L2–L6 accumulator assignment — E0802c on budget exhaustion, never silent reuse); **escape checker** (E-ESCAPE: refs stored into a holder must have the target outlive the holder); **GC scoping** (E-GC-IN-LANE: GC-managed and lane-backed memory cannot reference each other — the GC can't trace into lanes and lane rewinds don't respect the GC heap); **Elastic Lanes** (O(1) bump + scope-exit reset, inline at `-O1+`, T-FIBR poison-fill in debug) |
 | Speed | LLVM method devirtualization (1B calls/sec), native `StringBuilder` (~150× faster strings), ARC borrow elision |
 | Null | `otherwise`, `x!!`, `x?.m()`, smart unwrap after `if (x != none)` |
 | Errors | `(T, error)`, `try`, `panic` — not Java exceptions |
