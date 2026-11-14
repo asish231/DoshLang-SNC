@@ -162,6 +162,10 @@ declare void @sn_printn_str(ptr)
 declare void @sn_print_none()
 declare void @sn_printn_none()
 declare ptr @sn_list_new(i64)
+; SWARM RABBIT HOLE — Wave 8 (Impl-I), DIFF-1 Rule 1b: pinned-lane list
+; construction for pre-colored scc_accum accumulator allocation sites
+; (CheckDb.lane_assignment → ir.rs Decl lowering → sn_list_new_lane).
+declare ptr @sn_list_new_lane(i64, i64)
 declare void @sn_list_push_i64(ptr, i64)
 declare void @sn_list_push_ptr(ptr, ptr)
 declare i64 @sn_list_len(ptr)

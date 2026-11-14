@@ -1,0 +1,34 @@
+// SWARM RABBIT HOLE — Wave 8 / Impl-I, DIFF-1 Rule 1d (the budget lemma,
+// W2A §1.7: 2 ping-pong + 5 pinned + DPS = 8 lanes; distinct
+// simultaneously-live accumulators always interfere).
+//
+// `push6` grows SIX distinct accumulators across its own recursion SCC:
+// the coloring pass assigns pinned lanes L2..L6 to the first five
+// (a→L2, b→L3, c→L4, d→L5, e→L6) and the sixth leaves its root lane-less —
+// at most five distinct simultaneously-live pinned accumulators per
+// thread. Never silent reuse: the sixth site fires E0802c. Must be
+// rejected.
+//
+// This file is a compile-FAIL golden case (tests/golden.rs).
+
+fn push6(inout list<int> a, inout list<int> b, inout list<int> c, inout list<int> d, inout list<int> e, inout list<int> f, int n) {
+    a.push(n)
+    b.push(n)
+    c.push(n)
+    d.push(n)
+    e.push(n)
+    f.push(n)
+    if (n > 0) {
+        push6(inout a, inout b, inout c, inout d, inout e, inout f, n - 1)
+    }
+}
+
+fn main() {
+    list<int> a = []
+    list<int> b = []
+    list<int> c = []
+    list<int> d = []
+    list<int> e = []
+    list<int> f = []
+    push6(inout a, inout b, inout c, inout d, inout e, inout f, 2)
+}

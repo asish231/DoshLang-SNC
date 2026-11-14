@@ -348,6 +348,51 @@ fn scc_accum_lane_scratch_e0802() {
     );
 }
 
+/// SWARM RABBIT HOLE — Wave 8 (Impl-J): W2A §1.5 T-PUSH/T-STORE — the
+/// escape rule (E-ESCAPE). A ref whose TARGET lives in the shorter
+/// (inner) region — it exits first — is stored into a holder declared in
+/// the enclosing region: the safety law ∀ρᵢ ∈ refs(v): ρᵢ ⊑ₗ reg(dst)
+/// (W2A §1.1; §4.1 P-I, the RI invariant reg(a) ⊑ₗ reg(cell)) is
+/// violated — the target dies before the holder, the dangling-reference
+/// class the region poset was built to kill. Both store sites must
+/// reject it: the T-STORE binding assignment and the T-PUSH list push.
+#[test]
+fn escape_ref_into_shorter_region_fail() {
+    let err = compile_err("examples/escape_ref_shorter_region_fail.sn");
+    assert!(
+        err.contains("[E-ESCAPE]"),
+        "expected the E-ESCAPE diagnostic, got: {err}"
+    );
+    assert!(
+        err.contains("the target dies before the holder"),
+        "expected the dangling-reference explanation, got: {err}"
+    );
+    assert!(
+        err.contains("escapes into region 0"),
+        "expected the holder region named in the message, got: {err}"
+    );
+}
+
+/// SWARM RABBIT HOLE — Wave 8 (Impl-J) discharge: refs created and
+/// stored within the SAME region — reg(target) == reg(holder), ⊑ₗ by
+/// reflexivity — the push site and the assignment site must both stay
+/// silent, and the program runs.
+#[test]
+fn escape_ref_into_same_region_ok() {
+    assert_out("examples/escape_ref_same_region_ok.sn", "7\n1\n");
+}
+
+/// SWARM RABBIT HOLE — Wave 8 (Impl-J) discharge: refs CREATED in an
+/// inner region whose targets live in the OUTER region, stored into
+/// outer-region holders (container + binding). reg(target) ⊑ₗ
+/// reg(holder) — outer targets outlive every inner region (W2A §1.1:
+/// ⊑ₗ = phase superset) — so the rule must NOT fire, and the holder
+/// stays valid after the region exits.
+#[test]
+fn escape_ref_into_outer_ok() {
+    assert_out("examples/escape_ref_outer_ok.sn", "5\n1\n");
+}
+
 /// The discharge side of the same rule: a heap-backed list local passed
 /// inout into the recursive accumulator has no lane assignment, so the
 /// E0802 wiring must NOT over-fire off the lane model — the program
@@ -355,6 +400,44 @@ fn scc_accum_lane_scratch_e0802() {
 #[test]
 fn scc_accum_heap_list_ok() {
     assert_out("examples/scc_accum_ok.sn", "4\n");
+}
+
+/// SWARM RABBIT HOLE — Wave 8 / Impl-I, DIFF-1 Rule 1b pre-coloring +
+/// Rule 1d budget (W2A §1.3 S6, §1.7 K1 + the budget lemma): the
+/// pinned-lane discharge, end-to-end. A recursive SCC accumulator with
+/// a lane-free allocation site is PRE-COLORED onto a pinned lane L2..L6
+/// at compile time; the IR constructs the growable ON the lane
+/// (sn_list_new_lane → sn_lane_alloc(π_j)), so E0802 does not fire, the
+/// list survives the recursion (K1: nothing else opens on π_j), and
+/// the pinned lane actually holds the allocation (lane_used(2) > 0 —
+/// the full check → color → lower → run loop).
+#[test]
+fn scc_accum_pinned_lane_ok() {
+    assert_out("examples/scc_accum_pinned_lane_ok.sn", "4\ntrue\n");
+
+    // The explicit discharge: `lane_alloc` on a pinned lane (L2..L6) is
+    // the user-declared pin the coloring prefers — compiles clean, no
+    // E0802 (the scratch twin is scc_accum_lane_scratch_e0802).
+    let err = compile_err("examples/scc_accum_lane_pinned_ok.sn");
+    assert!(err.is_empty(), "expected a clean compile, got: {err}");
+}
+
+/// DIFF-1 Rule 1d (the budget lemma, W2A §1.7): the sixth distinct
+/// simultaneously-live accumulator in one recursion SCC exhausts the
+/// L2..L6 pinned pool — never silent reuse, the coloring leaves it
+/// lane-less and its call site fires the budget error. → E0802c.
+#[test]
+fn scc_accum_lane_budget_e0802c() {
+    let err = compile_err("examples/scc_accum_lane_budget_fail.sn");
+    assert!(err.contains("[E0802]"), "expected E0802, got: {err}");
+    assert!(
+        err.contains("needs a pinned lane but L2..L6 are all live"),
+        "expected the E0802c budget diagnostic, got: {err}"
+    );
+    assert!(
+        err.contains("'f'"),
+        "expected the diagnostic for the sixth accumulator 'f', got: {err}"
+    );
 }
 
 /// `alloc`/`free` guards: double frees and use-after-free are reported

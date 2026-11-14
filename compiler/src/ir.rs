@@ -156,6 +156,13 @@ struct Cx<'a> {
     strings: &'a mut Vec<String>,
     extra_fns: &'a mut Vec<String>,
     current_bp: Option<String>,
+    /// SWARM RABBIT HOLE — Wave 8 (Impl-I), DIFF-1 Rule 1b: the checked
+    /// function's summary key (check::fn_summary_key) — indexes
+    /// CheckDb.lane_assignment, the checker's pinned-lane pre-coloring
+    /// (function → local → lane L2..L6). Empty for synthetic child
+    /// contexts (closures, spawn bodies, extension shims): they host no
+    /// pre-colored declarations.
+    fn_key: String,
     /// Source file table, for resolving spans to `!dbg` line locations.
     files: &'a [SourceFile],
     /// `Some((file_idx, line, col))` for the statement being lowered.
@@ -536,6 +543,9 @@ fn lower_fn(
         strings,
         extra_fns: extra,
         current_bp: bp.clone(),
+        // Wave 8 (Impl-I): the pinned-lane feed indexes
+        // db.lane_assignment by the checker's summary key.
+        fn_key: crate::check::fn_summary_key(bp.as_deref(), &f.name),
         files,
         cur_loc: None,
         cur_sub: sub_id,
@@ -814,6 +824,60 @@ impl Cx<'_> {
         ));
     }
 
+    /// SWARM RABBIT HOLE — Wave 8 (Impl-I), DIFF-1 Rule 1b: the pinned
+    /// lane the checker pre-colored this function's local onto
+    /// (CheckDb.lane_assignment — an scc_accum accumulator's allocation
+    /// site; W2A §1.3 S6: "allocation sites flowing into scc_accum_params
+    /// positions are colored onto pinned π_j at compile time").
+    fn pinned_lane_of(&self, name: &str) -> Option<u8> {
+        self.db
+            .lane_assignment
+            .get(&self.fn_key)?
+            .get(name)
+            .copied()
+    }
+
+    /// The pinned-lane twin of the list-literal lowering (Impl-I, Wave 8,
+    /// DIFF-1 Rule 1b / W2A §1.7 K1): the growable's header is
+    /// constructed ON the pinned lane (runtime sn_list_new_lane →
+    /// sn_lane_alloc(π_j)) instead of the malloc'd sn_list_new. K1 —
+    /// nothing else opens on π_j — so no scratch scope exit can truncate
+    /// the accumulator while its SCC is live: the E0802 buried-top
+    /// hazard is unrepresentable. The element backing array stays
+    /// malloc/slab-backed (W2A §1.5 E-NESTED: element storage is
+    /// pool-backed by design).
+    fn expr_list_on_pinned_lane(
+        &mut self,
+        els: &[Expr],
+        declared: &Type,
+        lane: u8,
+    ) -> (String, Type) {
+        let elem = match declared {
+            Type::List(e) => (**e).clone(),
+            _ if let Some(x) = els.first() => self.lookup_ty(x),
+            _ => Type::Int,
+        };
+        let kind = if elem.is_ptr() || matches!(elem, Type::Optional(_)) {
+            1
+        } else {
+            0
+        };
+        let l = self.t();
+        self.line(&format!(
+            "{l} = call ptr @sn_list_new_lane(i64 {kind}, i64 {lane})"
+        ));
+        for el in els {
+            let (v, vt) = self.expr(el);
+            if kind == 1 {
+                self.line(&format!("call void @sn_list_push_ptr(ptr {l}, ptr {v})"));
+            } else {
+                let vb = self.as_bits(v, &vt);
+                self.line(&format!("call void @sn_list_push_i64(ptr {l}, i64 {vb})"));
+            }
+        }
+        (l, Type::List(Box::new(elem)))
+    }
+
     fn stmt(&mut self, s: &Stmt) {
         self.cur_loc = self.stmt_loc(s);
         self.cov_stmt(s);
@@ -859,7 +923,20 @@ impl Cx<'_> {
                                 self.concrete_types.insert(name.clone(), concrete);
                             }
                         }
-                        let (vr, vt) = self.expr(v);
+                        // SWARM RABBIT HOLE — Wave 8 (Impl-I), DIFF-1
+                        // Rule 1b / W2A §1.3: the pinned-lane feed. When
+                        // the checker pre-colored this local onto a
+                        // pinned lane L2..L6 (an scc_accum accumulator's
+                        // allocation site — CheckDb.lane_assignment),
+                        // the list-literal construction routes onto the
+                        // pinned lane; every other value keeps the
+                        // existing lowering.
+                        let (vr, vt) = match (self.pinned_lane_of(name), &v.kind) {
+                            (Some(lane), ExprKind::List(els)) => {
+                                self.expr_list_on_pinned_lane(els, &t, lane)
+                            }
+                            _ => self.expr(v),
+                        };
                         if matches!(t, Type::Record(_)) {
                             let (vr, _) = self.coerce(vr, &vt, &t);
                             let sz = if let Type::Record(rn) = &t {
@@ -1714,6 +1791,7 @@ impl Cx<'_> {
                 strings: self.strings,
                 extra_fns: &mut nested,
                 current_bp: self.current_bp.clone(),
+                fn_key: String::new(),
                 files: self.files,
                 cur_loc: None,
                 cur_sub: child_sub,
@@ -5148,6 +5226,7 @@ impl Cx<'_> {
                 strings: self.strings,
                 extra_fns: &mut nested,
                 current_bp: self.current_bp.clone(),
+                fn_key: String::new(),
                 files: self.files,
                 cur_loc: None,
                 cur_sub: child_sub,
@@ -5259,6 +5338,7 @@ fn lower_ext_fn(
         strings,
         extra_fns: extra,
         current_bp: None,
+        fn_key: String::new(),
         files,
         cur_loc: None,
         cur_sub: sub_id,

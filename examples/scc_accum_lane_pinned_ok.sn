@@ -1,0 +1,23 @@
+// SWARM RABBIT HOLE — Wave 8 / Impl-I, DIFF-1 Rule 1b: the EXPLICIT
+// discharge — the accumulator's allocation site is declared on a PINNED
+// lane (L2..L6, the STRATA lane classes) instead of ping-pong scratch.
+// The coloring pass prefers the user-declared pin (it colors the SCC's
+// accumulator onto L2 to match), so the deferred site check passes and
+// E0802 must NOT fire. The scratch twin (lane 0) is
+// scc_accum_lane_fail.sn → E0802.
+//
+// Compile-only golden case: a raw `lane_alloc` pointer is not a
+// constructed list header — the runnable discharge is
+// scc_accum_pinned_lane_ok.sn (the pre-colored heap-list shape).
+
+fn count_up(inout list<int> xs, int n) {
+    xs.push(n)
+    if (n > 0) {
+        count_up(inout xs, n - 1)
+    }
+}
+
+fn main() {
+    ptr buf = lane_alloc(2, 64)
+    count_up(inout buf, 3)
+}

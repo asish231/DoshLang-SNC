@@ -19,11 +19,13 @@ pub struct EnumVariantInfo {
 pub type RgnId = u32;
 
 /// SWARM RABBIT HOLE — Wave 6 (Impl-E), DIFF-1 (STRATA lane classes):
-/// allocation-site lane class of a local. Today the checker records only
-/// ScratchPingPong, and only for `lane_alloc`-backed raw locals — list
-/// locals stay heap-backed (malloc) until the pinned-lane slice; no
-/// PinnedAccumulator lanes exist in the checker yet, so the E0802 wiring
-/// below is real but cannot yet be satisfied, only violated.
+/// allocation-site lane class of a local. Wave 8 (Impl-I): the pinned
+/// class is now reachable two ways — an explicit `lane_alloc` naming a
+/// lane in L2..L6 (the user-declared pin, the "declare it 'pinned'
+/// (allocate on L2..L6)" discharge of E0802), or the coloring pass's
+/// pre-coloring of a lane-free growable local that flows `inout` into
+/// an scc_accum param (recorded in CheckDb.lane_assignment, consumed by
+/// the ir.rs lowering).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaneClass {
     /// L0/L1 frame-local ping-pong scratch.
@@ -66,6 +68,15 @@ pub struct FnBorrowSummary {
     /// nowhere in shrinks_params; that is exactly the hole G1 A5a drove
     /// through.
     pub scc_accum_params: Vec<usize>,
+    /// W2A §1.3 S6 (the v3 summary contract) / DIFF-1 Rule 1b: this
+    /// function's pre-coloring assignment onto a pinned lane L2..L6 —
+    /// the lowest lane the coloring pass (Impl-I, Wave 8) assigned to
+    /// this function's scc_accum_params; None when the function hosts
+    /// no colored accumulator or the L2..L6 budget was exhausted
+    /// (Rule 1d → E0802c at the recorded call sites). The authoritative
+    /// per-(function, param) coloring lives in the fixpoint's
+    /// union-find/lane maps; this field is the summary-level projection.
+    pub pinned_lane_req: Option<u8>,
 }
 
 /// SWARM RABBIT HOLE — Wave 6 (Impl-E), DIFF-1 Rule 1a steps 2/3: one
@@ -83,18 +94,29 @@ pub struct InoutEdge {
 /// SWARM RABBIT HOLE — Wave 6 (Impl-E), DIFF-1 Rule 1b: a deferred
 /// allocation-site check — a local was passed `inout` into `callee`'s
 /// param `callee_param`. If the fixpoint marks that param ∈
-/// scc_accum_params(callee) and the local's allocation site sits on a
-/// frame-local scratch lane (the current single-lane model: any lane
-/// that isn't pinned — for now, lane 0), E0802 fires after the fixpoint.
-/// `lane` is None for locals with no lane assignment (heap-backed
-/// today) — exempt until the pinned-lane slice records real lanes for
-/// growable locals.
+/// scc_accum_params(callee), the coloring pass (Impl-I, Wave 8) assigns
+/// the accumulator a pinned lane L2..L6 (W2A §1.7 K1) and the site is
+/// resolved: a lane-free local (heap-backed growable — the default) is
+/// PRE-COLORED onto that lane (no error — the discharge that makes
+/// E0802 conditional); an explicit `lane_alloc` scratch pin still fires
+/// E0802; a lane-less accumulator (the L2..L6 budget exhausted) fires
+/// E0802c (Rule 1d). `lane` is None for locals with no explicit lane
+/// assignment — the pre-coloring target.
 #[derive(Clone, Debug)]
 pub struct SccAccumSite {
     pub callee: String,
     pub callee_param: usize,
+    /// Wave 8 (Impl-I): the caller's summary key — the function whose
+    /// frame holds the pre-colored local (CheckDb.lane_assignment is
+    /// keyed by it).
+    pub caller: String,
     pub local: String,
     pub lane: Option<LaneAssignment>,
+    /// Wave 8 (Impl-I), DIFF-1 Rule 1b: the pinned lane the coloring
+    /// pass assigned to this site's accumulator (filled after the
+    /// fixpoint); None when the callee param is not an SCC accumulator
+    /// or the L2..L6 budget was exhausted (Rule 1d → E0802c).
+    pub pinned_lane: Option<u8>,
     pub span: Span,
 }
 
@@ -136,6 +158,17 @@ pub struct CheckDb {
     pub inout_call_edges: Vec<InoutEdge>,
     /// Rule 1b deferred allocation-site checks (E0802 candidates).
     pub scc_accum_sites: Vec<SccAccumSite>,
+    /// SWARM RABBIT HOLE — Wave 8 (Impl-I), DIFF-1 Rule 1b / W2A §1.3:
+    /// the pre-coloring feed consumed by the IR (ir.rs) — function
+    /// summary key → local/param name → pinned lane L2..L6. Populated
+    /// by the coloring pass in `scc_accum_fixpoint` after all functions
+    /// are checked: (a) each colored SCC accumulator inout param's
+    /// provenance gets its pinned lane (the default scratch 0
+    /// overridden), and (b) each caller local passed `inout` into a
+    /// colored accumulator is pre-colored onto that lane — the ir.rs
+    /// declaration lowering then constructs the growable ON the lane
+    /// (runtime sn_list_new_lane → sn_lane_alloc(π_j)).
+    pub lane_assignment: HashMap<String, HashMap<String, u8>>,
 }
 
 impl CheckDb {
@@ -187,8 +220,11 @@ struct Checker<'a> {
     /// provenance carries its region — parallel to `borrow_epoch`; the
     /// ir.rs side is a later slice.
     region_instance: HashMap<String, RgnId>,
-    /// DIFF-1: allocation-site lane of a local (only lane_alloc-backed
-    /// raw scratch today — see LaneClass).
+    /// DIFF-1: allocation-site lane of a local — explicit `lane_alloc`
+    /// declarations (class by the STRATA lane ranges, see LaneClass);
+    /// lane-free growable locals get their lanes from the coloring pass's
+    /// pre-coloring (CheckDb.lane_assignment), recorded after the
+    /// fixpoint.
     lane_of: HashMap<String, LaneAssignment>,
     /// The checked function's summary key; None outside a function body
     /// (module-level statements, extension-method walks) so nothing is
@@ -293,6 +329,7 @@ pub fn check_programs(programs: &[Program], diag: &mut Diagnostics) -> CheckDb {
         call_edges: HashMap::new(),
         inout_call_edges: Vec::new(),
         scc_accum_sites: Vec::new(),
+        lane_assignment: HashMap::new(),
     };
     collect(&mut db, programs, diag);
     check_contracts(&mut db, diag);
@@ -439,8 +476,9 @@ pub fn check_programs(programs: &[Program], diag: &mut Diagnostics) -> CheckDb {
 /// SWARM RABBIT HOLE — Wave 6 (Impl-E), DIFF-1: summary-table key — the
 /// db.funcs key convention ("{blueprint}::{method}" for methods, bare
 /// name otherwise), so producer (check_fn) and consumer (check_arity)
-/// sides agree.
-fn fn_summary_key(bp: Option<&str>, name: &str) -> String {
+/// sides agree. Wave 8 (Impl-I): also consumed by the ir.rs lowering to
+/// index CheckDb.lane_assignment (the pinned-lane pre-coloring feed).
+pub fn fn_summary_key(bp: Option<&str>, name: &str) -> String {
     match bp {
         Some(b) => format!("{b}::{name}"),
         None => name.to_string(),
@@ -515,6 +553,45 @@ fn tarjan_sccs(nodes: &[String], edges: &HashMap<String, BTreeSet<String>>) -> V
     sccs
 }
 
+/// SWARM RABBIT HOLE — Wave 8 (Impl-I), DIFF-1 Rule 1b: union-find over
+/// (function, inout-param) accumulator keys. Two params joined by an
+/// inout edge are the same underlying growable (the accumulator flowing
+/// caller-ward along the Rule-1a propagation path), so they must share
+/// ONE pinned lane — W2A §1.7 K1: each pinned lane hosts exactly one
+/// growable for its SCC lifetime. Iterative path-compressed find (the
+/// call graph can be deep; nothing here may recurse).
+fn uf_find(
+    parent: &mut HashMap<(String, usize), (String, usize)>,
+    k: (String, usize),
+) -> (String, usize) {
+    let mut root = k.clone();
+    while let Some(p) = parent.get(&root) {
+        if *p == root {
+            break;
+        }
+        root = p.clone();
+    }
+    let mut cur = k;
+    while cur != root {
+        let next = parent[&cur].clone();
+        parent.insert(cur.clone(), root.clone());
+        cur = next;
+    }
+    root
+}
+
+fn uf_union(
+    parent: &mut HashMap<(String, usize), (String, usize)>,
+    a: (String, usize),
+    b: (String, usize),
+) {
+    let ra = uf_find(parent, a);
+    let rb = uf_find(parent, b);
+    if ra != rb {
+        parent.insert(ra, rb);
+    }
+}
+
 /// SWARM RABBIT HOLE — Wave 6 (Impl-E), DIFF-1 Rule 1a — the SCC
 /// fixed-point propagation rule (W2A §1.3 S6, the refutation-killing
 /// field), plus Rule 1b's deferred allocation-site checks:
@@ -530,14 +607,21 @@ fn tarjan_sccs(nodes: &[String], edges: &HashMap<String, BTreeSet<String>>) -> V
 ///    g's param i ⇒ j ∈ scc_accum(caller). Monotone union iterated to
 ///    the Knaster–Tarski least fixpoint (W2A §1.3 S5: the "≤ 3 passes"
 ///    figure is an empirical remark, not a lattice-height bound).
-/// 3. **Rule 1b** (deferred): every recorded call site that passed a
-///    LOCAL inout into a param that the fixpoint marks ∈ scc_accum is
-///    checked against its allocation-site lane: ScratchPingPong (the
-///    current single-lane model — any lane that isn't pinned, for now
-///    lane 0) → E0802, DIFF-1's buried-top hazard. No pinned lanes exist
-///    in the checker yet, so the only dischargeable states today are
-///    "violation" (lane_alloc-backed scratch) and "not lane-backed"
-///    (heap locals — exempt until the pinned-lane slice).
+/// 3. **Coloring** (Rule 1b pre-coloring / Rule 1d budget, Impl-I Wave 8):
+///    pinned lanes L2..L6 are assigned to the SCC's accumulators — one
+///    lane per underlying growable (W2A §1.7 K1), first-come-first-served
+///    at the SCC level from the module-wide pool (distinct
+///    simultaneously-live accumulators always interfere — the budget
+///    lemma: 2 ping-pong + 5 pinned + DPS = 8 lanes; never silent reuse).
+/// 4. **Rule 1b** (deferred, now conditional): every recorded call site
+///    that passed a LOCAL inout into a colored param is resolved against
+///    its allocation site: a lane-free local (the default) is PRE-COLORED
+///    onto the pinned lane (no error — the discharge that makes E0802
+///    conditional; the ir.rs lowering reads the coloring and constructs
+///    the growable on the lane); an explicit `lane_alloc` pin matching
+///    the coloring is the user-declared pin; an explicit scratch
+///    `lane_alloc` still fires E0802 (DIFF-1's buried-top hazard); a
+///    lane-less accumulator (the L2..L6 budget exhausted) fires E0802c.
 fn scc_accum_fixpoint(db: &mut CheckDb, diag: &mut Diagnostics) {
     // 1. SCCs over the call graph.
     let mut node_set: BTreeSet<String> = db.call_edges.keys().cloned().collect();
@@ -585,8 +669,101 @@ fn scc_accum_fixpoint(db: &mut CheckDb, diag: &mut Diagnostics) {
         }
     }
 
-    // 4. Commit the summaries (scc_accum_params is the one computed field;
+    // 4. The coloring pass (Impl-I, Wave 8): DIFF-1 Rule 1b pre-coloring +
+    //    Rule 1d lane budget (W2A §1.3 S6 + §1.7 K1 + the budget lemma).
+    //    K1 — each pinned lane hosts exactly one growable for its SCC
+    //    lifetime — so the same underlying growable gets ONE lane: a
+    //    union-find over (function, param) pairs joins every pair an
+    //    inout edge connects (the accumulator flowing caller-ward, Rule 1a
+    //    steps 2/3). Lanes are assigned first-come-first-served at the
+    //    SCC level (deterministic SCC/function/param order) from the
+    //    module-wide pool {2..6} — distinct simultaneously-live
+    //    accumulators always interfere, so lanes are never silently
+    //    reused across SCCs either. An explicit `lane_alloc` pin (L2..L6)
+    //    at a call site touching the accumulator is the coloring's
+    //    preference when that lane is still free. The sixth distinct
+    //    accumulator leaves its root lane-less → E0802c at its sites
+    //    (Rule 1d: never silent reuse).
+    let mut parent: HashMap<(String, usize), (String, usize)> = HashMap::new();
+    for (f, params) in &acc {
+        for i in params {
+            parent.insert((f.clone(), *i), (f.clone(), *i));
+        }
+    }
+    for e in &db.inout_call_edges {
+        let Some(j) = e.caller_param else { continue };
+        let (Some(callee_acc), Some(caller_acc)) = (acc.get(&e.callee), acc.get(&e.caller))
+        else {
+            continue;
+        };
+        if !callee_acc.contains(&e.callee_param) || !caller_acc.contains(&j) {
+            continue;
+        }
+        uf_union(&mut parent, (e.caller.clone(), j), (e.callee.clone(), e.callee_param));
+    }
+    let mut sites = std::mem::take(&mut db.scc_accum_sites);
+    let mut lane_of_root: HashMap<(String, usize), u8> = HashMap::new();
+    // (lane - 2) -> owning accumulator label, for the E0802c diagnostic.
+    let mut owner_of_lane: [Option<String>; 5] = [None, None, None, None, None];
+    for c in &sccs {
+        let nontrivial = c.len() > 1
+            || db
+                .call_edges
+                .get(&c[0])
+                .map(|s| s.contains(&c[0]))
+                .unwrap_or(false);
+        if !nontrivial {
+            continue;
+        }
+        for f in c {
+            let Some(params) = acc.get(f) else { continue };
+            for i in params {
+                let root = uf_find(&mut parent, (f.clone(), *i));
+                if lane_of_root.contains_key(&root) {
+                    continue;
+                }
+                // preference: a call site that already pinned its local
+                // onto a still-free L2..L6 keeps that lane (the
+                // user-declared pin)
+                let mut picked: Option<u8> = None;
+                for s in sites.iter() {
+                    let in_acc = acc
+                        .get(&s.callee)
+                        .map(|x| x.contains(&s.callee_param))
+                        .unwrap_or(false);
+                    if !in_acc {
+                        continue;
+                    }
+                    if uf_find(&mut parent, (s.callee.clone(), s.callee_param)) != root {
+                        continue;
+                    }
+                    if let Some(LaneAssignment {
+                        lane: k,
+                        class: LaneClass::PinnedAccumulator,
+                    }) = &s.lane
+                    {
+                        if (2..=6).contains(k) && owner_of_lane[(*k - 2) as usize].is_none() {
+                            picked = Some(*k);
+                            break;
+                        }
+                    }
+                }
+                let lane =
+                    picked.or_else(|| (2u8..=6).find(|&j| owner_of_lane[(j - 2) as usize].is_none()));
+                if let Some(l) = lane {
+                    owner_of_lane[(l - 2) as usize] = Some(format!("{}:param{}", root.0, root.1));
+                    lane_of_root.insert(root, l);
+                }
+                // None → the L2..L6 budget is exhausted: the root stays
+                // lane-less and every site into it fires E0802c below.
+            }
+        }
+    }
+
+    // 5. Commit the summaries (scc_accum_params is the one computed field;
     //    the other three stay spec-carried — see FnBorrowSummary).
+    //    pinned_lane_req (W2A §1.3 S6): the lowest pinned lane the
+    //    coloring assigned to this function's accumulators.
     let mut keys: BTreeSet<String> = db.fn_growth_seeds.keys().cloned().collect();
     keys.extend(acc.keys().cloned());
     for k in keys {
@@ -595,12 +772,48 @@ fn scc_accum_fixpoint(db: &mut CheckDb, diag: &mut Diagnostics) {
             .remove(&k)
             .map(|x| x.into_iter().collect())
             .unwrap_or_default();
+        s.pinned_lane_req = s
+            .scc_accum_params
+            .iter()
+            .filter_map(|i| lane_of_root.get(&uf_find(&mut parent, (k.clone(), *i))))
+            .min()
+            .copied();
         db.fn_summaries.insert(k, s);
     }
 
-    // 5. Rule 1b: the deferred allocation-site checks → E0802.
-    let sites = std::mem::take(&mut db.scc_accum_sites);
-    for site in &sites {
+    // 6. Part A step 2 (Impl-I, Wave 8): the SCC accumulator params' own
+    //    provenance — each colored inout param's lane is recorded into
+    //    db.lane_assignment (function → param name → lane), overriding
+    //    the default scratch 0. (Index-space note: seeds live in the
+    //    FnItem param space — self excluded — so a method's sig.params,
+    //    which holds self at 0, is indexed with the offset.)
+    let mut param_lanes: Vec<(String, String, u8)> = Vec::new();
+    for (f, s) in &db.fn_summaries {
+        for i in &s.scc_accum_params {
+            let Some(lane) = lane_of_root.get(&uf_find(&mut parent, (f.clone(), *i))) else {
+                continue;
+            };
+            let Some(sig) = db.funcs.get(f) else { continue };
+            let adj = usize::from(
+                sig.is_method
+                    && !sig.is_static
+                    && sig.params.first().map(|p| p.0 == "self").unwrap_or(false),
+            );
+            let Some((pname, ..)) = sig.params.get(i + adj) else {
+                continue;
+            };
+            param_lanes.push((f.clone(), pname.clone(), *lane));
+        }
+    }
+    for (f, pname, lane) in param_lanes {
+        db.lane_assignment.entry(f).or_default().insert(pname, lane);
+    }
+
+    // 7. Rule 1b (deferred, Wave 8 — now conditional): resolve every
+    //    recorded allocation site against the coloring. Before the
+    //    coloring, a scratch lane was always wrong; now it is wrong only
+    //    when the coloring failed to assign.
+    for site in sites.iter_mut() {
         let grows = db
             .fn_summaries
             .get(&site.callee)
@@ -609,13 +822,74 @@ fn scc_accum_fixpoint(db: &mut CheckDb, diag: &mut Diagnostics) {
         if !grows {
             continue;
         }
-        if let Some(lane) = &site.lane {
-            if lane.class == LaneClass::ScratchPingPong {
+        let root = uf_find(&mut parent, (site.callee.clone(), site.callee_param));
+        let Some(lane) = lane_of_root.get(&root).copied() else {
+            // Rule 1d (DIFF-1): the L2..L6 budget is exhausted — the
+            // budget lemma's sixth distinct simultaneously-live
+            // accumulator. Never silent reuse.
+            let owners: Vec<String> = owner_of_lane
+                .iter()
+                .map(|o| o.clone().unwrap_or_default())
+                .collect();
+            diag.error(
+                site.span,
+                format!(
+                    "SCC accumulator '{}' needs a pinned lane but L2..L6 are all live ('{}'); at most five distinct simultaneously-live pinned accumulators per thread (the budget lemma: 2 ping-pong + 5 pinned + DPS = 8 lanes); make '{}' pool-backed. [E0802]",
+                    site.local,
+                    owners.join("', '"),
+                    site.local
+                ),
+            );
+            continue;
+        };
+        site.pinned_lane = Some(lane);
+        match &site.lane {
+            // PRE-COLORING (DIFF-1 Rule 1b): a lane-free allocation site
+            // is upgraded onto the pinned lane — the discharge path that
+            // makes E0802 conditional. db.lane_assignment carries the
+            // coloring to the ir.rs lowering, which constructs the
+            // growable ON the lane (W2A §1.3: allocation sites flowing
+            // into scc_accum_params positions are colored onto pinned π_j
+            // at compile time).
+            None => {
+                let entry = db
+                    .lane_assignment
+                    .entry(site.caller.clone())
+                    .or_default();
+                if let Some(&prev) = entry.get(&site.local) {
+                    if prev != lane {
+                        diag.error(
+                            site.span,
+                            format!(
+                                "SCC accumulator '{}' is pre-colored onto pinned lane L{lane} here but onto L{prev} by another 'inout' call: one growable lives on exactly one pinned lane (W2A §1.7 K1). [E0802]",
+                                site.local
+                            ),
+                        );
+                    }
+                } else {
+                    entry.insert(site.local.clone(), lane);
+                }
+            }
+            // the user-declared pin matches the coloring — discharged
+            Some(LaneAssignment { lane: k, class: LaneClass::PinnedAccumulator }) if *k == lane => {}
+            Some(LaneAssignment { lane: k, class: LaneClass::PinnedAccumulator }) => {
+                diag.error(
+                    site.span,
+                    format!(
+                        "SCC accumulator '{}' is declared on pinned lane L{k} but its recursion SCC is colored onto pinned lane L{lane} (each pinned lane hosts exactly one growable for its SCC lifetime, W2A §1.7 K1); declare it on L{lane} or leave it lane-free so the pre-coloring assigns it. [E0802]",
+                        site.local
+                    ),
+                );
+            }
+            // explicit ping-pong scratch (or DPS-out): the buried-top
+            // hazard, unchanged from the Wave-6 wiring — the coloring
+            // does not rescue a user-declared scratch pin
+            Some(a) => {
                 diag.error(
                     site.span,
                     format!(
                         "SCC accumulator '{}' is allocated on ping-pong scratch (lane L{}) but is passed 'inout' to '{}', whose summary grows it across recursive SCC re-entries while caller frames are suspended; intervening scope exits would truncate its tail while its length still counts the truncated bytes (type-confused reads). Declare it 'pinned' (allocate on L2..L6) or make it pool-backed. [E0802]",
-                        site.local, lane.lane, site.callee
+                        site.local, a.lane, site.callee
                     ),
                 );
             }
@@ -1820,11 +2094,15 @@ impl Checker<'_> {
                     self.declare(name, decl_ty, *is_const, *span);
                     // SWARM RABBIT HOLE — Wave 6 (Impl-E, DIFF-1
                     // insertion point 6): allocation-site lane recording.
-                    // Today only raw `lane_alloc` locals are lane-backed
-                    // (ScratchPingPong on the named literal lane, default
-                    // 0 — the current single-lane model); list locals
-                    // stay heap-backed until the pinned-lane slice records
-                    // their real lanes.
+                    // Wave 8 (Impl-I): the class follows the STRATA lane
+                    // classes — `lane_alloc` names its lane; L0/L1 are
+                    // ScratchPingPong, L2..L6 are PinnedAccumulator (the
+                    // user-declared pin — the "declare it 'pinned'
+                    // (allocate on L2..L6)" discharge of E0802, which the
+                    // coloring pass prefers when it colors the SCC's
+                    // accumulator), L7 is CallerSretOut (DPS). Growable
+                    // locals without an explicit `lane_alloc` stay
+                    // lane-free here — the coloring pass pre-colors them.
                     if let Some(Expr { kind: ExprKind::Call { callee, args, .. }, .. }) =
                         value.as_ref()
                     {
@@ -1837,9 +2115,14 @@ impl Checker<'_> {
                                     },
                                     _ => 0,
                                 };
+                                let class = match lane {
+                                    2..=6 => LaneClass::PinnedAccumulator,
+                                    7 => LaneClass::CallerSretOut,
+                                    _ => LaneClass::ScratchPingPong,
+                                };
                                 self.lane_of.insert(
                                     name.to_string(),
-                                    LaneAssignment { lane, class: LaneClass::ScratchPingPong },
+                                    LaneAssignment { lane, class },
                                 );
                             }
                         }
@@ -3892,8 +4175,12 @@ impl Checker<'_> {
             self.db.scc_accum_sites.push(SccAccumSite {
                 callee,
                 callee_param: param_idx,
+                // Wave 8 (Impl-I): the pre-colored local lives in the
+                // caller's frame — db.lane_assignment is keyed by it.
+                caller: self.current_fn_key.clone().unwrap(),
                 local: root,
                 lane,
+                pinned_lane: None,
                 span: arg.span,
             });
         }

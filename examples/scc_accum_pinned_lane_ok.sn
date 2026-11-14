@@ -1,0 +1,31 @@
+// SWARM RABBIT HOLE — Wave 8 / Impl-I, DIFF-1 Rule 1b (kills G1 §1 A5a)
+// + W2A §1.7 K1-K3: the pinned-lane discharge, end-to-end.
+//
+// `grow_up` is a one-node recursion SCC (a self-loop) whose inout param 0
+// is GROWN (`push`) while deeper activations are suspended:
+// FnBorrowSummary.scc_accum_params = [0] after the Rule-1a fixpoint. The
+// caller's accumulator `acc` has NO explicit lane, so the coloring pass
+// pre-colors it onto pinned lane L2 — the allocation site is colored
+// onto π_2 at compile time (W2A §1.3) and the IR constructs the list
+// header ON the lane (sn_list_new_lane → sn_lane_alloc(2)), where nothing
+// else ever opens (K1): no intervening scope exit can truncate its tail
+// while its length still counts the truncated bytes. E0802 must NOT
+// fire.
+//
+// The run proves the full loop — check → color → lower → run:
+//   acc.length() == 4     the list survived the recursion (K1-K3)
+//   lane_used(2) > 0      the pinned lane actually holds the allocation
+
+fn grow_up(inout list<int> xs, int n) {
+    xs.push(n)
+    if (n > 0) {
+        grow_up(inout xs, n - 1)
+    }
+}
+
+fn main() {
+    list<int> acc = []
+    grow_up(inout acc, 3)
+    print(acc.length())
+    print(lane_used(2) > 0)
+}

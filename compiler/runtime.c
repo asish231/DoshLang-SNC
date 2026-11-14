@@ -1224,6 +1224,33 @@ void *sn_list_new(int64_t elem_kind) {
     return l;
 }
 
+/* SWARM RABBIT HOLE — Wave 8 (Impl-I), DIFF-1 Rule 1b / W2A §1.3 + §1.7 K1:
+   the pinned-lane list constructor. The checker's pre-coloring assigns an
+   scc_accum accumulator's allocation site to a pinned lane π_j (L2..L6) at
+   compile time (W2A §1.3 S6: "allocation sites flowing into scc_accum_params
+   positions are colored onto pinned π_j"); the IR lowers the declaration's
+   list literal through this twin so the growable's header lives on the
+   pinned lane for its whole SCC lifetime. K1: nothing else opens on π_j —
+   no scratch scope exit can truncate the accumulator while its SCC is live,
+   so the E0802 buried-top hazard is unrepresentable. The header is Stratum-1
+   lane bump memory — untracked, never gc_track'd (a lane-interior pointer
+   must never reach the collector's free list); it dies with the lane's own
+   reset, not free(). The element backing array stays malloc/slab-backed
+   (W2A §1.5 E-NESTED: element storage is pool-backed by design). */
+void *sn_list_new_lane(int64_t elem_kind, int64_t lane_id) {
+    /* Defined in the lane section below (beside sn_lane_save/restore); the
+       forward declaration mirrors sn_lane_ensure's at the nursery section. */
+    void *sn_lane_alloc(int64_t lane_id, int64_t bytes);
+    List *l = (List *)sn_lane_alloc(lane_id, (int64_t)sizeof(List));
+    l->rc = 1;
+    l->kind = KIND_LIST;
+    l->elem_kind = elem_kind;
+    l->len = 0;
+    l->items = list_alloc_backing(4);
+    l->cap = list_is_slab_backed(l) ? 65536 : 4;
+    return l;
+}
+
 static void list_grow(List *l) {
     if (l->len < l->cap) return;
     int64_t old_cap = l->cap;
