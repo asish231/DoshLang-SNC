@@ -90,7 +90,36 @@ region restore is bounded above by the `resetpair` row: 4 ns per save+restore ca
   counter only covers the `sn_alloc`/`ptr_alloc` path); the GC-side count is the honest
   one: `gc_objs=10,100,024`, `freed_total=0`, GC threshold pinned to 2×10⁹ during the loop.
 
-## 5 · What the numbers mean (against W2F's predicted ~10× / 2–4× / ~50×)
+## 5 · Addendum: Impl-A's inline bump (commit `d292ce8`) — the before/after, measured with this harness
+
+Impl-A's D0 gap #2/#3 change landed on this branch mid-run. Rebuilding `snc`
+and re-running the identical lane bench (same protocol, median of 5) isolates
+the opaque-call → inline-bump transition inside SNlang itself. The inline fast
+path applies to **lane 0 + constant size + not lexically frozen + -O1+**
+(ir.rs:3399-3415: load top / GEP / limit+frozen guard / store — overflow,
+uninitialized and frozen route to the checked runtime call); dynamic sizes keep
+the runtime call.
+
+| Shape (ns/op) | opaque call (pre-`d292ce8`) | inline (`d292ce8`) | Δ |
+|---|---:|---:|---|
+| amort16x alloc (constant 16 B) | 3 | **1** | 3× |
+| fresh16 (region construct + alloc, per iter) | 6 | **1** | 6× |
+| fresh4k (region construct + 4 KB alloc, per iter) | 6 | **1** | 6× |
+| freshlcg (**dynamic** sizes — alloc stays on the call, region pair inlined) | 7 | 4 | 1.75× |
+| resetpair (explicit `lane_save`/`lane_restore` intrinsics) | 4 | 4 | — still calls |
+| lane_used / lcg_state_final | 160,000,000 / 214255033 | identical | protocol ✓ |
+
+**A control the inline path breaks, measured:** with the inline fast path,
+`SN_POISON=1` no longer touches constant-size allocations (fresh4k: 2 ns
+with and without poison — the fast path never enters the runtime, so the
+FIBR 0xAA-fill guarantee silently disappears for exactly the allocations
+that are now fastest). Dynamic sizes still pay it (freshlcg: 4 → 14 ns).
+The inline rows in §2 (Rust bumpalo) predicted 1 ns for this path — measured
+SNlang inline: 1 ns. W2F's "~50×" region-cached figure is the *amortized
+fresh16* row: 6 → 1 ns is the measured construct cost, and the remaining gap
+to sub-ns is the TLS prefix, exactly as W2F's Darwin table predicted.
+
+## 6 · What the numbers mean (against W2F's predicted ~10× / 2–4× / ~50×)
 
 1. **W2F's Darwin-specific 2–4× is confirmed exactly.** SNlang's opaque-call lane
    amortized bump is 3 ns/op; Rust bumpalo's inlined bump is 1 ns/op → 3×. W2F predicted
@@ -99,7 +128,8 @@ region restore is bounded above by the `resetpair` row: 4 ns per save+restore ca
 2. **The ~10× figure is the *heap→inline* distance, not the opaque-vs-inline one.**
    SNlang `new` (heap, 14 ns) vs Rust-inlined bump (1 ns) = **14×** — matching W2F's
    "current ~10–16 ns → 3-instr ≈ 1.1–1.4 ns (~10×)". On macOS it arrives in two stages:
-   heap → opaque lane = 4.7× (shipped today), opaque → inline = 3× (Impl-A's gap #2).
+   heap → opaque lane = 4.7× (shipped today), opaque → inline = 3× amortized / 6× per
+   region construct (now measured directly in SNlang, §5).
 3. **The ~50× region-cached claim is structurally plausible but not directly measured
    here** — it needs the IR-level inline (D0 gap #2/#3). Its direction is visible: Rust's
    inlined `alloc+reset` per iteration (fresh16 = 0 ns/op measured, sub-clock) vs

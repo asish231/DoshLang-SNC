@@ -59,3 +59,4 @@ bench/results/go_escape_bench
 bench/results/cg_*.out
 bench/rust_bumpalo_bench/target/
 bench/rust_bumpalo_bench/Cargo.lock
+bench/results/sn_lane_bench_inline
