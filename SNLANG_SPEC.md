@@ -363,6 +363,15 @@ SNlang includes zero-overhead native allocators for high-throughput systems prog
    - Scope-bound `region { }` automatically captures the lane watermark on entry and rewinds it on exit, delivering instant O(1) bulk deallocation.
    - **Scope Unwind Guarantee:** Early returns (`return`) or errors (`try`) inside a `region { }` automatically restore the lane watermark, ensuring zero memory leaks on early exit paths.
    - `frozen { }` blocks lock lanes into read-only mode to prevent accidental allocation or mutation.
+   - **Inline lowering** (`-O1+`): constant-size lane allocations compile to a 3-instruction bump (load top, bump, store) with a guard branch routing to the loud runtime path; region exit is a 1-store watermark restore.
+   - **T-FIBR poison-fill** (`--poison` / `-O0` / debug builds): lane bytes are filled with `0xAA` on allocation and re-poisoned on rewind — the read-before-write guard (E0807), unconditional across all codegen paths. Release builds emit zero extra instructions.
+   - **Task nursery lanes:** spawned tasks loan lanes from their thread's pool (`SnLane.parent`); at `nursery` join, each loaned lane resets to base in one store — the child's entire allocation reclaimed O(1).
+3. **Tier-G Z-Set Delta Collections (`std.delta` / `ZSet`):**
+   - `ZSet` = a group-valued multiset: each key carries a ℤ coefficient (the direct sum ℤ[X]).
+   - **Exact retraction:** `remove(k, n)` = `add(k, -n)` — O(1)/key, no scans.
+   - **Pure delta operators:** `delta(a, b)` computes a−b as a Z-set (change-size support); `apply(a, b)` computes a+b. These are the DBSP 𝒟/⊕ primitives.
+   - `merge`, `count`, `total`, `len`, `keys`, `copy` — all O(1) amortized via the O(1) hash map.
+   - Zero coefficients leave the support in the canonical form (configurable).
    - See `tests/systems/` for executable test suites.
 
 ### Why This Is Easier Than C

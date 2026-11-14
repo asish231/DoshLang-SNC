@@ -73,14 +73,15 @@ More: [docs/LANGUAGE.md](docs/LANGUAGE.md) · full reference [SNLANG_SPEC.md](SN
 | Area | Highlights |
 |---|---|
 | Types | `int`, `bool`, `str`, `list<T>`, `map<K,V>`, `T?`, `error`, `chan`, `ref`, `mut`, `lock`, `json`, `any`, `record`, fn types |
-| Safety | Compile-time Rust-grade guarantees: stack escape checks, collection borrow locks, affine UAF/double-free prevention, thread-race checks |
+| Safety | Compile-time Rust-grade guarantees: stack escape checks, collection borrow locks, affine UAF/double-free prevention, thread-race checks; **region poset** (RgnId provenance, `scc_accum_params` fixpoint — E0802 fires on recursive inout-accumulator hazards); **Elastic Lanes** (O(1) bump + scope-exit reset, inline at `-O1+`, T-FIBR poison-fill in debug) |
 | Speed | LLVM method devirtualization (1B calls/sec), native `StringBuilder` (~150× faster strings), ARC borrow elision |
 | Null | `otherwise`, `x!!`, `x?.m()`, smart unwrap after `if (x != none)` |
 | Errors | `(T, error)`, `try`, `panic` — not Java exceptions |
 | OOP | `blueprint`, inheritance, `closed`/`guarded`, MVP polymorphism + generics |
 | Concurrency | Work-stealing green tasks (`spawn`), structured concurrency (`nursery`), move-on-send channels (`chan<T>`), locks |
 | Modules | `use std.math`, `use mylib.calc` |
-| Tooling | `snc fmt`, `snc lsp`, `snc debug`, `snc translate`, `snc pkg` |
+| Tooling | `snc fmt`, `snc lsp`, `snc debug`, `snc translate`, `snc pkg`, `snc --poison` |
+| Memory | **Elastic Lanes** (virtual-memory bump allocators, O(1) scope-exit reset); `SnLane.parent` (task nurseries loan lanes, reclaimed O(1) at join); inline 3-instruction bump + 1-store reset at `-O1+`; compile-time poison-fill (`--poison` / `-O0` / debug builds — the T-FIBR read-before-write guard); linear `SnMsgEnvelope` cross-thread slabs (exactly-once adopt, panic-safe drain) |
 
 ## Stdlib
 
@@ -94,6 +95,7 @@ More: [docs/LANGUAGE.md](docs/LANGUAGE.md) · full reference [SNLANG_SPEC.md](SN
 | `std.http` / `std.net` | HTTP client + `serve_once`; **HTTPS via verified `curl`** |
 | `std.file` / `std.path` / `std.os` | files, paths, env/args |
 | `std.pool` | Generational slot vaults with 64-bit handles (ABA / UAF immune) |
+| `std.delta` | **Tier-G Z-set delta collections** — `ZSet` with exact retraction (add/remove as ±ℤ coefficients), pure `delta`/`apply` operators (the DBSP 𝒟/⊕ primitives), `merge`, `count`, `total`; O(1)/key operations over the O(1) hash map |
 | `std.arena` | Elastic lane bump allocators with instant O(1) bulk rollback |
 | `std.test` | `assert_true`, `assert_eq_int`, `assert_eq_str`, … |
 
