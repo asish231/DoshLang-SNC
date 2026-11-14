@@ -1,0 +1,6 @@
+rss sn_lane_bench 236256
+rss sn_heap_bench 574032
+rss c_malloc_bench 393760
+rss rust_bumpalo_bench 265696
+rss go_escape_bench 1026896
+rss sn_lane_bench_poison 236240

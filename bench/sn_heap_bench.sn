@@ -1,0 +1,105 @@
+// SNlang malloc-heap twin — SWARM RABBIT HOLE, Impl-C (Cohort Delta, Wave 5).
+// The `new` blueprint path (@sn_alloc + record copy + GC tracking) at N ops:
+// the compiler's own before/after story against the lane path (D0 §7 #2).
+//
+// Row: heap16 — N heap records, checksum via ptr_int, scratch pointer store
+// per op, read pass over word 0 of each record's payload.
+//
+// Protocol parity with the twins: same N, same checksum work, same scratch
+// store, one 8-byte payload load per record in the read pass, no payload
+// stores (the blueprint ctor's own zero-init is `new`'s inherent cost).
+// Empirical layout of a 2-int blueprint object (probed on this toolchain):
+//   kind@0, type id@8, method table ptr@16, field a@24, field b@32
+// so the read pass loads offset 24. Block size includes the header; the C
+// twin's malloc(16) payload is 16 B — the header is SNlang's real per-object
+// cost and is reported, not hidden.
+//
+// GC control: gc_set_threshold(2_000_000_000) disables threshold collections
+// for the loop — this row prices the allocation path (sn_alloc + tracking +
+// ctor), not GC policy, exactly like the C twin whose malloc has no
+// collector. alloc_live_count/gc_count/alloc_freed_count deltas are printed
+// so the run documents what the runtime actually did with the 10M objects.
+// reset: SNlang heap has no wholesale free (GC-managed) — reset_ns=0 means
+// "no mechanism", the asymmetry vs the lane's O(1) restore is the point.
+
+use std.os
+
+fn heap_run(int n, ptr scratch, bool emit) {
+    int live0 = alloc_live_count()
+    int t0 = time_now_ms()
+    int acc = 0
+    int i = 0
+    while (i < n) {
+        new Node cur()
+        acc = acc + ptr_int(cur)
+        ptr_store(scratch, i * 8, ptr_int(cur))
+        i = i + 1
+    }
+    int t1 = time_now_ms()
+    int sum = 0
+    int j = 0
+    while (j < n) {
+        ptr q = int_ptr(ptr_load(scratch, j * 8))
+        sum = sum + ptr_load(q, 24)
+        j = j + 1
+    }
+    int t2 = time_now_ms()
+    if (emit) {
+        print("BENCH row=heap16 alloc_ns=" + cast((t1 - t0) * 1000000 / n, str)
+            + " read_ns=" + cast((t2 - t1) * 1000000 / n, str)
+            + " reset_ns=0 ops=" + cast(n, str)
+            + " checksum=" + cast(acc + sum, str))
+        print("heap_live_delta=" + cast(alloc_live_count() - live0, str)
+            + " gc_objs=" + cast(gc_count(), str)
+            + " freed_total=" + cast(alloc_freed_count(), str))
+    }
+}
+
+fn main() {
+    int n = 10000000
+    list<str> a = args()
+    if (a.length() > 1) {
+        int v = cast(a[1], int)
+        if (v > 0) {
+            n = v
+        }
+    }
+
+    gc_set_threshold(2000000000)
+    ptr scratch = ptr_alloc(8 * n)
+
+    // warmup N/100 (untimed; also proves the shape before the big run)
+    heap_run(n / 100, scratch, false)
+
+    // timer overhead: 100_000 time_now_ms() call pairs
+    int t0 = time_now_ms()
+    int kt = 0
+    int acct = 0
+    while (kt < 100000) {
+        acct = acct + time_now_ms()
+        kt = kt + 1
+    }
+    int t1 = time_now_ms()
+    print("BENCH row=timer alloc_ns=" + cast((t1 - t0) * 1000000 / 100000, str)
+        + " read_ns=0 reset_ns=0 ops=100000 checksum=" + cast(acct, str))
+
+    // empty loop tax
+    int t2 = time_now_ms()
+    int i0 = 0
+    int acc0 = 0
+    while (i0 < n) {
+        acc0 = acc0 + 1
+        i0 = i0 + 1
+    }
+    int t3 = time_now_ms()
+    print("BENCH row=emptyloop alloc_ns=" + cast((t3 - t2) * 1000000 / n, str)
+        + " read_ns=0 reset_ns=0 ops=" + cast(n, str) + " checksum=" + cast(acc0, str))
+
+    heap_run(n, scratch, true)
+    print("SN_HEAP_BENCH_DONE")
+}
+
+blueprint Node {
+    int a = 0
+    int b = 0
+}

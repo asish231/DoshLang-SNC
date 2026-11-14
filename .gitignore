@@ -47,3 +47,15 @@ sandbox_*
 
 # Keys & certificates
 *.pem
+
+# SWARM RABBIT HOLE Wave-5 bench: build products stay out of git, raw
+# measurement logs (.txt) and the go escape-analysis log are committed as
+# evidence alongside bench/RESULTS.md.
+bench/results/sn_lane_bench
+bench/results/sn_heap_bench
+bench/results/c_malloc_bench
+bench/results/rust_bumpalo_bench
+bench/results/go_escape_bench
+bench/results/cg_*.out
+bench/rust_bumpalo_bench/target/
+bench/rust_bumpalo_bench/Cargo.lock

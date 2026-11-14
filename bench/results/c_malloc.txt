@@ -1,0 +1,65 @@
+BENCH row=timer alloc_ns=17 read_ns=0 reset_ns=0 ops=1000000 checksum=-7002914809846643088
+BENCH row=emptyloop alloc_ns=0 read_ns=0 reset_ns=0 ops=10000000 checksum=10000000
+BENCH row=amort16 alloc_ns=7 read_ns=0 reset_ns=5 ops=10000000 checksum=5097879325872317312
+BENCH row=amort16z alloc_ns=7 read_ns=0 reset_ns=6 ops=10000000 checksum=5099516154773960272
+BENCH row=fresh16 alloc_ns=13 read_ns=0 reset_ns=0 ops=10000000 checksum=5097090909355524096
+BENCH row=fresh16z alloc_ns=13 read_ns=0 reset_ns=0 ops=10000000 checksum=5097026548667144192
+BENCH row=fresh4k alloc_ns=13 read_ns=0 reset_ns=0 ops=10000000 checksum=5100404721820068160
+BENCH row=freshlcg alloc_ns=23 read_ns=0 reset_ns=0 ops=10000000 checksum=5099177104919328704
+lcg_state_final=214255033
+rss_kb=403243008
+malloc_good_size_16=16
+malloc_good_size_4096=4096
+C_BENCH_DONE
+BENCH row=timer alloc_ns=17 read_ns=0 reset_ns=0 ops=1000000 checksum=-7001955318090838088
+BENCH row=emptyloop alloc_ns=0 read_ns=0 reset_ns=0 ops=10000000 checksum=10000000
+BENCH row=amort16 alloc_ns=7 read_ns=0 reset_ns=5 ops=10000000 checksum=5046225701306658304
+BENCH row=amort16z alloc_ns=7 read_ns=0 reset_ns=5 ops=10000000 checksum=5044597934183493360
+BENCH row=fresh16 alloc_ns=13 read_ns=0 reset_ns=0 ops=10000000 checksum=5045460172746096640
+BENCH row=fresh16z alloc_ns=13 read_ns=0 reset_ns=0 ops=10000000 checksum=5047027675626134000
+BENCH row=fresh4k alloc_ns=13 read_ns=0 reset_ns=0 ops=10000000 checksum=5043830620160000000
+BENCH row=freshlcg alloc_ns=23 read_ns=0 reset_ns=0 ops=10000000 checksum=5045942161875562000
+lcg_state_final=214255033
+rss_kb=403226624
+malloc_good_size_16=16
+malloc_good_size_4096=4096
+C_BENCH_DONE
+BENCH row=timer alloc_ns=17 read_ns=0 reset_ns=0 ops=1000000 checksum=-7001016096769750088
+BENCH row=emptyloop alloc_ns=0 read_ns=0 reset_ns=0 ops=10000000 checksum=10000000
+BENCH row=amort16 alloc_ns=7 read_ns=0 reset_ns=5 ops=10000000 checksum=5236764627970154736
+BENCH row=amort16z alloc_ns=7 read_ns=0 reset_ns=5 ops=10000000 checksum=5235118190071604496
+BENCH row=fresh16 alloc_ns=14 read_ns=0 reset_ns=0 ops=10000000 checksum=5237642360739250176
+BENCH row=fresh16z alloc_ns=14 read_ns=0 reset_ns=0 ops=10000000 checksum=5237576559323349840
+BENCH row=fresh4k alloc_ns=13 read_ns=0 reset_ns=0 ops=10000000 checksum=5234329681920000000
+BENCH row=freshlcg alloc_ns=23 read_ns=0 reset_ns=0 ops=10000000 checksum=5235297712204475424
+lcg_state_final=214255033
+rss_kb=403275776
+malloc_good_size_16=16
+malloc_good_size_4096=4096
+C_BENCH_DONE
+BENCH row=timer alloc_ns=17 read_ns=0 reset_ns=0 ops=1000000 checksum=-7000060806246423088
+BENCH row=emptyloop alloc_ns=0 read_ns=0 reset_ns=0 ops=10000000 checksum=10000000
+BENCH row=amort16 alloc_ns=7 read_ns=0 reset_ns=5 ops=10000000 checksum=5098538259356917056
+BENCH row=amort16z alloc_ns=7 read_ns=0 reset_ns=8 ops=10000000 checksum=5096930975712410672
+BENCH row=fresh16 alloc_ns=15 read_ns=0 reset_ns=0 ops=10000000 checksum=5097762647803756544
+BENCH row=fresh16z alloc_ns=13 read_ns=0 reset_ns=0 ops=10000000 checksum=5099371934771862000
+BENCH row=fresh4k alloc_ns=13 read_ns=0 reset_ns=0 ops=10000000 checksum=5096174387200000000
+BENCH row=freshlcg alloc_ns=23 read_ns=0 reset_ns=0 ops=10000000 checksum=5098285360678383120
+lcg_state_final=214255033
+rss_kb=403226624
+malloc_good_size_16=16
+malloc_good_size_4096=4096
+C_BENCH_DONE
+BENCH row=timer alloc_ns=17 read_ns=0 reset_ns=0 ops=1000000 checksum=-6999064694307940088
+BENCH row=emptyloop alloc_ns=0 read_ns=0 reset_ns=0 ops=10000000 checksum=10000000
+BENCH row=amort16 alloc_ns=7 read_ns=0 reset_ns=5 ops=10000000 checksum=5044828759817762544
+BENCH row=amort16z alloc_ns=7 read_ns=0 reset_ns=6 ops=10000000 checksum=5043205698501322000
+BENCH row=fresh16 alloc_ns=13 read_ns=0 reset_ns=0 ops=10000000 checksum=5045711994299432960
+BENCH row=fresh16z alloc_ns=13 read_ns=0 reset_ns=0 ops=10000000 checksum=5045648625568056144
+BENCH row=fresh4k alloc_ns=13 read_ns=0 reset_ns=0 ops=10000000 checksum=5045711822298949952
+BENCH row=freshlcg alloc_ns=24 read_ns=0 reset_ns=0 ops=10000000 checksum=5043399841311812640
+lcg_state_final=214255033
+rss_kb=403243008
+malloc_good_size_16=16
+malloc_good_size_4096=4096
+C_BENCH_DONE

@@ -1,0 +1,146 @@
+#!/bin/bash
+# run_bench.sh — SWARM RABBIT HOLE, Wave-5 benchmark driver (Impl-C, Cohort Delta).
+#
+# Builds all five programs and runs each with N (default 10,000,000) after a
+# small-N warmup run, reporting ns/op and peak RSS. See bench/RESULTS.md for
+# what each row means and what is held fixed.
+#
+#   ./run_bench.sh              # full run, N=10,000,000, 5 timed runs, median
+#   N=1000000 RUNS=3 ./run_bench.sh
+#
+# Controls implemented (D0 §7 pitfalls, wave-5 brief):
+#   (a) memset asymmetry   — the SNlang lane rows run TWICE: raw (release
+#                            build, post-DIFF-6 O(1) bump) and with
+#                            SN_POISON=1 (0xAA-fill every allocation AND
+#                            re-poison on rewind — the pre-DIFF-6 write-
+#                            every-byte shape). C: malloc vs calloc; Rust:
+#                            alloc_layout vs alloc-with-zero-value; Go: every
+#                            heap row is inherently zeroed (mallocgc zeroes).
+#   (b) predictable branch  — freshlcg rows: sizes 16..63 from a fixed LCG
+#                            (state=(state*1103515245+12345) mod 2^31, seed
+#                            12345, draw before advance). lcg_state_final is
+#                            printed by every program and MUST match.
+#   (c) timer resolution    — every program reports its own clock-pair
+#                            overhead (timer row) and the raw per-op
+#                            arithmetic (elapsed*1e6/ops). SNlang's only
+#                            clock is ms-resolution time_now_ms; its phases
+#                            are sized >=100x that, and the C/Rust/Go twins
+#                            carry the same-size phases on ns clocks.
+#   (d) held fixed          — N, 16-byte records, the LCG sequence, checksum
+#                            work (pointer sums), one scratch store per op in
+#                            alloc phases, one 8-byte load per record in read
+#                            passes, no payload stores in raw rows,
+#                            single-threaded, same machine, median of RUNS
+#                            timed runs after one warmup run.
+#
+# Cachegrind: valgrind has no darwin/arm64 support (the formula refuses to
+# build: "Linux is required"); D1-miss rows are therefore NOT reported on this
+# machine and the script does not block on it. On Linux the script runs
+# `valgrind --tool=cachegrind` for the C and Rust binaries automatically.
+
+set -u
+cd "$(dirname "$0")"
+
+N="${N:-10000000}"
+WARMUP_N=$((N / 10))
+RUNS="${RUNS:-5}"
+ROOT="$(cd .. && pwd)"
+SNC="$ROOT/snc"
+OUT="$(pwd)/results"
+mkdir -p "$OUT"
+
+CLANG="${CLANG:-clang}"
+CFLAGS="-O2"
+
+echo "== SWARM RABBIT HOLE Wave-5 allocation benchmark =="
+echo "machine: $(uname -sm) · $(sysctl -n machdep.cpu.brand_string 2>/dev/null)"
+echo "clang: $($CLANG --version | head -1)"
+echo "N=$N RUNS=$RUNS warmup_N=$WARMUP_N"
+echo
+
+# ---------- build ----------
+echo "-- building"
+if [ ! -x "$SNC" ]; then (cd "$ROOT" && make snc) || exit 1; fi
+
+"$SNC" sn_lane_bench.sn -o "$OUT/sn_lane_bench" || exit 1
+"$SNC" sn_heap_bench.sn   -o "$OUT/sn_heap_bench"   || exit 1
+
+$CLANG $CFLAGS -Wall -o "$OUT/c_malloc_bench" c_malloc_bench.c || exit 1
+
+(cd rust_bumpalo_bench && cargo build --release --offline >/dev/null 2>&1) || \
+  (cd rust_bumpalo_bench && cargo build --release) || exit 1
+cp rust_bumpalo_bench/target/release/rust_bumpalo_bench "$OUT/" || exit 1
+
+mkdir -p go_escape_bench
+cp go_escape_bench.go go_escape_bench/main.go
+(cd go_escape_bench && go build -gcflags=-m -o "$OUT/go_escape_bench" . 2>"$OUT/go_escape.log") || exit 1
+echo "go escape analysis log: $OUT/go_escape.log"
+echo
+
+# ---------- helpers ----------
+# time -l gives peak RSS on macOS (bytes); fall back to getrusage inside C.
+peak_rss_kb() {
+    /usr/bin/time -l "$@" 2>&1 >/dev/null | awk '/maximum resident set size/ {print $1/1024; exit}' | cut -d. -f1
+}
+
+# median of the nth whitespace field matching row=NAME
+median_row() {
+    local file="$1" row="$2" field="$3"
+    grep "row=$row " "$file" | awk -v f="$field" '{for(i=1;i<=NF;i++) if($i ~ "^"f"=") {split($i,a,"="); print a[2]}}' \
+        | sort -n | awk '{a[NR]=$1} END {if (NR%2) print a[(NR+1)/2]; else print (a[NR/2]+a[NR/2+1])/2}'
+}
+
+run_ns() {  # run_ns binary n [env...]  (kept for ad-hoc single-row runs)
+    local bin="$1" n="$2"; shift 2
+    for r in $(seq "$RUNS"); do
+        env "$@" "$bin" "$n" 2>/dev/null
+    done
+}
+
+# ---------- run + collect ----------
+collect() {  # collect NAME -- cmd...
+    local name="$1"; shift; shift
+    local f="$OUT/$name.txt"
+    : > "$f"
+    echo "-- warmup $name (N=$WARMUP_N)" >&2
+    "$@" "$WARMUP_N" >/dev/null 2>&1
+    echo "-- timed $name x$RUNS (N=$N)" >&2
+    for r in $(seq "$RUNS"); do
+        "$@" "$N" >> "$f" 2>/dev/null
+    done
+}
+
+collect sn_lane_raw        -- "$OUT/sn_lane_bench"
+collect sn_lane_poison     -- env SN_POISON=1 "$OUT/sn_lane_bench"
+collect sn_heap            -- "$OUT/sn_heap_bench"
+collect c_malloc           -- "$OUT/c_malloc_bench"
+collect rust_bumpalo       -- "$OUT/rust_bumpalo_bench"
+collect go_escape          -- "$OUT/go_escape_bench"
+
+# per-run peak RSS (one run each; RSS is stable)
+echo "-- peak RSS (KB)"
+for b in sn_lane_bench sn_heap_bench c_malloc_bench rust_bumpalo_bench go_escape_bench; do
+    kb=$(peak_rss_kb "$OUT/$b" "$N")
+    echo "rss $b $kb" >> "$OUT/rss.txt"
+    echo "  $b: $kb KB"
+done
+# poisoned-lane RSS (write pattern identical -> same touched pages)
+kb=$(SN_POISON=1 /usr/bin/time -l "$OUT/sn_lane_bench" "$N" 2>&1 >/dev/null | awk '/maximum resident set size/ {print $1/1024; exit}' | cut -d. -f1)
+echo "rss sn_lane_bench_poison $kb" >> "$OUT/rss.txt"
+echo "  sn_lane_bench (SN_POISON=1): $kb KB"
+
+# ---------- cachegrind (Linux only) ----------
+if command -v valgrind >/dev/null 2>&1; then
+    if valgrind --tool=cachegrind --version >/dev/null 2>&1; then
+        echo "-- cachegrind (deterministic D1 misses; small N)"
+        for b in c_malloc_bench rust_bumpalo_bench sn_lane_bench; do
+            valgrind --tool=cachegrind --cachegrind-out-file="$OUT/cg_$b.out" "$OUT/$b" 1000000 >/dev/null 2>&1 \
+                && cg_annotate "$OUT/cg_$b.out" 2>/dev/null | grep -E "D1 +misses|LL +misses" | head -2 >> "$OUT/cachegrind.txt"
+        done
+    fi
+else
+    echo "-- cachegrind SKIPPED: no valgrind on this machine (Apple Silicon macOS: the brew formula requires Linux; see RESULTS.md)"
+fi
+
+echo
+echo "== done. raw runs in $OUT/*.txt ; see RESULTS.md =="

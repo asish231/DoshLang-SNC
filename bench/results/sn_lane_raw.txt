@@ -1,0 +1,55 @@
+BENCH row=timer alloc_ns=10 read_ns=0 reset_ns=0 ops=100000 checksum=179468895888274332
+BENCH row=resetpair alloc_ns=5 read_ns=0 reset_ns=0 ops=1000000 checksum=0
+BENCH row=emptyloop alloc_ns=0 read_ns=0 reset_ns=0 ops=10000000 checksum=10000000
+BENCH row=amort16 alloc_ns=6 read_ns=0 reset_ns=0 ops=10000000 checksum=49349232560000000
+lane_used_bytes=160000000
+BENCH row=amort16x alloc_ns=3 read_ns=1 reset_ns=0 ops=10000000 checksum=49349232560000000
+BENCH row=fresh16 alloc_ns=6 read_ns=0 reset_ns=0 ops=10000000 checksum=48549232640000000
+BENCH row=fresh4k alloc_ns=6 read_ns=0 reset_ns=0 ops=10000000 checksum=48549232640000000
+BENCH row=freshlcg alloc_ns=7 read_ns=0 reset_ns=0 ops=10000000 checksum=48549232640000000
+lcg_state_final=214255033
+SN_LANE_BENCH_DONE
+BENCH row=timer alloc_ns=10 read_ns=0 reset_ns=0 ops=100000 checksum=179468895922276485
+BENCH row=resetpair alloc_ns=5 read_ns=0 reset_ns=0 ops=1000000 checksum=0
+BENCH row=emptyloop alloc_ns=0 read_ns=0 reset_ns=0 ops=10000000 checksum=10000000
+BENCH row=amort16 alloc_ns=6 read_ns=0 reset_ns=0 ops=10000000 checksum=49265346480000000
+lane_used_bytes=160000000
+BENCH row=amort16x alloc_ns=3 read_ns=1 reset_ns=0 ops=10000000 checksum=49265346480000000
+BENCH row=fresh16 alloc_ns=6 read_ns=0 reset_ns=0 ops=10000000 checksum=48465346560000000
+BENCH row=fresh4k alloc_ns=6 read_ns=0 reset_ns=0 ops=10000000 checksum=48465346560000000
+BENCH row=freshlcg alloc_ns=7 read_ns=0 reset_ns=0 ops=10000000 checksum=48465346560000000
+lcg_state_final=214255033
+SN_LANE_BENCH_DONE
+BENCH row=timer alloc_ns=10 read_ns=0 reset_ns=0 ops=100000 checksum=179468895955138696
+BENCH row=resetpair alloc_ns=4 read_ns=0 reset_ns=0 ops=1000000 checksum=0
+BENCH row=emptyloop alloc_ns=0 read_ns=0 reset_ns=0 ops=10000000 checksum=10000000
+BENCH row=amort16 alloc_ns=6 read_ns=0 reset_ns=0 ops=10000000 checksum=47904327600000000
+lane_used_bytes=160000000
+BENCH row=amort16x alloc_ns=3 read_ns=1 reset_ns=0 ops=10000000 checksum=47904327600000000
+BENCH row=fresh16 alloc_ns=6 read_ns=0 reset_ns=0 ops=10000000 checksum=47104327680000000
+BENCH row=fresh4k alloc_ns=6 read_ns=0 reset_ns=0 ops=10000000 checksum=47104327680000000
+BENCH row=freshlcg alloc_ns=7 read_ns=0 reset_ns=0 ops=10000000 checksum=47104327680000000
+lcg_state_final=214255033
+SN_LANE_BENCH_DONE
+BENCH row=timer alloc_ns=10 read_ns=0 reset_ns=0 ops=100000 checksum=179468895988935240
+BENCH row=resetpair alloc_ns=4 read_ns=0 reset_ns=0 ops=1000000 checksum=0
+BENCH row=emptyloop alloc_ns=0 read_ns=0 reset_ns=0 ops=10000000 checksum=10000000
+BENCH row=amort16 alloc_ns=6 read_ns=0 reset_ns=0 ops=10000000 checksum=47932508080000000
+lane_used_bytes=160000000
+BENCH row=amort16x alloc_ns=3 read_ns=1 reset_ns=0 ops=10000000 checksum=47932508080000000
+BENCH row=fresh16 alloc_ns=6 read_ns=0 reset_ns=0 ops=10000000 checksum=47132508160000000
+BENCH row=fresh4k alloc_ns=6 read_ns=0 reset_ns=0 ops=10000000 checksum=47132508160000000
+BENCH row=freshlcg alloc_ns=7 read_ns=0 reset_ns=0 ops=10000000 checksum=47132508160000000
+lcg_state_final=214255033
+SN_LANE_BENCH_DONE
+BENCH row=timer alloc_ns=10 read_ns=0 reset_ns=0 ops=100000 checksum=179468896022635425
+BENCH row=resetpair alloc_ns=4 read_ns=0 reset_ns=0 ops=1000000 checksum=0
+BENCH row=emptyloop alloc_ns=0 read_ns=0 reset_ns=0 ops=10000000 checksum=10000000
+BENCH row=amort16 alloc_ns=6 read_ns=0 reset_ns=0 ops=10000000 checksum=47218984880000000
+lane_used_bytes=160000000
+BENCH row=amort16x alloc_ns=3 read_ns=1 reset_ns=0 ops=10000000 checksum=47218984880000000
+BENCH row=fresh16 alloc_ns=6 read_ns=0 reset_ns=0 ops=10000000 checksum=46418984960000000
+BENCH row=fresh4k alloc_ns=6 read_ns=0 reset_ns=0 ops=10000000 checksum=46418984960000000
+BENCH row=freshlcg alloc_ns=7 read_ns=0 reset_ns=0 ops=10000000 checksum=46418984960000000
+lcg_state_final=214255033
+SN_LANE_BENCH_DONE

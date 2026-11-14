@@ -1,0 +1,60 @@
+BENCH row=timer alloc_ns=38 read_ns=0 reset_ns=0 ops=1000000 checksum=5274449563245236360
+BENCH row=emptyloop alloc_ns=0 read_ns=0 reset_ns=0 ops=10000000 checksum=10000000
+BENCH row=heap16 alloc_ns=10 read_ns=2 reset_ns=0 ops=10000000 checksum=7067181849232641088
+BENCH row=fresh16 alloc_ns=7 read_ns=0 reset_ns=0 ops=10000000 checksum=7068757246227874816
+BENCH row=stack16 alloc_ns=0 read_ns=0 reset_ns=0 ops=10000000 checksum=99999990000000
+BENCH row=fresh4k alloc_ns=113 read_ns=0 reset_ns=0 ops=10000000 checksum=7274369926180896768
+BENCH row=freshlcg alloc_ns=11 read_ns=0 reset_ns=0 ops=10000000 checksum=7481454138009104064
+lcg_state_final=214255033
+BENCH row=gc_reset alloc_ns=0 read_ns=0 reset_ns=625291 ops=10000000 checksum=1
+heap_live_after_gc_mb=0 heap_objects=141
+total_alloc_mb=39881 sys_mb=40947
+GO_BENCH_DONE
+BENCH row=timer alloc_ns=29 read_ns=0 reset_ns=0 ops=1000000 checksum=5276743692676314360
+BENCH row=emptyloop alloc_ns=0 read_ns=0 reset_ns=0 ops=10000000 checksum=10000000
+BENCH row=heap16 alloc_ns=8 read_ns=0 reset_ns=0 ops=10000000 checksum=-6140570600843146176
+BENCH row=fresh16 alloc_ns=7 read_ns=0 reset_ns=0 ops=10000000 checksum=-6138995203847912448
+BENCH row=stack16 alloc_ns=0 read_ns=0 reset_ns=0 ops=10000000 checksum=99999990000000
+BENCH row=fresh4k alloc_ns=109 read_ns=0 reset_ns=0 ops=10000000 checksum=-5933382523894890496
+BENCH row=freshlcg alloc_ns=10 read_ns=0 reset_ns=0 ops=10000000 checksum=-5726317587385969720
+lcg_state_final=214255033
+BENCH row=gc_reset alloc_ns=0 read_ns=0 reset_ns=2693208 ops=10000000 checksum=1
+heap_live_after_gc_mb=0 heap_objects=141
+total_alloc_mb=39881 sys_mb=40946
+GO_BENCH_DONE
+BENCH row=timer alloc_ns=28 read_ns=0 reset_ns=0 ops=1000000 checksum=5278871492313931360
+BENCH row=emptyloop alloc_ns=0 read_ns=0 reset_ns=0 ops=10000000 checksum=10000000
+BENCH row=heap16 alloc_ns=8 read_ns=0 reset_ns=0 ops=10000000 checksum=-2755878196605252544
+BENCH row=fresh16 alloc_ns=7 read_ns=0 reset_ns=0 ops=10000000 checksum=-2754302799610018816
+BENCH row=stack16 alloc_ns=0 read_ns=0 reset_ns=0 ops=10000000 checksum=99999990000000
+BENCH row=fresh4k alloc_ns=109 read_ns=0 reset_ns=0 ops=10000000 checksum=-2548690119656996864
+BENCH row=freshlcg alloc_ns=10 read_ns=0 reset_ns=0 ops=10000000 checksum=-2341625182971350072
+lcg_state_final=214255033
+BENCH row=gc_reset alloc_ns=0 read_ns=0 reset_ns=1263250 ops=10000000 checksum=1
+heap_live_after_gc_mb=0 heap_objects=141
+total_alloc_mb=39881 sys_mb=40943
+GO_BENCH_DONE
+BENCH row=timer alloc_ns=28 read_ns=0 reset_ns=0 ops=1000000 checksum=5280984844033314360
+BENCH row=emptyloop alloc_ns=0 read_ns=0 reset_ns=0 ops=10000000 checksum=10000000
+BENCH row=heap16 alloc_ns=7 read_ns=0 reset_ns=0 ops=10000000 checksum=-160358025338975168
+BENCH row=fresh16 alloc_ns=7 read_ns=0 reset_ns=0 ops=10000000 checksum=-158782628343741440
+BENCH row=stack16 alloc_ns=0 read_ns=0 reset_ns=0 ops=10000000 checksum=99999990000000
+BENCH row=fresh4k alloc_ns=109 read_ns=0 reset_ns=0 ops=10000000 checksum=46830051609280512
+BENCH row=freshlcg alloc_ns=10 read_ns=0 reset_ns=0 ops=10000000 checksum=253914263437487808
+lcg_state_final=214255033
+BENCH row=gc_reset alloc_ns=0 read_ns=0 reset_ns=928708 ops=10000000 checksum=1
+heap_live_after_gc_mb=0 heap_objects=141
+total_alloc_mb=39881 sys_mb=40942
+GO_BENCH_DONE
+BENCH row=timer alloc_ns=28 read_ns=0 reset_ns=0 ops=1000000 checksum=5283068546299280360
+BENCH row=emptyloop alloc_ns=0 read_ns=0 reset_ns=0 ops=10000000 checksum=10000000
+BENCH row=heap16 alloc_ns=8 read_ns=0 reset_ns=0 ops=10000000 checksum=-8844371364876284864
+BENCH row=fresh16 alloc_ns=7 read_ns=0 reset_ns=0 ops=10000000 checksum=-8842795967881051136
+BENCH row=stack16 alloc_ns=0 read_ns=0 reset_ns=0 ops=10000000 checksum=99999990000000
+BENCH row=fresh4k alloc_ns=110 read_ns=0 reset_ns=0 ops=10000000 checksum=-8637183287928029184
+BENCH row=freshlcg alloc_ns=10 read_ns=0 reset_ns=0 ops=10000000 checksum=-8430099076099821888
+lcg_state_final=214255033
+BENCH row=gc_reset alloc_ns=0 read_ns=0 reset_ns=1340292 ops=10000000 checksum=1
+heap_live_after_gc_mb=0 heap_objects=141
+total_alloc_mb=39881 sys_mb=40943
+GO_BENCH_DONE

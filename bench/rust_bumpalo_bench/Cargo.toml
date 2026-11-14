@@ -1,0 +1,14 @@
+[package]
+name = "rust_bumpalo_bench"
+version = "0.1.0"
+edition = "2021"
+
+# Pinned to the exact cached version for reproducibility (offline build).
+[dependencies]
+bumpalo = "=3.20.3"
+
+# opt-level=2 for parity with the C twin's clang -O2 and snc's -O2; LTO off
+# (default) per D0 §7 (cross-language comparability).
+[profile.release]
+opt-level = 2
+lto = false

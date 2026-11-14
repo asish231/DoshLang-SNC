@@ -1,0 +1,25 @@
+BENCH row=timer alloc_ns=10 read_ns=0 reset_ns=0 ops=100000 checksum=179468896705438633
+BENCH row=emptyloop alloc_ns=0 read_ns=0 reset_ns=0 ops=10000000 checksum=10000000
+BENCH row=heap16 alloc_ns=19 read_ns=11 reset_ns=0 ops=10000000 checksum=5355350959053272128
+heap_live_delta=0 gc_objs=10100024 freed_total=0
+SN_HEAP_BENCH_DONE
+BENCH row=timer alloc_ns=10 read_ns=0 reset_ns=0 ops=100000 checksum=179468896739817666
+BENCH row=emptyloop alloc_ns=0 read_ns=0 reset_ns=0 ops=10000000 checksum=10000000
+BENCH row=heap16 alloc_ns=16 read_ns=4 reset_ns=0 ops=10000000 checksum=5280862313256890944
+heap_live_delta=0 gc_objs=10100024 freed_total=0
+SN_HEAP_BENCH_DONE
+BENCH row=timer alloc_ns=10 read_ns=0 reset_ns=0 ops=100000 checksum=179468896761833587
+BENCH row=emptyloop alloc_ns=0 read_ns=0 reset_ns=0 ops=10000000 checksum=10000000
+BENCH row=heap16 alloc_ns=14 read_ns=3 reset_ns=0 ops=10000000 checksum=5156681064767088736
+heap_live_delta=0 gc_objs=10100024 freed_total=0
+SN_HEAP_BENCH_DONE
+BENCH row=timer alloc_ns=10 read_ns=0 reset_ns=0 ops=100000 checksum=179468896781681844
+BENCH row=emptyloop alloc_ns=0 read_ns=0 reset_ns=0 ops=10000000 checksum=10000000
+BENCH row=heap16 alloc_ns=14 read_ns=3 reset_ns=0 ops=10000000 checksum=5296580039436786272
+heap_live_delta=0 gc_objs=10100024 freed_total=0
+SN_HEAP_BENCH_DONE
+BENCH row=timer alloc_ns=10 read_ns=0 reset_ns=0 ops=100000 checksum=179468896801071225
+BENCH row=emptyloop alloc_ns=0 read_ns=0 reset_ns=0 ops=10000000 checksum=10000000
+BENCH row=heap16 alloc_ns=14 read_ns=3 reset_ns=0 ops=10000000 checksum=5117734169987383200
+heap_live_delta=0 gc_objs=10100024 freed_total=0
+SN_HEAP_BENCH_DONE

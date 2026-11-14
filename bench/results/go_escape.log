@@ -1,0 +1,55 @@
+# go_escape_bench
+./main.go:43:6: can inline unsafePointer
+./main.go:45:6: can inline bytePointer
+./main.go:47:6: can inline loadWord
+./main.go:60:12: inlining call to fmt.Printf
+./main.go:74:20: inlining call to debug.SetGCPercent
+./main.go:89:23: inlining call to time.Time.UnixNano
+./main.go:91:33: inlining call to time.Duration.Nanoseconds
+./main.go:100:32: inlining call to time.Duration.Nanoseconds
+./main.go:109:29: inlining call to unsafePointer
+./main.go:116:25: inlining call to loadWord
+./main.go:120:29: inlining call to time.Duration.Nanoseconds
+./main.go:121:25: inlining call to time.Duration.Nanoseconds
+./main.go:130:38: inlining call to unsafePointer
+./main.go:133:42: inlining call to time.Duration.Nanoseconds
+./main.go:144:42: inlining call to time.Duration.Nanoseconds
+./main.go:152:36: inlining call to bytePointer
+./main.go:155:42: inlining call to time.Duration.Nanoseconds
+./main.go:165:36: inlining call to bytePointer
+./main.go:169:43: inlining call to time.Duration.Nanoseconds
+./main.go:170:12: inlining call to fmt.Printf
+./main.go:179:32: inlining call to time.Duration.Nanoseconds
+./main.go:182:12: inlining call to fmt.Printf
+./main.go:187:12: inlining call to fmt.Printf
+./main.go:188:13: inlining call to fmt.Println
+./main.go:89:23: inlining call to time.(*Time).unixSec
+./main.go:89:23: inlining call to time.(*Time).nsec
+./main.go:89:23: inlining call to time.(*Time).sec
+./main.go:43:20: leaking param: s to result ~r0 level=0
+./main.go:45:18: leaking param: b to result ~r0 level=0
+./main.go:59:13: leaking param: row
+./main.go:60:12: ... argument does not escape
+./main.go:61:3: row escapes to heap
+./main.go:61:8: allocNs escapes to heap
+./main.go:61:17: readNs escapes to heap
+./main.go:61:25: resetNs escapes to heap
+./main.go:61:34: ops escapes to heap
+./main.go:61:39: ck escapes to heap
+./main.go:76:17: make([]uintptr, n) does not escape
+./main.go:80:8: &S{} escapes to heap
+./main.go:107:8: &S{...} escapes to heap
+./main.go:128:8: &S{...} escapes to heap
+./main.go:140:8: &S{...} does not escape
+./main.go:150:11: new([4096]byte) escapes to heap
+./main.go:163:12: make([]byte, sz) escapes to heap
+./main.go:170:12: ... argument does not escape
+./main.go:170:37: st escapes to heap
+./main.go:182:12: ... argument does not escape
+./main.go:183:15: m1.HeapAlloc >> uint(20) escapes to heap
+./main.go:183:23: m1.HeapObjects escapes to heap
+./main.go:187:12: ... argument does not escape
+./main.go:187:58: m.TotalAlloc >> uint(20) escapes to heap
+./main.go:187:69: m.Sys >> uint(20) escapes to heap
+./main.go:188:13: ... argument does not escape
+./main.go:188:14: "GO_BENCH_DONE" escapes to heap
