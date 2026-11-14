@@ -1,0 +1,76 @@
+// SWARM RABBIT HOLE — Wave 9 (Impl-M): the Tier-L cell, LCELL_GSET
+// carrier — a grow-only int set; ⊔ = union. A join-semilattice BY
+// CONSTRUCTION: A∪A = A (idempotent), A∪B = B∪A (commutative),
+// (A∪B)∪C = A∪(B∪C) (associative) — the three laws the carrier is
+// structurally verified against (W2C §1.1's admission rule: carrier
+// verified idempotent+commutative+associative, checked structurally).
+//
+// Membership is O(1) (the SnZSet open-addressing scheme); the union
+// merge is O(|src|). inflate is idempotent — re-offering an element is
+// a no-op. NO ⊖: element removal does not exist on this surface
+// (lcell_retract is the checked E-LRET rejection).
+
+fn main() {
+    ptr a = lcell_new(1) // 1 = LCELL_GSET
+    lcell_inflate(a, 5, 0)
+    lcell_inflate(a, 9, 0)
+    lcell_inflate(a, 5, 0)     // idempotent insert: a no-op
+    print(lcell_len(a))        // 2
+    print(lcell_has(a, 5))     // true
+    print(lcell_has(a, 9))     // true
+    print(lcell_has(a, 12))    // false
+
+    // The union merge, order-independent end-to-end:
+    //   b ⊔ a  ==  a ⊔ b  (commutativity observable via readouts).
+    ptr b = lcell_new(1)
+    lcell_inflate(b, 5, 0)
+    lcell_inflate(b, 12, 0)
+
+    ptr ba = lcell_new(1)
+    lcell_merge(ba, b)         // ba = b
+    lcell_merge(ba, a)         // ba = b ⊔ a
+    print(lcell_len(ba))       // 3
+    print(lcell_has(ba, 5))    // true
+    print(lcell_has(ba, 9))    // true
+    print(lcell_has(ba, 12))   // true
+
+    ptr ab = lcell_new(1)
+    lcell_merge(ab, a)         // ab = a
+    lcell_merge(ab, b)         // ab = a ⊔ b — the other order
+    print(lcell_len(ab))       // 3 (same join)
+    print(lcell_has(ab, 12))   // true
+    print(lcell_len(ab) == lcell_len(ba))       // true
+    print(lcell_has(ab, 9) == lcell_has(ba, 9))  // true
+
+    // Idempotence end-to-end: a ⊔ a == a.
+    ptr a2 = lcell_new(1)
+    lcell_merge(a2, a)
+    lcell_merge(a2, a)         // joining the same state twice: no change
+    print(lcell_len(a2))       // 2
+
+    // The mutator law on GSET: prev = {5}, dst = {5, 9, 12}; the delta
+    // is the fragment {9, 12} — state-relative (NOT a copy of dst) —
+    // and prev ⊔ delta == dst (join-decomposition optimality).
+    ptr prev = lcell_new(1)
+    lcell_inflate(prev, 5, 0)
+    ptr dst = lcell_new(1)
+    lcell_inflate(dst, 5, 0)
+    lcell_inflate(dst, 9, 0)
+    lcell_inflate(dst, 12, 0)
+    ptr d = lcell_delta(dst, prev)
+    print(lcell_len(d))        // 2 (the fragment: only the new elements)
+    print(lcell_has(d, 5))     // false — the fragment is state-relative
+    print(lcell_has(d, 9))     // true
+    print(lcell_has(d, 12))    // true
+    ptr rt = lcell_apply(prev, d) // prev ⊔ delta
+    print(lcell_len(rt))       // 3 == dst
+    print(lcell_has(rt, 5))    // true
+    print(lcell_has(rt, 9))    // true
+    print(lcell_has(rt, 12))   // true
+
+    // Quiescence: delta(x, x) is the empty fragment.
+    ptr q = lcell_delta(dst, dst)
+    print(lcell_len(q))        // 0
+
+    print("PASS: lcell_gset_union")
+}

@@ -1,0 +1,49 @@
+// SWARM RABBIT HOLE — Wave 9 (Impl-M): the std.lattice surface — the
+// LCell blueprint over the runtime Tier-L engine (the std.delta /
+// ZSet wrapper pattern). Carriers as named constructors; merge/delta/
+// apply as methods; NO retract method exists on the surface — the
+// (L, exact) capability is rejected at the intrinsic level (E-LRET).
+
+use std.lattice
+
+fn main() {
+    // MAX carrier via the named constructor.
+    let hw = LCell.max()
+    hw.inflate(10, 0)
+    hw.inflate(2, 0)          // no-op: values only inflate
+    print(hw.value())        // 10
+    print(hw.len())          // 1
+
+    // GSET: grow-only set, union merge.
+    let a = LCell.gset()
+    a.inflate(1, 0)
+    a.inflate(2, 0)
+    let b = LCell.gset()
+    b.inflate(2, 0)
+    b.inflate(3, 0)
+    a.merge(b)               // a = a ⊔ b
+    print(a.len())            // 3
+    print(a.has(3))           // true
+    print(a.has(9))           // false
+
+    // The mutator law through the wrapper: prev ⊔ delta(prev,dst) == dst.
+    let prev = LCell.gset()
+    prev.inflate(1, 0)
+    let dst = LCell.gset()
+    dst.inflate(1, 0)
+    dst.inflate(5, 0)
+    let d = dst.delta(prev)
+    print(d.len())            // 1 (the fragment {5}: state-relative)
+    let rt = prev.apply(d)
+    print(rt.len())           // 2 == dst
+    print(rt.has(5))          // true
+
+    // LWW carrier.
+    let w = LCell.lww()
+    w.inflate(100, 1)
+    w.inflate(200, 2)          // clock 2 wins
+    print(w.value())          // 200
+    print(w.carrier())        // 2
+
+    print("PASS: lcell_stdlib")
+}

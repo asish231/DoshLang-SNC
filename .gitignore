@@ -64,3 +64,5 @@ bench/results/sn_lane_bench_inline
 bench/results/sn_pinned_lane_bench
 bench/results/c_pinned_lane_bench
 bench/results/sn_lane_bench_poison
+# Wave-9 lcell bench: same policy — binaries out, raw .txt evidence in.
+bench/results/sn_lcell_bench

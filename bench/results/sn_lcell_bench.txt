@@ -1,0 +1,60 @@
+BENCH row=timer ns_per_elem=10 phase_ms=1 ops=100000 checksum=179469946904710319
+BENCH row=gset_inflate ns_per_elem=24 phase_ms=99 ops=4000000 checksum=4000000
+BENCH row=gset_merge_fresh ns_per_elem=24 phase_ms=98 ops=4000000 checksum=4000000
+BENCH row=gset_merge_same ns_per_elem=8 phase_ms=98 ops=12000000 checksum=12100000
+BENCH row=gset_delta_apply ns_per_elem=45 phase_ms=183 ops=4000000 checksum=6000000
+BENCH row=max_inflate ns_per_elem=1 phase_ms=101 ops=100000000 checksum=99999000
+BENCH row=lww_inflate ns_per_elem=1 phase_ms=101 ops=100000000 checksum=99999000
+BENCH row=zset_build ns_per_elem=25 phase_ms=101 ops=4000000 checksum=4000000
+BENCH row=zset_merge ns_per_elem=25 phase_ms=101 ops=4000000 checksum=4000000
+BENCH row=list_push ns_per_elem=2 phase_ms=97 ops=40000000 checksum=40000000
+lcell_rounds=40 probe_rounds=120 list_rounds=400 o1_rounds=1000 n=100000
+LCELL_BENCH_DONE
+BENCH row=timer ns_per_elem=10 phase_ms=1 ops=100000 checksum=179469947005580272
+BENCH row=gset_inflate ns_per_elem=23 phase_ms=94 ops=4000000 checksum=4000000
+BENCH row=gset_merge_fresh ns_per_elem=23 phase_ms=94 ops=4000000 checksum=4000000
+BENCH row=gset_merge_same ns_per_elem=8 phase_ms=98 ops=12000000 checksum=12100000
+BENCH row=gset_delta_apply ns_per_elem=43 phase_ms=174 ops=4000000 checksum=6000000
+BENCH row=max_inflate ns_per_elem=1 phase_ms=101 ops=100000000 checksum=99999000
+BENCH row=lww_inflate ns_per_elem=1 phase_ms=101 ops=100000000 checksum=99999000
+BENCH row=zset_build ns_per_elem=23 phase_ms=95 ops=4000000 checksum=4000000
+BENCH row=zset_merge ns_per_elem=25 phase_ms=100 ops=4000000 checksum=4000000
+BENCH row=list_push ns_per_elem=2 phase_ms=93 ops=40000000 checksum=40000000
+lcell_rounds=40 probe_rounds=120 list_rounds=400 o1_rounds=1000 n=100000
+LCELL_BENCH_DONE
+BENCH row=timer ns_per_elem=10 phase_ms=1 ops=100000 checksum=179469947103757510
+BENCH row=gset_inflate ns_per_elem=23 phase_ms=94 ops=4000000 checksum=4000000
+BENCH row=gset_merge_fresh ns_per_elem=23 phase_ms=95 ops=4000000 checksum=4000000
+BENCH row=gset_merge_same ns_per_elem=7 phase_ms=92 ops=12000000 checksum=12100000
+BENCH row=gset_delta_apply ns_per_elem=43 phase_ms=174 ops=4000000 checksum=6000000
+BENCH row=max_inflate ns_per_elem=0 phase_ms=99 ops=100000000 checksum=99999000
+BENCH row=lww_inflate ns_per_elem=1 phase_ms=102 ops=100000000 checksum=99999000
+BENCH row=zset_build ns_per_elem=24 phase_ms=97 ops=4000000 checksum=4000000
+BENCH row=zset_merge ns_per_elem=25 phase_ms=100 ops=4000000 checksum=4000000
+BENCH row=list_push ns_per_elem=2 phase_ms=90 ops=40000000 checksum=40000000
+lcell_rounds=40 probe_rounds=120 list_rounds=400 o1_rounds=1000 n=100000
+LCELL_BENCH_DONE
+BENCH row=timer ns_per_elem=10 phase_ms=1 ops=100000 checksum=179469947200325529
+BENCH row=gset_inflate ns_per_elem=24 phase_ms=96 ops=4000000 checksum=4000000
+BENCH row=gset_merge_fresh ns_per_elem=23 phase_ms=94 ops=4000000 checksum=4000000
+BENCH row=gset_merge_same ns_per_elem=7 phase_ms=93 ops=12000000 checksum=12100000
+BENCH row=gset_delta_apply ns_per_elem=42 phase_ms=170 ops=4000000 checksum=6000000
+BENCH row=max_inflate ns_per_elem=1 phase_ms=111 ops=100000000 checksum=99999000
+BENCH row=lww_inflate ns_per_elem=1 phase_ms=102 ops=100000000 checksum=99999000
+BENCH row=zset_build ns_per_elem=24 phase_ms=97 ops=4000000 checksum=4000000
+BENCH row=zset_merge ns_per_elem=25 phase_ms=102 ops=4000000 checksum=4000000
+BENCH row=list_push ns_per_elem=2 phase_ms=94 ops=40000000 checksum=40000000
+lcell_rounds=40 probe_rounds=120 list_rounds=400 o1_rounds=1000 n=100000
+LCELL_BENCH_DONE
+BENCH row=timer ns_per_elem=10 phase_ms=1 ops=100000 checksum=179469947298669147
+BENCH row=gset_inflate ns_per_elem=24 phase_ms=99 ops=4000000 checksum=4000000
+BENCH row=gset_merge_fresh ns_per_elem=24 phase_ms=96 ops=4000000 checksum=4000000
+BENCH row=gset_merge_same ns_per_elem=7 phase_ms=95 ops=12000000 checksum=12100000
+BENCH row=gset_delta_apply ns_per_elem=43 phase_ms=173 ops=4000000 checksum=6000000
+BENCH row=max_inflate ns_per_elem=1 phase_ms=102 ops=100000000 checksum=99999000
+BENCH row=lww_inflate ns_per_elem=1 phase_ms=100 ops=100000000 checksum=99999000
+BENCH row=zset_build ns_per_elem=23 phase_ms=94 ops=4000000 checksum=4000000
+BENCH row=zset_merge ns_per_elem=24 phase_ms=98 ops=4000000 checksum=4000000
+BENCH row=list_push ns_per_elem=2 phase_ms=88 ops=40000000 checksum=40000000
+lcell_rounds=40 probe_rounds=120 list_rounds=400 o1_rounds=1000 n=100000
+LCELL_BENCH_DONE

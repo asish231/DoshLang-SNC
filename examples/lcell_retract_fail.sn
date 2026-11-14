@@ -1,0 +1,22 @@
+// SWARM RABBIT HOLE — Wave 9 (Impl-M): the (L, exact) rejection made
+// executable — the Grothendieck argument as a checked compile error.
+//
+// Tier L is the join-semilattice tier: ⊔ is idempotent (x⊔x = x). The
+// Grothendieck completion of an idempotent merge operator is trivial:
+// in the group of fractions, [x] = [x⊔x] − [x] = 0, so the only
+// group-embeddable join-semilattice is the trivial carrier — there is
+// no ⊖ on Tier L, and exact retraction cannot exist (W2C §1.1; final
+// report §8.1: "(L, exact) declarations rejected ... the Grothendieck
+// argument itself proves it"). Retraction on Tier L is tombstoned or
+// none, never exact.
+//
+// `lcell_retract` is the surface's exact-retraction declaration: the
+// checker RECOGNIZES the name (the error is a checked, named
+// diagnostic — not "unknown function") and ALWAYS rejects it with
+// E-LRET. This file is a compile-FAIL golden case (tests/golden.rs).
+
+fn main() {
+    ptr c = lcell_new(1)
+    lcell_inflate(c, 10, 0)
+    lcell_retract(c, 10) // must be rejected: E-LRET
+}

@@ -1,0 +1,69 @@
+// SWARM RABBIT HOLE — Wave 9 (Impl-M): the Tier-L cell, LCELL_LWW
+// carrier — last-writer-wins with a logical clock. ⊔ = the higher
+// clock wins; ties resolve by the DETERMINISTIC tiebreak (the higher
+// value wins). A join-semilattice BY CONSTRUCTION: the winner of any
+// bag of offers is the lexicographic max of (clock, value) — a total
+// order — so the join is idempotent (x⊔x = x), commutative (the max
+// of a bag is order-independent), and associative (grouping cannot
+// change the max of a bag). The tiebreak must be deterministic for
+// commutativity to hold: (c,5) ⊔ (c,9) must be (c,9) whichever side
+// is "first" — this file pins that.
+
+fn main() {
+    ptr c = lcell_new(2) // 2 = LCELL_LWW
+    print(lcell_len(c))        // 0 (no offer yet — ⊥)
+    print(lcell_value(c))      // 0 (no winner yet)
+
+    lcell_inflate(c, 100, 3)    // value 100 at clock 3
+    print(lcell_value(c))      // 100
+    lcell_inflate(c, 200, 5)    // clock 5 > 3: the new offer wins
+    print(lcell_value(c))      // 200
+    lcell_inflate(c, 300, 4)    // clock 4 < 5: a LOSING offer — a no-op
+    print(lcell_value(c))      // 200 (values never decrease on the clock order)
+    print(lcell_len(c))        // 1 (the support {200})
+
+    // The deterministic tiebreak: equal clocks → the higher value wins,
+    // in EITHER merge order (commutativity depends on it).
+    ptr x = lcell_new(2)
+    lcell_inflate(x, 7, 10)
+    ptr y = lcell_new(2)
+    lcell_inflate(y, 3, 10)     // same clock 10, lower value
+    ptr xy = lcell_new(2)
+    lcell_merge(xy, x)
+    lcell_merge(xy, y)          // x ⊔ y
+    print(lcell_value(xy))      // 7
+    ptr yx = lcell_new(2)
+    lcell_merge(yx, y)
+    lcell_merge(yx, x)          // y ⊔ x — the other order
+    print(lcell_value(yx))      // 7 (the same winner — determinism)
+    print(lcell_value(xy) == lcell_value(yx)) // true
+
+    // Idempotence end-to-end: w ⊔ w == w.
+    ptr w = lcell_new(2)
+    lcell_inflate(w, 42, 9)
+    ptr w2 = lcell_new(2)
+    lcell_inflate(w2, 42, 9)
+    lcell_merge(w, w2)          // the identical offer: no change
+    print(lcell_value(w))      // 42
+    print(lcell_len(w))        // 1
+
+    // The mutator law on LWW: prev holds (7@10), dst holds (7@12) —
+    // the delta is the winning offer fragment (7@12), and
+    // prev ⊔ delta == dst.
+    ptr prev = lcell_new(2)
+    lcell_inflate(prev, 7, 10)
+    ptr dst = lcell_new(2)
+    lcell_inflate(dst, 7, 12)
+    ptr d = lcell_delta(dst, prev)
+    print(lcell_value(d))      // 7 (the fragment = the new winning offer)
+    print(lcell_len(d))        // 1
+    ptr rt = lcell_apply(prev, d) // prev ⊔ delta
+    print(lcell_value(rt))     // 7 == dst's winner
+    print(lcell_len(rt))       // 1
+
+    // The unchanged state: delta(dst, dst) is the empty fragment.
+    ptr q = lcell_delta(dst, dst)
+    print(lcell_len(q))        // 0
+
+    print("PASS: lcell_lww_tiebreak")
+}

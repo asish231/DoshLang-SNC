@@ -1,0 +1,109 @@
+// SWARM RABBIT HOLE — Wave 9 (Impl-M): the mutator law made executable
+// across all three Tier-L carriers — m(X) = X ⊔ m^δ(X) (W2C §1.1
+// Tier L, citing Almeida–Shoker–Baquero JPDC 2018; Enes et al. 2018
+// for join-decomposition-optimal deltas). For every carrier and every
+// monotone pair prev ⊑ dst:
+//
+//     apply(prev, delta(dst, prev)) == dst        (the round-trip law)
+//
+// and the delta is a STATE-RELATIVE FRAGMENT, not a copy: its support
+// is only what moved — dst minus prev — so a state that didn't move
+// yields the empty fragment (delta(x, x) = ⊥). The randomized
+// exhaustive version of this law (seeded LCG over op sequences) lives
+// in tests/systems/test_lcell.c; this golden file pins it end-to-end
+// through the compiler on representative shapes.
+
+fn main() {
+    bool ok = true
+
+    // --- MAX: the delta is the join-irreducible fragment ------------
+    ptr mprev = lcell_new(0)
+    lcell_inflate(mprev, 3, 0)
+    lcell_inflate(mprev, 8, 0)      // mprev = {8}
+    ptr mdst = lcell_new(0)
+    lcell_inflate(mdst, 3, 0)
+    lcell_inflate(mdst, 8, 0)
+    lcell_inflate(mdst, 15, 0)      // mdst = {15}
+    ptr md = lcell_delta(mdst, mprev)
+    ptr mrt = lcell_apply(mprev, md)
+    if (lcell_value(mrt) != lcell_value(mdst)) { ok = false }
+    // the fragment is exactly the new HWM, not the whole state
+    if (lcell_value(md) != 15) { ok = false }
+
+    // --- GSET: the delta is the elements in dst not in prev ----------
+    ptr gprev = lcell_new(1)
+    lcell_inflate(gprev, 1, 0)
+    lcell_inflate(gprev, 2, 0)
+    ptr gdst = lcell_new(1)
+    lcell_inflate(gdst, 1, 0)
+    lcell_inflate(gdst, 2, 0)
+    lcell_inflate(gdst, 3, 0)
+    lcell_inflate(gdst, 4, 0)
+    ptr gd = lcell_delta(gdst, gprev)
+    ptr grt = lcell_apply(gprev, gd)
+    if (lcell_len(grt) != lcell_len(gdst)) { ok = false }
+    if (lcell_len(gd) != 2) { ok = false }              // fragment = {3,4}
+    if (lcell_has(gd, 1) or lcell_has(gd, 2)) { ok = false } // not a copy
+    if (not lcell_has(grt, 3) or not lcell_has(grt, 4)) { ok = false }
+    // purity: the operands are untouched
+    if (not lcell_has(gdst, 1) or not lcell_has(gdst, 2)) { ok = false }
+
+    // --- LWW: the delta is the winning offer -------------------------
+    ptr wprev = lcell_new(2)
+    lcell_inflate(wprev, 5, 1)
+    ptr wdst = lcell_new(2)
+    lcell_inflate(wdst, 5, 1)
+    lcell_inflate(wdst, 6, 2)       // wdst's winner: (6 @ clock 2)
+    ptr wd = lcell_delta(wdst, wprev)
+    ptr wrt = lcell_apply(wprev, wd)
+    if (lcell_value(wrt) != lcell_value(wdst)) { ok = false }
+    if (lcell_len(wd) != 1) { ok = false }
+
+    // --- the state-relative property: quiescence, all carriers -------
+    ptr qm = lcell_new(0)
+    lcell_inflate(qm, 9, 0)
+    ptr qg = lcell_new(1)
+    lcell_inflate(qg, 4, 0)
+    lcell_inflate(qg, 5, 0)
+    ptr qw = lcell_new(2)
+    lcell_inflate(qw, 1, 1)
+    if (lcell_len(lcell_delta(qm, qm)) != 0) { ok = false }
+    if (lcell_len(lcell_delta(qg, qg)) != 0) { ok = false }
+    if (lcell_len(lcell_delta(qw, qw)) != 0) { ok = false }
+
+    // --- delta composes with merge: the fragment replays -------------
+    // Two replicas diverge from a common base; each delta applies to
+    // the base independently and the joins commute (the CRDT shape).
+    ptr base = lcell_new(1)
+    lcell_inflate(base, 1, 0)
+    ptr r1 = lcell_new(1)
+    lcell_merge(r1, base)
+    lcell_inflate(r1, 20, 0)
+    ptr r2 = lcell_new(1)
+    lcell_merge(r2, base)
+    lcell_inflate(r2, 30, 0)
+    ptr d1 = lcell_delta(r1, base)
+    ptr d2 = lcell_delta(r2, base)
+    ptr s1 = lcell_new(1)
+    lcell_merge(s1, base)
+    ptr f1 = lcell_apply(s1, d1)   // base ⊔ d1, then ⊔ d2
+    ptr f1b = lcell_new(1)
+    lcell_merge(f1b, f1)
+    ptr fr1 = lcell_apply(f1b, d2)
+    ptr s2 = lcell_new(1)
+    lcell_merge(s2, base)
+    ptr f2 = lcell_apply(s2, d2)   // the other order
+    ptr f2b = lcell_new(1)
+    lcell_merge(f2b, f2)
+    ptr fr2 = lcell_apply(f2b, d1)
+    // converge: both orders reach the same join
+    if (lcell_len(fr1) != 3 or lcell_len(fr2) != 3) { ok = false }
+    if (not lcell_has(fr1, 20) or not lcell_has(fr1, 30)) { ok = false }
+    if (not lcell_has(fr2, 20) or not lcell_has(fr2, 30)) { ok = false }
+
+    if (ok) {
+        print("PASS: lcell_mutator_law")
+    } else {
+        print("FAIL: lcell_mutator_law")
+    }
+}

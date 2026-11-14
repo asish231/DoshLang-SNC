@@ -483,9 +483,61 @@ else
 fi
 
 echo ""
+
+# 16. Tier-L join-semilattice cells — the semilattice tier's runtime
+#     mechanics (SWARM RABBIT HOLE, Wave 9, Impl-M; W2C §1.1 Tier L).
+#     The three lattice laws (idempotence/commutativity/associativity)
+#     asserted per merge over randomized seeded-LCG op sequences, the
+#     delta-mutator law m(X) = X ⊔ m^δ(X), quiescence, lww tiebreak
+#     determinism, the SN_LATTICE_CHECK=1 in-engine law self-checks,
+#     and the E-LKIND tier-confusion probes (fork'd children must die
+#     with the diagnostic — carrier mismatch, kind mismatch, and the
+#     G-side zset_merge twin).
+echo "-----------------------------------------------------------------"
+echo "16. TIER-L SEMILATTICE CELLS, RUNTIME MECHANICS (test_lcell.c)"
+echo "-----------------------------------------------------------------"
+OUT_LCELL_C="/tmp/snc_test_lcell_c"
+rm -f "$OUT_LCELL_C"
+if clang -O1 -g -o "$OUT_LCELL_C" "$DIR/test_lcell.c" "$ROOT/compiler/runtime.c" -lpthread 2>/dev/null; then
+    OUTPUT=$("$OUT_LCELL_C")
+    echo "$OUTPUT"
+    if echo "$OUTPUT" | grep -q "PASS:"; then
+        echo ">>> test_lcell(.c): PASSED"
+    else
+        echo ">>> test_lcell(.c): FAILED"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> test_lcell(.c): BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+echo ""
+
+# 16b. The ASan stress pass of the same Tier-L cell test
+echo "-----------------------------------------------------------------"
+echo "16b. TIER-L SEMILATTICE CELLS, ASAN STRESS (test_lcell.c)"
+echo "-----------------------------------------------------------------"
+OUT_LCELL_ASAN="/tmp/snc_test_lcell_c_asan"
+rm -f "$OUT_LCELL_ASAN"
+if clang -O1 -g -fsanitize=address -o "$OUT_LCELL_ASAN" "$DIR/test_lcell.c" "$ROOT/compiler/runtime.c" -lpthread 2>/dev/null; then
+    OUTPUT=$(ASAN_OPTIONS=detect_leaks=0 "$OUT_LCELL_ASAN" 2>&1)
+    echo "$OUTPUT"
+    if echo "$OUTPUT" | grep -q "PASS:"; then
+        echo ">>> test_lcell(.c ASan): PASSED (no ASan reports over the GSET insert/rehash/growth paths)"
+    else
+        echo ">>> test_lcell(.c ASan): FAILED"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> test_lcell(.c ASan): BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+echo ""
 echo "================================================================="
 if [ $FAILURES -eq 0 ]; then
-    echo "  ALL SYSTEMS & SECURITY TESTS PASSED (21 checks)"
+    echo "  ALL SYSTEMS & SECURITY TESTS PASSED (23 checks)"
     exit 0
 else
     echo "  $FAILURES SYSTEMS TESTS FAILED"

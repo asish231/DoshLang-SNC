@@ -1061,3 +1061,114 @@ fn lane_poison_flag_fills_inline_bump() {
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
+// ---------------------------------------------------------------------
+// SWARM RABBIT HOLE — Wave 9 (Impl-M, Cohort Delta): the Tier-L
+// join-semilattice cell (W2C §1.1 Tier L; final report §8.1) — the
+// compiler-proved semilattice tier's first executable slice. Carriers
+// with checked lattice laws, the delta-mutator law
+// m(X) = X ⊔ m^δ(X), NO ⊖ on the Tier-L surface, and the (L, exact)
+// rejection made executable (E-LRET — the Grothendieck argument as a
+// checked error).
+// ---------------------------------------------------------------------
+
+/// MAX carrier: the high-water mark — monotone inflation only (an
+/// offer below the HWM is a no-op), ⊔ = max, the identity element is
+/// ⊥ = INT64_MIN, and the mutator law's round-trip + quiescence are
+/// observable end-to-end through the compiler.
+#[test]
+fn lcell_max_hwm() {
+    assert_out(
+        "examples/lcell_max_hwm.sn",
+        "0\n-9223372036854775808\n10\n10\n42\n1\n42\n1\n42\n42\n42\ntrue\n0\n\
+         -9223372036854775808\nPASS: lcell_max_hwm\n",
+    );
+}
+
+/// GSET carrier: the grow-only int set — idempotent inserts, the
+/// union merge, and commutativity observable end-to-end
+/// (a⊔b == b⊔a via readouts), plus the state-relative fragment
+/// (delta is NOT a copy) and the mutator-law round-trip.
+#[test]
+fn lcell_gset_union() {
+    assert_out(
+        "examples/lcell_gset_union.sn",
+        "2\ntrue\ntrue\nfalse\n3\ntrue\ntrue\ntrue\n3\ntrue\ntrue\ntrue\n2\n\
+         2\nfalse\ntrue\ntrue\n3\ntrue\ntrue\ntrue\n0\nPASS: lcell_gset_union\n",
+    );
+}
+
+/// LWW carrier: the logical clock wins, ties resolve by the
+/// DETERMINISTIC value tiebreak in either merge order (commutativity
+/// depends on the tiebreak being order-independent), losing offers are
+/// no-ops, and the mutator law round-trips.
+#[test]
+fn lcell_lww_tiebreak() {
+    assert_out(
+        "examples/lcell_lww_tiebreak.sn",
+        "0\n0\n100\n200\n200\n1\n7\n7\ntrue\n42\n1\n7\n1\n7\n1\n0\n\
+         PASS: lcell_lww_tiebreak\n",
+    );
+}
+
+/// The mutator law m(X) = X ⊔ m^δ(X) across ALL THREE carriers
+/// (Almeida–Shoker–Baquero JPDC 2018; Enes et al. 2018): the
+/// round-trip prev ⊔ delta(prev,dst) == dst, the state-relative
+/// fragment property (delta carries only what moved), quiescence
+/// delta(x,x) = ⊥, and delta replay converging from a common base.
+#[test]
+fn lcell_mutator_law() {
+    assert_out("examples/lcell_mutator_law.sn", "PASS: lcell_mutator_law\n");
+}
+
+/// The (L, exact) rejection made executable — the Grothendieck
+/// argument as a checked compile error: x⊔x = x ⇒ [x] = 0, so the
+/// idempotent merge operator does not group-embed and exact retraction
+/// on the Tier-L carrier is impossible. `lcell_retract` is a RECOGNIZED
+/// intrinsic (a named, checked rejection — not "unknown function")
+/// that the checker ALWAYS rejects with E-LRET, pointing at Tier G.
+#[test]
+fn lcell_retract_rejected_e_lret() {
+    let err = compile_err("examples/lcell_retract_fail.sn");
+    assert!(err.contains("[E-LRET]"), "expected E-LRET, got: {err}");
+    assert!(
+        err.contains("exact retraction on a Tier-L join-semilattice is impossible"),
+        "expected the E-LRET headline, got: {err}"
+    );
+    assert!(
+        err.contains("x⊔x = x ⇒ [x] = 0"),
+        "expected the Grothendieck triviality argument in the diagnostic, got: {err}"
+    );
+    assert!(
+        err.contains("tombstoned or none, never exact"),
+        "expected the legal Tier-L retraction labels, got: {err}"
+    );
+    assert!(
+        err.contains("use a Tier-G Z-set"),
+        "expected the Tier-G pointer in the diagnostic, got: {err}"
+    );
+}
+
+/// The per-carrier readout surface (HWM value; set size + membership;
+/// the LWW winner) and the carrier tag — the honest-label plumbing.
+#[test]
+fn lcell_carriers() {
+    assert_out(
+        "examples/lcell_carriers.sn",
+        "0\n7\n1\ntrue\nfalse\n1\n2\ntrue\nfalse\n0\n2\n11\n1\nfalse\n\
+         PASS: lcell_carriers\n",
+    );
+}
+
+/// The std.lattice surface: the LCell blueprint over the runtime
+/// engine (the std.delta/ZSet wrapper pattern) — named carrier
+/// constructors, merge/delta/apply as methods, and the mutator law
+/// through the wrapper. No retract method exists on the surface: the
+/// (L, exact) capability is rejected at the intrinsic level.
+#[test]
+fn lcell_stdlib_surface() {
+    assert_out(
+        "examples/lcell_stdlib.sn",
+        "10\n1\n3\ntrue\nfalse\n1\n2\ntrue\n200\n2\nPASS: lcell_stdlib\n",
+    );
+}

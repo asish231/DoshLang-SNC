@@ -376,6 +376,17 @@ SNlang includes zero-overhead native allocators for high-throughput systems prog
    - `merge`, `count`, `total`, `len`, `keys`, `copy` — all O(1) amortized via the O(1) hash map.
    - Zero coefficients leave the support in the canonical form (configurable).
    - See `tests/systems/` for executable test suites.
+4. **Tier-L Semilattice Cells (`std.lattice` / `LCell`):**
+   - The join-semilattice tier of the differential calculus (the capability order **O ⊑ L ⊑ G** — the honest label of a pipeline is the meet). Values only **inflate**; ⊔ (join) is the only combinator; there is **NO ⊖** on this surface.
+   - **Three carriers, each a join-semilattice by construction** (the admission rule: carrier verified idempotent + commutative + associative, checked structurally):
+     - `max` — an int high-water mark; ⊔ = max. idempotent (`max(x,x)=x`), commutative, associative; ⊥ = the least int64. A losing offer is a no-op — the mark never drops.
+     - `gset` — a grow-only int set; ⊔ = union. `A∪A=A`, `A∪B=B∪A`, `(A∪B)∪C=A∪(B∪C)`; membership/insert share the Tier-G O(1) hash machinery.
+     - `lww` — last-writer-wins with a logical clock; ⊔ = the **lexicographic max of (clock, value)**: the higher clock wins, and clock ties break *deterministically* by the higher value — the winner of any bag of offers is order-independent (a total order's max is idempotent, commutative, associative).
+   - **The delta-mutator law:** `m(X) = X ⊔ m^δ(X)` (Almeida–Shoker–Baquero JPDC 2018; Enes et al. 2018). `delta(dst, prev)` returns the **join-decomposition-optimal state-relative fragment** — only what moved, never a copy — such that `prev ⊔ delta(dst, prev) == dst` under the monotone regime `prev ⊑ dst` (Tier-L states only inflate, so this is the only regime the law is claimed for). `apply(base, d)` = base ⊔ d (pure). Quiescence: `delta(x, x)` is the identity cell.
+   - **The (L, exact) rejection — the Grothendieck argument as a checked compile error.** The merge operator is idempotent (`x⊔x = x`), and the Grothendieck completion of an idempotent operator is trivial: in the group of fractions `[x] = [x⊔x] − [x] = 0`. The idempotent merge operator therefore does not group-embed (the sharp embeddability boundary: a commutative monoid embeds into a group iff cancellative — max/union/lww are not), and **exact retraction on the Tier-L carrier is impossible**. Retraction on Tier L is `tombstoned` or `none`, never `exact`. The `lcell_retract` intrinsic is *recognized* and **always rejected at compile time with E-LRET**:
+     > `exact retraction on a Tier-L join-semilattice is impossible (the merge operator is non-embeddable: x⊔x = x ⇒ [x] = 0 — Grothendieck triviality; retraction on Tier L is tombstoned or none, never exact); use a Tier-G Z-set (zset_*) for exact retraction [E-LRET]`
+   - **E-LKIND (tier confusion, runtime-enforced):** the surface type of a cell is an untyped `ptr`, so the checker cannot see the carrier — the runtime fail-fasts on carrier mismatch (`cannot merge a max cell with a gset cell — the ⊔ of different carriers is undefined`), on kind mismatch (an L op on a non-LCell, or an LCell handed to `zset_merge` — the Tier-G twin of the same rule). `SN_LATTICE_CHECK=1` turns on per-merge in-engine law self-checks (idempotence + commutativity); the exhaustive randomized law harness is `tests/systems/test_lcell.c`.
+   - See `examples/lcell_*.sn` (golden) and `tests/systems/test_lcell.c` (systems) for the executable proofs.
 
 ### Why This Is Easier Than C
 

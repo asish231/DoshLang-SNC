@@ -1,0 +1,39 @@
+// SWARM RABBIT HOLE — Wave 9 (Impl-M): the Tier-L semilattice cell's
+// per-carrier readout surface and the carrier tag — the honest-label
+// plumbing the final report §8.1's capability labels ride on. The
+// runtime fail-fast guards (E-LKIND: carrier mismatch, tier confusion
+// against KIND_ZSET) are exercised in tests/systems/test_lcell.c —
+// they abort the process by design, which a golden run cannot pin.
+
+fn main() {
+    // MAX: the high-water-mark readout.
+    ptr m = lcell_new(0)
+    lcell_inflate(m, 7, 0)
+    lcell_inflate(m, 3, 0)     // no-op (3 < HWM)
+    print(lcell_carrier(m))    // 0
+    print(lcell_value(m))      // 7
+    print(lcell_len(m))        // 1
+    print(lcell_has(m, 7))     // true (the support is {7})
+    print(lcell_has(m, 3))     // false
+
+    // GSET: set-size + membership readouts.
+    ptr g = lcell_new(1)
+    lcell_inflate(g, 5, 0)
+    lcell_inflate(g, 6, 0)
+    print(lcell_carrier(g))    // 1
+    print(lcell_len(g))        // 2
+    print(lcell_has(g, 5))     // true
+    print(lcell_has(g, 9))     // false
+    print(lcell_value(g))      // 0 (GSET has no single-value readout)
+
+    // LWW: the winner readout.
+    ptr w = lcell_new(2)
+    lcell_inflate(w, 11, 4)
+    lcell_inflate(w, 22, 2)    // losing offer (clock 2 < 4)
+    print(lcell_carrier(w))    // 2
+    print(lcell_value(w))      // 11
+    print(lcell_len(w))        // 1
+    print(lcell_has(w, 22))    // false (the loser is not in the support)
+
+    print("PASS: lcell_carriers")
+}

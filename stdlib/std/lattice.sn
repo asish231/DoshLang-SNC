@@ -1,0 +1,121 @@
+// Tier-L join-semilattice cells — the semilattice tier's carrier over
+// the runtime SnLCell engine (SWARM RABBIT HOLE, Wave 9, Impl-M).
+//
+// W2C §1.1 Tier L (final report §8.1): values only INFLATE; ⊔ (join)
+// is the only combinator; deltas are state-relative fragments via the
+// delta-mutator law m(X) = X ⊔ m^δ(X) (Almeida–Shoker–Baquero JPDC
+// 2018; Enes et al. 2018 — join-decomposition-optimal deltas).
+//
+// NO ⊖ exists on this surface — by mathematical necessity, not policy:
+// the merge operator is idempotent (x⊔x = x), and its Grothendieck
+// completion is trivial ([x] = [x⊔x] − [x] = 0), so it does not
+// group-embed. Retraction on Tier L is tombstoned or none, never
+// exact; there is NO retract method here, and the intrinsic
+// lcell_retract is ALWAYS rejected at compile time with E-LRET — use
+// a Tier-G Z-set (std.delta) for exact retraction.
+//
+// Carriers (each a join-semilattice BY CONSTRUCTION — idempotent +
+// commutative + associative, the classification admission):
+//   max  — int high-water mark: ⊔ = max, ⊥ = the least int64
+//   gset — grow-only int set: ⊔ = union, ⊥ = ∅
+//   lww  — last-writer-wins with a logical clock: ⊔ = the higher clock
+//          wins, ties break deterministically by value (the
+//          lexicographic max of (clock, value))
+//
+//   use std.lattice
+//   let a = LCell.gset()
+//   a.inflate(10, 0)          // monotone insert (idempotent)
+//   let b = LCell.lww()
+//   b.inflate(200, 5)         // offer value 200 at clock 5
+//   a.merge(c)                // a = a ⊔ c
+//   let d = dst.delta(prev)   // m^δ: the state-relative fragment
+//   let r = prev.apply(d)     // ⊔: prev ⊔ d (the mutator law)
+//   a.len() / a.has(10) / a.value() / a.carrier()
+//
+// The wrapper is the std.delta pattern: a blueprint over the runtime
+// raw pointer. Like ZSet, the raw cell is freed with the process (no
+// close()); the runtime test (tests/systems/test_lcell.c) owns the
+// explicit sn_release/ASan story.
+
+blueprint LCell {
+    ptr raw
+
+    static fn new(int carrier) -> LCell {
+        new LCell p()
+        p.raw = lcell_new(carrier)
+        return p
+    }
+
+    static fn max() -> LCell {
+        new LCell p()
+        p.raw = lcell_new(0)
+        return p
+    }
+
+    static fn gset() -> LCell {
+        new LCell p()
+        p.raw = lcell_new(1)
+        return p
+    }
+
+    static fn lww() -> LCell {
+        new LCell p()
+        p.raw = lcell_new(2)
+        return p
+    }
+
+    static fn wrap(ptr raw) -> LCell {
+        new LCell p()
+        p.raw = raw
+        return p
+    }
+
+    // The monotone inflation — the ONLY mutator on the Tier-L surface.
+    // max: raise the HWM to at most a. gset: insert a. lww: offer
+    // value a at clock b. Losing offers are no-ops: values only
+    // inflate, never decrease.
+    fn inflate(int a, int clock) {
+        lcell_inflate(self.raw, a, clock)
+    }
+
+    // self = self ⊔ src (the join; carriers must match — the runtime
+    // fail-fasts with E-LKIND otherwise)
+    fn merge(LCell src) {
+        lcell_merge(self.raw, src.raw)
+    }
+
+    // m^δ: the state-relative fragment such that
+    // prev ⊔ delta(prev, dst) == dst (the mutator law) — a NEW cell,
+    // pure. NOT a copy: only what moved.
+    fn delta(LCell prev) -> LCell {
+        return LCell.wrap(lcell_delta(self.raw, prev.raw))
+    }
+
+    // ⊔: self + d as a new cell (pure)
+    fn apply(LCell d) -> LCell {
+        return LCell.wrap(lcell_apply(self.raw, d.raw))
+    }
+
+    // the support size (max/lww: 0 or 1; gset: |set|)
+    fn len() -> int {
+        return lcell_len(self.raw)
+    }
+
+    // the single-value readout (max: the HWM; lww: the winner's value,
+    // 0 when no offer; gset: 0 — the set carrier has no single-value
+    // readout, use len/has)
+    fn value() -> int {
+        return lcell_value(self.raw)
+    }
+
+    // membership in the support (gset: set membership; max/lww: the
+    // current value is exactly e)
+    fn has(int e) -> bool {
+        return lcell_has(self.raw, e)
+    }
+
+    // the carrier tag (0=max, 1=gset, 2=lww) — the honest-label plumbing
+    fn carrier() -> int {
+        return lcell_carrier(self.raw)
+    }
+}

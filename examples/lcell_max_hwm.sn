@@ -1,0 +1,59 @@
+// SWARM RABBIT HOLE — Wave 9 (Impl-M, Cohort Delta): the Tier-L
+// join-semilattice cell, LCELL_MAX carrier — the first executable slice
+// of the compiler-proved semilattice tier (W2C §1.1 Tier L; final
+// report §8.1; the capability order O ⊑ L ⊑ G).
+//
+// The MAX carrier: state = one int64 high-water mark; ⊔ = max. A
+// join-semilattice BY CONSTRUCTION: max(x,x) = x (idempotent),
+// max(x,y) = max(y,x) (commutative), max(max(x,y),z) = max(x,max(y,z))
+// (associative). Values only INFLATE: an offer below the current HWM
+// is a no-op — the LVar/CRDT monotonicity discipline. There is NO ⊖:
+// lowering the HWM is not expressible on this surface, and asking for
+// it (lcell_retract) is the checked E-LRET rejection.
+
+fn main() {
+    ptr c = lcell_new(0) // 0 = LCELL_MAX
+    print(lcell_len(c))        // 0 (⊥: no element yet)
+    print(lcell_value(c))      // -9223372036854775808 (⊥ = the identity element of max)
+
+    lcell_inflate(c, 10, 0)
+    print(lcell_value(c))      // 10
+    lcell_inflate(c, 7, 0)     // 7 < HWM: a no-op — values never decrease
+    print(lcell_value(c))      // 10
+    lcell_inflate(c, 42, 0)
+    print(lcell_value(c))      // 42
+    print(lcell_len(c))        // 1 (the support {42})
+
+    // Idempotence observable end-to-end: c ⊔ c == c.
+    ptr same = lcell_new(0)
+    lcell_inflate(same, 42, 0)
+    lcell_merge(c, same)       // joining an equal state changes nothing
+    print(lcell_value(c))      // 42
+    print(lcell_len(c))        // 1
+
+    // Inflating the identity element is the empty fragment: ⊔ ⊥ = id.
+    // (⊥ computed, not literal: the lexer parses the magnitude first.)
+    int bot = 0 - 9223372036854775807 - 1
+    lcell_inflate(c, bot, 0)
+    print(lcell_value(c))      // 42 (unchanged)
+
+    // The mutator law m(X) = X ⊔ m^δ(X) on MAX: prev = {10}, dst = {42};
+    // the delta is the join-irreducible fragment {42} (state-relative,
+    // NOT a copy), and prev ⊔ delta == dst.
+    ptr prev = lcell_new(0)
+    lcell_inflate(prev, 10, 0)
+    ptr dst = lcell_new(0)
+    lcell_inflate(dst, 42, 0)
+    ptr d = lcell_delta(dst, prev)
+    print(lcell_value(d))      // 42 (the fragment: exactly the new HWM)
+    ptr rt = lcell_apply(prev, d) // prev ⊔ delta
+    print(lcell_value(rt))     // 42 == dst
+    print(lcell_value(rt) == lcell_value(dst)) // true — the round-trip law
+
+    // The quiescent fragment: delta(x, x) is the identity (empty delta).
+    ptr q = lcell_delta(dst, dst)
+    print(lcell_len(q))        // 0
+    print(lcell_value(q))      // -9223372036854775808 (⊥)
+
+    print("PASS: lcell_max_hwm")
+}

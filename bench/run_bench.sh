@@ -171,6 +171,54 @@ if [ -n "${PIN_ONLY:-}" ]; then
     exit 0
 fi
 
+# ---------- lcell rows (Wave 9, Impl-M) ----------
+# bench/lcell_bench.sn — the Tier-L semilattice cell's ⊔ (join) costs,
+# in-language: the gset union merge vs the Tier-G zset ⊕ join at the same
+# N=100_000, the idempotent steady-state merge, the mutator-law
+# delta+apply pair, and the O(1) carriers (max/lww) — "mergeable" is
+# not free, priced per carrier (W2C §1.1 Tier L; final report §8.1).
+# SNlang's only clock is ms-resolution; every phase is sized >= 100x it
+# (per the W2F discipline). Results: bench/RESULTS_LCELL.md.
+# LCELL_ONLY=1 ./run_bench.sh runs just these rows.
+lcell_rows() {
+    echo "-- building lcell bench (Wave 9, Impl-M)"
+    "$SNC" lcell_bench.sn -o "$OUT/sn_lcell_bench" || exit 1
+    local rounds="${LCELL_ROUNDS:-40}"
+    local warm=$((rounds / 10))
+    local f r b spec
+    b=sn_lcell_bench
+    f="$OUT/$b.txt"
+    : > "$f"
+    echo "-- warmup $b (rounds=$warm)" >&2
+    "$OUT/$b" "$warm" >/dev/null 2>&1
+    echo "-- timed $b x$RUNS (rounds=$rounds)" >&2
+    for r in $(seq "$RUNS"); do
+        "$OUT/$b" "$rounds" >> "$f" 2>/dev/null
+    done
+    echo "-- lcell medians (rounds=$rounds, median of $RUNS):"
+    for spec in \
+        "timer ns_per_elem" \
+        "gset_inflate ns_per_elem" \
+        "gset_merge_fresh ns_per_elem" \
+        "gset_merge_same ns_per_elem" \
+        "gset_delta_apply ns_per_elem" \
+        "max_inflate ns_per_elem" \
+        "lww_inflate ns_per_elem" \
+        "zset_build ns_per_elem" \
+        "zset_merge ns_per_elem" \
+        "list_push ns_per_elem"; do
+        set -- $spec
+        echo "  $1.$2 = $(median_row "$OUT/sn_lcell_bench.txt" "$1" "$2")"
+    done
+}
+
+if [ -n "${LCELL_ONLY:-}" ]; then
+    lcell_rows
+    echo
+    echo "== done (LCELL_ONLY). raw runs in $OUT/sn_lcell_bench.txt ; see RESULTS_LCELL.md =="
+    exit 0
+fi
+
 # ---------- run + collect ----------
 collect() {  # collect NAME -- cmd...
     local name="$1"; shift; shift
@@ -193,6 +241,9 @@ collect go_escape          -- "$OUT/go_escape_bench"
 
 # pinned-lane rows (Wave 8, Impl-K): see pinned_lane_rows above
 pinned_lane_rows
+
+# lcell rows (Wave 9, Impl-M): see lcell_rows above
+lcell_rows
 
 # per-run peak RSS (one run each; RSS is stable)
 echo "-- peak RSS (KB)"

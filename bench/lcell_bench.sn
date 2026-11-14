@@ -1,0 +1,270 @@
+// SWARM RABBIT HOLE — Wave 9 / Impl-M (Cohort Delta): the Tier-L
+// semilattice cell benchmark, in-language — the ⊔ (join) costs the
+// semilattice tier predicted, measured against the Tier-G ⊕ twin at
+// the same N (W2C §1.1 Tier L; final report §8.1: "mergeable" ≠ free).
+//
+// Shape (the pinned_lane_bench.sn discipline): SNlang's only clock is
+// the ms-resolution time_now_ms, so every timed phase below totals
+// >= 100x that (per the W2F audit's discipline); the driver
+// (bench/run_bench.sh, LCELL_ONLY=1) runs one warmup at ROUNDS/10
+// then RUNS timed runs and takes the median; every row prints its own
+// checksum, and the protocol checksums must match across all runs.
+//
+// Rows (N = 100_000 elements; per-class round counts so EVERY phase
+// clears >= 100x the ms clock even for the cheap rows — the O(1)
+// carriers and the plain-list push run much larger sweeps):
+//   R_HASH  = rounds        — the hash-machinery rows (gset/zset)
+//   R_PROBE = rounds * 3    — the idempotent steady-state join (probes)
+//   R_LIST  = rounds * 10   — the plain-list push baseline
+//   R_O1    = rounds * 25   — the O(1) carriers (max/lww)
+//   timer          — 100_000 time_now_ms() call pairs: the clock row.
+//   gset_inflate   — R x { fresh LCELL_GSET; inflate k=0..N-1 } — the
+//                    monotone insert cost (the O(1) hash machinery,
+//                    the same scheme the Z-set rides).
+//   gset_merge_fresh — R x { fresh dst; merge(src) } where src is the
+//                    prebuilt N-element GSET: the REAL union join —
+//                    every src element inserts, the full ⊔ cost.
+//   gset_merge_same — R x { ONE dst; merge(src) } into the same
+//                    destination: the idempotent steady-state join —
+//                    after round 1 every element is present, so each
+//                    merge is all probes (the CRDT no-op path).
+//   gset_delta_apply — R x { d = delta(src, prev_half); rt =
+//                    apply(prev_half, d) } — the mutator-law pair:
+//                    delta scans N against prev_half (N/2), the
+//                    fragment is exactly N/2 elements, and apply
+//                    rebuilds the full state: the round-trip cost.
+//   max_inflate    — R*20 x { fresh LCELL_MAX; inflate k=0..N-1 } —
+//                    the O(1) carrier contrast: one compare per offer.
+//   lww_inflate    — R*20 x { fresh LCELL_LWW; inflate(value=k,
+//                    clock=k) } — the O(1) LWW contrast: every offer
+//                    wins (strictly increasing clocks).
+//   zset_build     — R x { fresh Z-set; zset_add(k, 1), k=0..N-1 } —
+//                    the SAME grow-only set as a Tier-G Z-set: the
+//                    construction cost (the ⊕ write path).
+//   zset_merge     — R x { fresh zset dst; zset_merge(dst, zsrc) } —
+//                    the Tier-G ⊕ join of the same N-element source:
+//                    the L ⊔ vs G ⊕ comparison row.
+//   list_push      — R x { fresh list<int>; push k=0..N-1 } — the
+//                    plain-list construction baseline. (The honest
+//                    list UNION baseline is EXCLUDED, documented in
+//                    RESULTS_LCELL.md: list has no O(1) membership,
+//                    so an in-language union loop is Theta(n^2) —
+//                    10^10 comparisons at N=100K, a different algorithm
+//                    class, not an honest merge-cost comparison.)
+//
+// GC control: gc_set_threshold(2_000_000_000) up front keeps threshold
+// collections out of every timed phase; an explicit gc_collect()
+// BETWEEN phases (never inside one) keeps the dead cells of the
+// fresh-per-round rows from accumulating across the whole run.
+//
+// Protocol: one warmup at ROUNDS/10 then RUNS timed runs (driver,
+// median of 5); every checksum must match across runs.
+
+use std.os
+
+fn report(str row, int ns_per_elem, int phase_ms, int ops, int ck) {
+    print("BENCH row=" + row + " ns_per_elem=" + cast(ns_per_elem, str)
+        + " phase_ms=" + cast(phase_ms, str)
+        + " ops=" + cast(ops, str)
+        + " checksum=" + cast(ck, str))
+}
+
+fn main() {
+    int n = 100000
+    int rounds = 40
+    list<str> a = args()
+    if (a.length() > 1) {
+        int v = cast(a[1], int)
+        if (v > 0) {
+            rounds = v
+        }
+    }
+    int rhash = rounds
+    int rprobe = rounds * 3
+    int rlist = rounds * 10
+    int ro1 = rounds * 25
+    gc_set_threshold(2000000000)
+
+    // ---- timer overhead: 100_000 time_now_ms() call pairs
+    int t0 = time_now_ms()
+    int kt = 0
+    int acct = 0
+    while (kt < 100000) {
+        acct = acct + time_now_ms()
+        kt = kt + 1
+    }
+    int t1 = time_now_ms()
+    report("timer", (t1 - t0) * 1000000 / 100000, t1 - t0, 100000, acct)
+
+    // The prebuilt N-element sources (outside every timed phase).
+    ptr src = lcell_new(1)
+    int i = 0
+    while (i < n) {
+        lcell_inflate(src, i, 0)
+        i = i + 1
+    }
+    ptr zsrc = zset_new(0)
+    i = 0
+    while (i < n) {
+        zset_add(zsrc, i, 1)
+        i = i + 1
+    }
+
+    // ---- gset_inflate: R_HASH x { fresh gset; inflate 0..N-1 }
+    int ck = 0
+    int r = 0
+    int ta0 = time_now_ms()
+    while (r < rhash) {
+        ptr c = lcell_new(1)
+        int k = 0
+        while (k < n) {
+            lcell_inflate(c, k, 0)
+            k = k + 1
+        }
+        ck = ck + lcell_len(c)
+        r = r + 1
+    }
+    int ta1 = time_now_ms()
+    report("gset_inflate", (ta1 - ta0) * 1000000 / (rhash * n), ta1 - ta0, rhash * n, ck)
+    gc_collect()
+
+    // ---- gset_merge_fresh: R x { fresh dst; merge(src) } — the real union
+    ck = 0
+    r = 0
+    int tb0 = time_now_ms()
+    while (r < rhash) {
+        ptr dst = lcell_new(1)
+        lcell_merge(dst, src)
+        ck = ck + lcell_len(dst)
+        r = r + 1
+    }
+    int tb1 = time_now_ms()
+    report("gset_merge_fresh", (tb1 - tb0) * 1000000 / (rhash * n), tb1 - tb0, rhash * n, ck)
+    gc_collect()
+
+    // ---- gset_merge_same: R rounds into ONE dst — the idempotent join
+    ptr sdst = lcell_new(1)
+    lcell_merge(sdst, src)
+    ck = lcell_len(sdst)
+    r = 0
+    int tc0 = time_now_ms()
+    while (r < rprobe) {
+        lcell_merge(sdst, src)
+        ck = ck + lcell_len(sdst)
+        r = r + 1
+    }
+    int tc1 = time_now_ms()
+    report("gset_merge_same", (tc1 - tc0) * 1000000 / (rprobe * n), tc1 - tc0, rprobe * n, ck)
+    gc_collect()
+
+    // ---- gset_delta_apply: the mutator-law pair over the half-state
+    // prev = the first N/2 elements; the fragment is exactly N/2.
+    ptr prev = lcell_new(1)
+    i = 0
+    while (i < n / 2) {
+        lcell_inflate(prev, i, 0)
+        i = i + 1
+    }
+    ck = 0
+    r = 0
+    int td0 = time_now_ms()
+    while (r < rhash) {
+        ptr d = lcell_delta(src, prev)
+        ptr rt = lcell_apply(prev, d)
+        ck = ck + lcell_len(d) + lcell_len(rt)
+        r = r + 1
+    }
+    int td1 = time_now_ms()
+    report("gset_delta_apply", (td1 - td0) * 1000000 / (rhash * n), td1 - td0, rhash * n, ck)
+    gc_collect()
+
+    // ---- max_inflate: R*20 x { fresh max; inflate 0..N-1 } (O(1) sweep)
+    ck = 0
+    r = 0
+    int te0 = time_now_ms()
+    while (r < ro1) {
+        ptr m = lcell_new(0)
+        int k = 0
+        while (k < n) {
+            lcell_inflate(m, k, 0)
+            k = k + 1
+        }
+        ck = ck + lcell_value(m)
+        r = r + 1
+    }
+    int te1 = time_now_ms()
+    report("max_inflate", (te1 - te0) * 1000000 / (ro1 * n), te1 - te0, ro1 * n, ck)
+    gc_collect()
+
+    // ---- lww_inflate: R*20 x { fresh lww; offer (k, clock=k) }
+    ck = 0
+    r = 0
+    int tf0 = time_now_ms()
+    while (r < ro1) {
+        ptr w = lcell_new(2)
+        int k = 0
+        while (k < n) {
+            lcell_inflate(w, k, k)
+            k = k + 1
+        }
+        ck = ck + lcell_value(w)
+        r = r + 1
+    }
+    int tf1 = time_now_ms()
+    report("lww_inflate", (tf1 - tf0) * 1000000 / (ro1 * n), tf1 - tf0, ro1 * n, ck)
+    gc_collect()
+
+    // ---- zset_build: R x { fresh Z-set; add(k, 1) } — the Tier-G twin
+    ck = 0
+    r = 0
+    int tg0 = time_now_ms()
+    while (r < rhash) {
+        ptr z = zset_new(0)
+        int k = 0
+        while (k < n) {
+            zset_add(z, k, 1)
+            k = k + 1
+        }
+        ck = ck + zset_total(z)
+        r = r + 1
+    }
+    int tg1 = time_now_ms()
+    report("zset_build", (tg1 - tg0) * 1000000 / (rhash * n), tg1 - tg0, rhash * n, ck)
+    gc_collect()
+
+    // ---- zset_merge: R x { fresh dst; merge(zsrc) } — the ⊕ join row
+    ck = 0
+    r = 0
+    int th0 = time_now_ms()
+    while (r < rhash) {
+        ptr zdst = zset_new(0)
+        zset_merge(zdst, zsrc)
+        ck = ck + zset_len(zdst)
+        r = r + 1
+    }
+    int th1 = time_now_ms()
+    report("zset_merge", (th1 - th0) * 1000000 / (rhash * n), th1 - th0, rhash * n, ck)
+    gc_collect()
+
+    // ---- list_push: R x { fresh list; push 0..N-1 } — the plain-list
+    //      construction baseline (the union loop is excluded, see the
+    //      header: no O(1) membership on list — Theta(n^2) at N=100K)
+    ck = 0
+    r = 0
+    int ti0 = time_now_ms()
+    while (r < rlist) {
+        list<int> l = []
+        int k = 0
+        while (k < n) {
+            l.push(k)
+            k = k + 1
+        }
+        ck = ck + l.length()
+        r = r + 1
+    }
+    int ti1 = time_now_ms()
+    report("list_push", (ti1 - ti0) * 1000000 / (rlist * n), ti1 - ti0, rlist * n, ck)
+
+    print("lcell_rounds=" + cast(rhash, str) + " probe_rounds=" + cast(rprobe, str) + " list_rounds=" + cast(rlist, str) + " o1_rounds=" + cast(ro1, str) + " n=" + cast(n, str))
+    print("LCELL_BENCH_DONE")
+}

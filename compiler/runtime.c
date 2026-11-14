@@ -141,6 +141,59 @@ typedef struct SnZSet {
     int64_t total;    /* running Σ counts — sn_zset_total is O(1) */
 } SnZSet;
 
+/* --------------------------------------------------------------------- */
+/*  SnLCell — the Tier-L join-semilattice cell (SWARM RABBIT HOLE, Wave 9, */
+/*  Impl-M, Cohort Delta; W2C §1.1 Tier L; final report §8.1; the         */
+/*  capability order O ⊑ L ⊑ G). Where the Z-set is the Tier-G group     */
+/*  carrier (state space = change space, ⊖ first-class, retraction       */
+/*  exact), the LCell is the semilattice tier's carrier: values only     */
+/*  INFLATE, ⊔ is the ONLY combinator, deltas are state-relative         */
+/*  fragments via the delta-mutator law m(X) = X ⊔ m^δ(X)                */
+/*  (Almeida–Shoker–Baquero JPDC 2018; Enes et al. 2018 — the            */
+/*  join-decomposition-optimal delta), and retraction is tombstoned or    */
+/*  none, NEVER exact: the Grothendieck completion of the idempotent     */
+/*  merge operator is trivial (x⊔x = x ⇒ [x] = 0), so ⊖ does not and     */
+/*  cannot exist on this surface — the checked E-LRET rejection.         */
+/*                                                                       */
+/*  Three carriers, each a join-semilattice BY CONSTRUCTION (W2C's       */
+/*  admission rule: carrier verified idempotent+commutative+associative, */
+/*  checked structurally — the classification the compiler applies to    */
+/*  monotone ⊔-merge aggregates):                                       */
+/*   LCELL_MAX  — int high-water mark: state = one int64, ⊔ = max.       */
+/*                max(x,x)=x, max(x,y)=max(y,x), max(max(x,y),z)=        */
+/*                max(x,max(y,z)); ⊥ = INT64_MIN.                        */
+/*   LCELL_GSET — grow-only int set: ⊔ = union. A∪A=A, A∪B=B∪A,          */
+/*                (A∪B)∪C=A∪(B∪C); ⊥ = ∅. Membership/insert share the    */
+/*                SnZSet O(1) open-addressing scheme (T1.1).              */
+/*   LCELL_LWW  — last-writer-wins with a logical clock: ⊔ = the          */
+/*                lexicographic max of (clock, value) — higher clock     */
+/*                wins, ties break DETERMINISTICALLY by the higher       */
+/*                value, so the winner of any bag of offers is           */
+/*                order-independent (a total order's max is             */
+/*                idempotent, commutative, associative); ⊥ = no offer.   */
+/* --------------------------------------------------------------------- */
+enum {
+    LCELL_MAX  = 0, /* int high-water mark: ⊔ = max */
+    LCELL_GSET = 1, /* grow-only int set: ⊔ = union */
+    LCELL_LWW  = 2  /* last-writer-wins + logical clock: ⊔ = lexmax(clock, value) */
+};
+
+typedef struct SnLCell {
+    int64_t rc;
+    int64_t kind;      /* KIND_LCELL */
+    int64_t carrier;   /* LCELL_MAX / LCELL_GSET / LCELL_LWW */
+    int64_t hwm;       /* MAX: the high-water mark (⊥ = INT64_MIN) */
+    int64_t lww_set;   /* LWW: 1 once an offer exists (⊥ = no offer) */
+    int64_t lww_val;   /* LWW: the winning offer's value */
+    int64_t lww_clock; /* LWW: the winning offer's logical clock */
+    int64_t len;       /* GSET: |set| */
+    int64_t cap;
+    int64_t hcap;
+    int64_t *elems;    /* GSET: the element array (i64 elements only) */
+    uint64_t *hashes;
+    int64_t *buckets;
+} SnLCell;
+
 typedef struct Err {
     int64_t rc;
     int64_t kind;
@@ -370,7 +423,7 @@ typedef struct Sb {
     char *buf;
 } Sb;
 
-enum { KIND_BYTEARRAY = 20, KIND_POOL = 21, KIND_STRBUILDER = 22, KIND_ZSET = 23 };
+enum { KIND_BYTEARRAY = 20, KIND_POOL = 21, KIND_STRBUILDER = 22, KIND_ZSET = 23, KIND_LCELL = 24 };
 
 typedef struct SnPool {
     int64_t rc;
@@ -577,6 +630,11 @@ static void gc_mark(void *p) {
         }
         break;
     }
+    case KIND_LCELL: {
+        /* Tier-L cell (Wave 9): GSET elements are i64 values, and the
+           MAX/LWW carriers hold inline scalars — nothing to trace. */
+        break;
+    }
     case KIND_ERR: {
         Err *e = (Err *)p;
         gc_mark(e->msg);
@@ -665,6 +723,13 @@ static void gc_free(void *p) {
         free(z->counts);
         free(z->hashes);
         free(z->buckets);
+        break;
+    }
+    case KIND_LCELL: {
+        SnLCell *c = (SnLCell *)p;
+        free(c->elems);
+        free(c->hashes);
+        free(c->buckets);
         break;
     }
     case KIND_ERR: {
@@ -895,6 +960,14 @@ void sn_release(void *p) {
         free(z->hashes);
         free(z->buckets);
         free(z);
+        break;
+    }
+    case KIND_LCELL: {
+        SnLCell *c = (SnLCell *)p;
+        free(c->elems);
+        free(c->hashes);
+        free(c->buckets);
+        free(c);
         break;
     }
     case KIND_ERR: {
@@ -1681,6 +1754,22 @@ void sn_zset_remove(void *p, int64_t key, int64_t delta) {
 /* Pointwise add of src into dst (the ⊕ of two Z-sets). */
 void sn_zset_merge(void *dst, void *src) {
     if (!dst || !src) return;
+    /* E-LKIND, G side of the tier-confusion seam (SWARM RABBIT HOLE,
+       Wave 9, Impl-M — mirroring E-GC-IN-LANE's two-direction rule): a
+       Tier-L SnLCell (or any other object kind) handed to the Tier-G ⊕
+       would be type-confused into this SnZSet layout and corrupt
+       memory. The surface types are untyped ptrs, so the CHECKER
+       cannot see the carrier — the runtime is the only layer that can
+       enforce the boundary, fail-fast per the runtime convention. */
+    if (((Obj *)dst)->kind != KIND_ZSET || ((Obj *)src)->kind != KIND_ZSET) {
+        fprintf(stderr,
+                "runtime error: zset_merge expects Tier-G Z-sets (kind=%d), "
+                "got kind=%lld and kind=%lld — Tier-G ⊕ and Tier-L ⊔ do not "
+                "mix; use matching tiers [E-LKIND]\n",
+                KIND_ZSET, (long long)((Obj *)dst)->kind,
+                (long long)((Obj *)src)->kind);
+        exit(1);
+    }
     SnZSet *s = (SnZSet *)src;
     for (int64_t i = 0; i < s->len; i++) {
         sn_zset_add(dst, s->keys[i], s->counts[i]);
@@ -1747,6 +1836,423 @@ void *sn_zset_keys(void *p) {
         else sn_list_push_i64(l, z->keys[i]);
     }
     return l;
+}
+
+/* --------------------------------------------------------------------- */
+/*  SnLCell — the Tier-L join-semilattice engine (Wave 9, Impl-M;        */
+/*  see the struct comment above for the carrier-by-carrier lattice      */
+/*  proofs). NO ⊖ exists anywhere below: inflation and ⊔ only. Exact     */
+/*  retraction is the checked compile-time rejection E-LRET (the         */
+/*  Grothendieck argument: x⊔x = x ⇒ [x] = 0 — the idempotent merge      */
+/*  operator does not group-embed); the runtime never needs to police    */
+/*  it because no lowering of a retract exists.                          */
+/*                                                                       */
+/*  E-LKIND (tier confusion, runtime-enforced): the surface type of a   */
+/*  cell is an untyped ptr, so the CHECKER cannot see the carrier —      */
+/*  the runtime fail-fasts (fprintf + exit, the runtime.c convention)    */
+/*  on kind mismatch (an L op on a non-LCell, and zset_merge's G-side    */
+/*  twin above) and on carrier mismatch between two operands.           */
+/* --------------------------------------------------------------------- */
+
+void *sn_lcell_new(int64_t carrier); /* forward: lcell_clone builds on it */
+
+static const char *lcell_carrier_name(int64_t carrier) {
+    switch (carrier) {
+    case LCELL_MAX: return "max";
+    case LCELL_GSET: return "gset";
+    case LCELL_LWW: return "lww";
+    default: return "unknown";
+    }
+}
+
+/* One operand must be a live LCell. */
+static SnLCell *lcell_guard_one(void *p, const char *op) {
+    if (!p) return NULL;
+    Obj *o = (Obj *)p;
+    if (o->kind != KIND_LCELL) {
+        fprintf(stderr,
+                "runtime error: lcell_%s expects a Tier-L cell (kind=%d), "
+                "got kind=%lld — Tier-L ⊔ is only defined on Tier-L cells; "
+                "use the zset_* surface for Tier-G objects [E-LKIND]\n",
+                op, KIND_LCELL, (long long)o->kind);
+        exit(1);
+    }
+    return (SnLCell *)p;
+}
+
+/* Two operands must be live LCells of the SAME carrier — the ⊔ of
+   different carriers is undefined (E-LKIND). */
+static void lcell_guard_pair(void *a, void *b, const char *op) {
+    SnLCell *ca = lcell_guard_one(a, op);
+    SnLCell *cb = lcell_guard_one(b, op);
+    if (ca && cb && ca->carrier != cb->carrier) {
+        fprintf(stderr,
+                "runtime error: cannot %s a %s cell with a %s cell — "
+                "the ⊔ of different carriers is undefined [E-LKIND]\n",
+                op, lcell_carrier_name(ca->carrier),
+                lcell_carrier_name(cb->carrier));
+        exit(1);
+    }
+}
+
+/* SN_LATTICE_CHECK=1 (the SN_POISON env convention): per-merge ⊔ law
+   self-checks — see sn_lcell_merge. Resolved once, benign race as
+   documented at sn_lane_poison_on. */
+static int g_lattice_check_state = 0; /* 0 unresolved, 1 on, -1 off */
+
+static int sn_lattice_check_on(void) {
+    int s = g_lattice_check_state;
+    if (s != 0) return s > 0;
+    const char *e = getenv("SN_LATTICE_CHECK");
+    s = (e && e[0] == '1' && e[1] == '\0') ? 1 : -1;
+    g_lattice_check_state = s;
+    return s > 0;
+}
+
+/* GSET insert — the SnZSet O(1) find-or-insert machinery, presence
+   only (idempotent by construction: an absent element enters the
+   support, a present one is a no-op — the union's idempotence law
+   executed). */
+static void lcell_gset_rehash(SnLCell *c, int64_t new_hcap) {
+    int64_t *nb = (int64_t *)calloc((size_t)new_hcap, sizeof(int64_t));
+    if (!nb) {
+        fprintf(stderr, "out of memory\n");
+        exit(1);
+    }
+    uint64_t mask = (uint64_t)new_hcap - 1;
+    for (int64_t i = 0; i < c->len; i++) {
+        uint64_t slot = c->hashes[i] & mask;
+        while (nb[slot] != 0) {
+            slot = (slot + 1) & mask;
+        }
+        nb[slot] = i + 1;
+    }
+    free(c->buckets);
+    c->buckets = nb;
+    c->hcap = new_hcap;
+}
+
+static int64_t lcell_gset_find(SnLCell *c, int64_t e, uint64_t h, uint64_t *out_bucket) {
+    uint64_t mask = (uint64_t)c->hcap - 1;
+    uint64_t slot = h & mask;
+    for (;;) {
+        int64_t b = c->buckets[slot];
+        if (b == 0) {
+            if (out_bucket) *out_bucket = slot;
+            return -1;
+        }
+        int64_t idx = b - 1;
+        if (c->hashes[idx] == h && c->elems[idx] == e) {
+            if (out_bucket) *out_bucket = slot;
+            return idx;
+        }
+        slot = (slot + 1) & mask;
+    }
+}
+
+static void lcell_gset_insert(SnLCell *c, int64_t e) {
+    uint64_t h = key_hash(0, e); /* key_kind 0: the i64 mix, Map's convention */
+    if (c->hcap == 0) {
+        /* lazy arrays: MAX/LWW cells never pay for GSET storage */
+        c->cap = 8;
+        c->hcap = 16;
+        c->elems = (int64_t *)xmalloc(sizeof(int64_t) * 8);
+        c->hashes = (uint64_t *)xmalloc(sizeof(uint64_t) * 8);
+        c->buckets = (int64_t *)calloc(16, sizeof(int64_t));
+    } else if ((c->len + 1) * 4 >= c->hcap * 3) {
+        lcell_gset_rehash(c, c->hcap * 2);
+    }
+    uint64_t bucket = 0;
+    if (lcell_gset_find(c, e, h, &bucket) >= 0) return; /* present: no-op */
+    if (c->len == c->cap) {
+        c->cap *= 2;
+        c->elems = (int64_t *)realloc(c->elems, sizeof(int64_t) * (size_t)c->cap);
+        c->hashes = (uint64_t *)realloc(c->hashes, sizeof(uint64_t) * (size_t)c->cap);
+    }
+    c->elems[c->len] = e;
+    c->hashes[c->len] = h;
+    c->buckets[bucket] = c->len + 1;
+    c->len++;
+}
+
+/* The ⊔ join core: src joins into dst, per carrier. This is the whole
+   Tier-L merge semantics — three carrier laws, one entry point. */
+static void lcell_join(SnLCell *dst, SnLCell *src) {
+    switch (dst->carrier) {
+    case LCELL_MAX:
+        /* ⊔ = max: the higher HWM wins; equal or lower is a no-op
+           (idempotence executed: x⊔x = x). */
+        if (src->hwm > dst->hwm) dst->hwm = src->hwm;
+        break;
+    case LCELL_GSET:
+        /* ⊔ = union: every src element joins dst's support; shared
+           elements are no-ops (A∪A = A executed per element). */
+        for (int64_t i = 0; i < src->len; i++) {
+            lcell_gset_insert(dst, src->elems[i]);
+        }
+        break;
+    case LCELL_LWW: {
+        /* ⊔ = the lexicographic max of (clock, value): the higher
+           clock wins; on a clock tie the DETERMINISTIC value tiebreak
+           (higher value wins) keeps the join commutative. A losing
+           offer is a no-op — the winner never depends on merge order. */
+        if (!src->lww_set) break;
+        if (!dst->lww_set
+            || src->lww_clock > dst->lww_clock
+            || (src->lww_clock == dst->lww_clock && src->lww_val > dst->lww_val)) {
+            dst->lww_set = 1;
+            dst->lww_val = src->lww_val;
+            dst->lww_clock = src->lww_clock;
+        }
+        break;
+    }
+    }
+}
+
+/* Structural state equality per carrier — the read-side primitive the
+   law checks (and the systems harness) compare with. Same carrier and
+   identical state, not object identity. */
+int64_t sn_lcell_eq(void *a, void *b) {
+    lcell_guard_pair(a, b, "compare");
+    SnLCell *x = (SnLCell *)a;
+    SnLCell *y = (SnLCell *)b;
+    if (!x || !y) return x == y; /* NULL only equals NULL */
+    if (x->carrier != y->carrier) return 0;
+    switch (x->carrier) {
+    case LCELL_MAX:
+        return x->hwm == y->hwm;
+    case LCELL_GSET: {
+        if (x->len != y->len) return 0;
+        for (int64_t i = 0; i < x->len; i++) {
+            if (lcell_gset_find(y, x->elems[i], key_hash(0, x->elems[i]), NULL) < 0) {
+                return 0;
+            }
+        }
+        return 1;
+    }
+    case LCELL_LWW:
+        return x->lww_set == y->lww_set && x->lww_val == y->lww_val
+            && x->lww_clock == y->lww_clock;
+    }
+    return 0;
+}
+
+/* A deep copy (a fresh cell joined to x's state) — the law checks and
+   the pure ops build on it. */
+static SnLCell *lcell_clone(SnLCell *x) {
+    SnLCell *out = (SnLCell *)sn_lcell_new(x->carrier);
+    lcell_join(out, x);
+    return out;
+}
+
+void *sn_lcell_new(int64_t carrier) {
+    if (carrier < LCELL_MAX || carrier > LCELL_LWW) {
+        fprintf(stderr,
+                "runtime error: unknown Tier-L carrier %lld (expected 0=max, "
+                "1=gset, 2=lww) [E-LKIND]\n",
+                (long long)carrier);
+        exit(1);
+    }
+    SnLCell *c = (SnLCell *)xmalloc(sizeof(SnLCell));
+    c->rc = 1;
+    c->kind = KIND_LCELL;
+    gc_track(c, (int64_t)sizeof(SnLCell));
+    c->carrier = carrier;
+    c->hwm = INT64_MIN; /* ⊥ of max: max(x, ⊥) = x */
+    c->lww_set = 0;     /* ⊥ of lww: no offer yet */
+    c->lww_val = 0;
+    c->lww_clock = 0;
+    c->len = 0;
+    c->cap = 0;         /* GSET arrays are lazy (see lcell_gset_insert) */
+    c->hcap = 0;
+    c->elems = NULL;
+    c->hashes = NULL;
+    c->buckets = NULL;
+    return c;
+}
+
+/* The monotone inflation — the ONLY mutator on the Tier-L surface
+   (the LVar/CRDT vocabulary: values only INFLATE, never decrease).
+   Uniform 3-arg shape:
+     MAX:  inflate(c, candidate, _) — the HWM rises to max(hwm, candidate)
+     GSET: inflate(c, element, _)  — the element joins the support (no-op
+                                     if present: idempotent insert)
+     LWW:  inflate(c, value, clock) — the offer (value@clock) joins; it
+                                     wins iff it beats the current winner
+                                     under the (clock, value) total order
+   A losing offer is a no-op on every carrier — the join can only grow. */
+void sn_lcell_inflate(void *p, int64_t a, int64_t b) {
+    SnLCell *c = lcell_guard_one(p, "inflate");
+    if (!c) return;
+    switch (c->carrier) {
+    case LCELL_MAX:
+        if (a > c->hwm) c->hwm = a;
+        break;
+    case LCELL_GSET:
+        lcell_gset_insert(c, a);
+        break;
+    case LCELL_LWW: {
+        /* A stack-shaped offer joined through the SAME accept test the
+           merge uses — inflate and merge share one ⊔ law by
+           construction. lcell_join's LWW arm reads only the lww_* trio
+           (the memset keeps the rest honest anyway). */
+        SnLCell offer;
+        memset(&offer, 0, sizeof(offer));
+        offer.kind = KIND_LCELL;
+        offer.carrier = LCELL_LWW;
+        offer.hwm = INT64_MIN;
+        offer.lww_set = 1;
+        offer.lww_val = a;
+        offer.lww_clock = b;
+        lcell_join(c, &offer);
+        break;
+    }
+    }
+}
+
+/* The ⊔ join: dst = dst ⊔ src (mutating, the zset_merge shape). */
+void sn_lcell_merge(void *dst, void *src) {
+    if (!dst || !src) return;
+    lcell_guard_pair(dst, src, "merge");
+    SnLCell *d = (SnLCell *)dst;
+    SnLCell *s = (SnLCell *)src;
+    if (sn_lattice_check_on()) {
+        /* Per-merge ⊔ law self-checks (env-gated; O(state) each, so
+           off by default — the exhaustive randomized harness over
+           seeded op sequences is tests/systems/test_lcell.c):
+             idempotence   x ⊔ x == x, x = dst as it stands
+             commutativity a ⊔ b == b ⊔ a, this exact pair
+           Associativity is a three-operand law — a per-merge check
+           would need a synthetic third operand the caller never
+           joined, so it lives in the systems harness, which asserts
+           (a⊔b)⊔c == a⊔(b⊔c) over randomized triples directly. */
+        SnLCell *xc = lcell_clone(d);
+        lcell_join(xc, d); /* xc = d ⊔ d */
+        if (!sn_lcell_eq(xc, d)) {
+            fprintf(stderr, "runtime error: lattice law violated: x⊔x != x (idempotence)\n");
+            exit(1);
+        }
+        sn_release(xc);
+        SnLCell *ab = lcell_clone(d);
+        lcell_join(ab, s); /* ab = a ⊔ b */
+        SnLCell *ba = lcell_clone(s);
+        lcell_join(ba, d); /* ba = b ⊔ a */
+        if (!sn_lcell_eq(ab, ba)) {
+            fprintf(stderr, "runtime error: lattice law violated: a⊔b != b⊔a (commutativity)\n");
+            exit(1);
+        }
+        sn_release(ab);
+        sn_release(ba);
+    }
+    lcell_join(d, s);
+}
+
+/* The mutator-law delta m^δ (Almeida–Shoker–Baquero JPDC 2018; Enes
+   et al. 2018): a NEW cell holding the join-decomposition-optimal
+   fragment such that prev ⊔ m^δ(dst, prev) == dst — the elements that
+   actually moved, NOT a copy of dst. The law holds under the monotone
+   regime prev ⊑ dst (the LVar discipline — Tier-L states only
+   inflate, so this is the only regime the mutator law is claimed
+   for); outside it the fragment is still the honest "what sits above
+   prev", and prev ⊔ fragment = prev ⊔ dst.
+     MAX:  the new HWM if it rose, else ⊥ (max is join-irreducible)
+     GSET: the elements in dst not in prev
+     LWW:  the winning offer, iff the winner changed, else ⊥       */
+void *sn_lcell_delta(void *dst, void *prev) {
+    lcell_guard_pair(dst, prev, "delta");
+    SnLCell *d = (SnLCell *)dst;
+    SnLCell *pv = (SnLCell *)prev;
+    int64_t carrier = d ? d->carrier : (pv ? pv->carrier : LCELL_MAX);
+    SnLCell *out = (SnLCell *)sn_lcell_new(carrier);
+    if (!d) return out; /* nothing moved */
+    switch (carrier) {
+    case LCELL_MAX: {
+        int64_t p_hwm = pv ? pv->hwm : INT64_MIN;
+        if (d->hwm > p_hwm) out->hwm = d->hwm; /* the join-irreducible fragment */
+        break;
+    }
+    case LCELL_GSET:
+        for (int64_t i = 0; i < d->len; i++) {
+            if (!pv
+                || lcell_gset_find(pv, d->elems[i], key_hash(0, d->elems[i]), NULL) < 0) {
+                lcell_gset_insert(out, d->elems[i]);
+            }
+        }
+        break;
+    case LCELL_LWW:
+        if (d->lww_set
+            && (!pv || !pv->lww_set || d->lww_clock != pv->lww_clock
+                || d->lww_val != pv->lww_val)) {
+            out->lww_set = 1;
+            out->lww_val = d->lww_val;
+            out->lww_clock = d->lww_clock;
+        }
+        break;
+    }
+    return out;
+}
+
+/* The read-side of the mutator law: base ⊔ delta as a NEW cell
+   (pure, the zset_apply shape). */
+void *sn_lcell_apply(void *base, void *delta) {
+    lcell_guard_pair(base, delta, "apply");
+    SnLCell *b = (SnLCell *)base;
+    SnLCell *d = (SnLCell *)delta;
+    int64_t carrier = b ? b->carrier : (d ? d->carrier : LCELL_MAX);
+    SnLCell *out = (SnLCell *)sn_lcell_new(carrier);
+    if (b) lcell_join(out, b);
+    if (d) lcell_join(out, d);
+    return out;
+}
+
+/* ---- readouts, per carrier (the honest-label plumbing) ------------- */
+
+/* The support size: MAX → 1 iff a value was inflated past ⊥; GSET →
+   |set|; LWW → 1 iff an offer exists. */
+int64_t sn_lcell_len(void *p) {
+    SnLCell *c = lcell_guard_one(p, "len");
+    if (!c) return 0;
+    switch (c->carrier) {
+    case LCELL_MAX: return c->hwm != INT64_MIN ? 1 : 0;
+    case LCELL_GSET: return c->len;
+    case LCELL_LWW: return c->lww_set ? 1 : 0;
+    }
+    return 0;
+}
+
+/* The single-value readout: MAX → the HWM (⊥ = INT64_MIN when empty);
+   LWW → the winner's value (0 when no offer — sn_lcell_len carries
+   the set flag); GSET → 0, documented: the set carrier has no
+   single-value readout — use len/has. */
+int64_t sn_lcell_value(void *p) {
+    SnLCell *c = lcell_guard_one(p, "value");
+    if (!c) return 0;
+    switch (c->carrier) {
+    case LCELL_MAX: return c->hwm;
+    case LCELL_GSET: return 0;
+    case LCELL_LWW: return c->lww_set ? c->lww_val : 0;
+    }
+    return 0;
+}
+
+/* Membership in the support: GSET → set membership; MAX → the HWM is
+   exactly e; LWW → the winner's value is exactly e. */
+int64_t sn_lcell_has(void *p, int64_t e) {
+    SnLCell *c = lcell_guard_one(p, "has");
+    if (!c) return 0;
+    switch (c->carrier) {
+    case LCELL_MAX: return c->hwm != INT64_MIN && c->hwm == e;
+    case LCELL_GSET:
+        if (c->len == 0) return 0;
+        return lcell_gset_find(c, e, key_hash(0, e), NULL) >= 0;
+    case LCELL_LWW: return c->lww_set && c->lww_val == e;
+    }
+    return 0;
+}
+
+int64_t sn_lcell_carrier(void *p) {
+    SnLCell *c = lcell_guard_one(p, "carrier");
+    return c ? c->carrier : -1;
 }
 
 /* --------------------------------------------------------------------- */

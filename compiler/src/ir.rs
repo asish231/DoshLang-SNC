@@ -3854,6 +3854,73 @@ impl Cx<'_> {
                 self.line(&format!("call void @sn_zset_set_prune(ptr {p}, i64 {f})"));
                 ("0".into(), Type::Void)
             }
+            /* Tier-L join-semilattice builtins (SWARM RABBIT HOLE, Wave 9,
+               Impl-M; W2C §1.1 Tier L): inflate is the only mutator (the
+               LVar/CRDT monotone discipline), merge = the ⊔ join (mutating),
+               delta = the mutator-law fragment m^δ (pure, a new cell),
+               apply = base ⊔ delta (pure). NO lcell_retract arm exists:
+               the checker ALWAYS rejects it (E-LRET — the (L, exact)
+               capability is impossible on the idempotent carrier), so
+               lowering never sees the name. */
+            "lcell_new" => {
+                let carrier = vs.first().map(|x| x.0.clone()).unwrap_or("0".into());
+                let r = self.t();
+                self.line(&format!("{r} = call ptr @sn_lcell_new(i64 {carrier})"));
+                (r, Type::Ptr)
+            }
+            "lcell_inflate" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let p = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let a = vs.get(1).cloned().unwrap_or(("0".into(), Type::Int));
+                let ab = self.as_bits(a.0, &a.1);
+                let b = vs.get(2).map(|x| x.0.clone()).unwrap_or("0".into());
+                self.line(&format!("call void @sn_lcell_inflate(ptr {p}, i64 {ab}, i64 {b})"));
+                ("0".into(), Type::Void)
+            }
+            "lcell_merge" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let dst = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let s1 = vs.get(1).map(|x| x.0.clone()).unwrap_or("null".into());
+                let src = self.as_ptr(s1, vs.get(1).map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                self.line(&format!("call void @sn_lcell_merge(ptr {dst}, ptr {src})"));
+                ("0".into(), Type::Void)
+            }
+            "lcell_delta" | "lcell_apply" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let a = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let p1 = vs.get(1).map(|x| x.0.clone()).unwrap_or("null".into());
+                let b = self.as_ptr(p1, vs.get(1).map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let r = self.t();
+                if n == "lcell_delta" {
+                    self.line(&format!("{r} = call ptr @sn_lcell_delta(ptr {a}, ptr {b})"));
+                } else {
+                    self.line(&format!("{r} = call ptr @sn_lcell_apply(ptr {a}, ptr {b})"));
+                }
+                (r, Type::Ptr)
+            }
+            "lcell_len" | "lcell_value" | "lcell_carrier" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let p = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let r = self.t();
+                let f = if n == "lcell_len" {
+                    "sn_lcell_len"
+                } else if n == "lcell_value" {
+                    "sn_lcell_value"
+                } else {
+                    "sn_lcell_carrier"
+                };
+                self.line(&format!("{r} = call i64 @{f}(ptr {p})"));
+                (r, Type::Int)
+            }
+            "lcell_has" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let p = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let e = vs.get(1).cloned().unwrap_or(("0".into(), Type::Int));
+                let eb = self.as_bits(e.0, &e.1);
+                let r = self.t();
+                self.line(&format!("{r} = call i64 @sn_lcell_has(ptr {p}, i64 {eb})"));
+                (r, Type::Bool)
+            }
             "alloc" => {
                 let r = self.t();
                 self.line(&format!("{r} = call ptr @sn_alloc(i64 {})", vs[0].0));

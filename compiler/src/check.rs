@@ -3132,6 +3132,20 @@ impl Checker<'_> {
                     || n == "zset_len"
                     || n == "zset_keys"
                     || n == "zset_set_prune"
+                    /* Tier-L join-semilattice builtins (SWARM RABBIT
+                       HOLE, Wave 9, Impl-M; W2C §1.1 Tier L). lcell_retract
+                       is RECOGNIZED but ALWAYS rejected in check_call —
+                       the (L, exact) capability declaration, E-LRET. */
+                    || n == "lcell_new"
+                    || n == "lcell_inflate"
+                    || n == "lcell_merge"
+                    || n == "lcell_delta"
+                    || n == "lcell_apply"
+                    || n == "lcell_len"
+                    || n == "lcell_value"
+                    || n == "lcell_has"
+                    || n == "lcell_carrier"
+                    || n == "lcell_retract"
                 {
                     Type::Named(format!("builtin:{n}"))
                 } else {
@@ -3931,6 +3945,40 @@ impl Checker<'_> {
             "zset_keys" => Type::List(Box::new(Type::Int)),
             "zset_add" | "zset_remove" | "zset_merge" | "zset_set_prune" => Type::Void,
             "zset_count" | "zset_total" | "zset_len" => Type::Int,
+            /* Tier-L join-semilattice builtins (SWARM RABBIT HOLE, Wave 9,
+               Impl-M; W2C §1.1 Tier L; final report §8.1). lcell_merge
+               mutates dst; lcell_inflate is the ONLY mutator on the L
+               surface (values only inflate). Carrier confusion between
+               two cells is invisible here (the surface type is an untyped
+               ptr) and is fail-fast policed at runtime [E-LKIND]. */
+            "lcell_new" | "lcell_delta" | "lcell_apply" => Type::Ptr,
+            "lcell_inflate" | "lcell_merge" => Type::Void,
+            "lcell_len" | "lcell_value" | "lcell_carrier" => Type::Int,
+            "lcell_has" => Type::Bool,
+            /* THE (L, exact) REJECTION — the Grothendieck argument as a
+               checked compile error. Tier L's merge operator is
+               idempotent (x⊔x = x), and the Grothendieck completion of
+               an idempotent operator is trivial: in the group of
+               fractions [x] = [x⊔x] − [x] = 0, so the only
+               group-embeddable join-semilattice is the trivial carrier.
+               ⊖ therefore does not exist on the Tier-L surface, and the
+               exact-retraction capability declared via lcell_retract is
+               ALWAYS rejected — retraction on Tier L is tombstoned or
+               none, never exact (W2C §1.1; final report §8.1's compile-
+               time rejection list). The name is RECOGNIZED (a named,
+               checked diagnostic — not "unknown function"), and no IR
+               lowering exists for it, so the runtime never sees it. */
+            "lcell_retract" => {
+                self.diag.error(
+                    span,
+                    "exact retraction on a Tier-L join-semilattice is impossible \
+                     (the merge operator is non-embeddable: x⊔x = x ⇒ [x] = 0 — \
+                     Grothendieck triviality; retraction on Tier L is tombstoned \
+                     or none, never exact); use a Tier-G Z-set (zset_*) for exact \
+                     retraction [E-LRET]",
+                );
+                Type::Void
+            }
             "pool_insert" => {
                 if let Some(Arg::Pos(p_expr)) = args.first() {
                     let pt = self.db.expr_ty.get(&(p_expr.span.file, p_expr.span.start, p_expr.span.end)).cloned().unwrap_or(Type::Ptr);

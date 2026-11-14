@@ -73,7 +73,7 @@ More: [docs/LANGUAGE.md](docs/LANGUAGE.md) · full reference [SNLANG_SPEC.md](SN
 | Area | Highlights |
 |---|---|
 | Types | `int`, `bool`, `str`, `list<T>`, `map<K,V>`, `T?`, `error`, `chan`, `ref`, `mut`, `lock`, `json`, `any`, `record`, fn types |
-| Safety | Compile-time Rust-grade guarantees: stack escape checks, collection borrow locks, affine UAF/double-free prevention, thread-race checks; **region poset** (RgnId provenance, `scc_accum_params` fixpoint — E0802 fires on recursive inout-accumulator hazards); **pinned-lane coloring** (L2–L6 accumulator assignment — E0802c on budget exhaustion, never silent reuse); **escape checker** (E-ESCAPE: refs stored into a holder must have the target outlive the holder); **GC scoping** (E-GC-IN-LANE: GC-managed and lane-backed memory cannot reference each other — the GC can't trace into lanes and lane rewinds don't respect the GC heap); **Elastic Lanes** (O(1) bump + scope-exit reset, inline at `-O1+`, T-FIBR poison-fill in debug) |
+| Safety | Compile-time Rust-grade guarantees: stack escape checks, collection borrow locks, affine UAF/double-free prevention, thread-race checks; **region poset** (RgnId provenance, `scc_accum_params` fixpoint — E0802 fires on recursive inout-accumulator hazards); **pinned-lane coloring** (L2–L6 accumulator assignment — E0802c on budget exhaustion, never silent reuse); **escape checker** (E-ESCAPE: refs stored into a holder must have the target outlive the holder); **GC scoping** (E-GC-IN-LANE: GC-managed and lane-backed memory cannot reference each other — the GC can't trace into lanes and lane rewinds don't respect the GC heap); **tiered differential calculus** (Tier-G Z-sets with exact retraction, **Tier-L semilattice cells** with carriers verified join-semilattices — NO ⊖ on the L surface, E-LRET rejects exact retraction with the Grothendieck argument at compile time, E-LKIND fail-fasts tier/carrier confusion at runtime; capability order O ⊑ L ⊑ G); **Elastic Lanes** (O(1) bump + scope-exit reset, inline at `-O1+`, T-FIBR poison-fill in debug) |
 | Speed | LLVM method devirtualization (1B calls/sec), native `StringBuilder` (~150× faster strings), ARC borrow elision |
 | Null | `otherwise`, `x!!`, `x?.m()`, smart unwrap after `if (x != none)` |
 | Errors | `(T, error)`, `try`, `panic` — not Java exceptions |
@@ -96,6 +96,7 @@ More: [docs/LANGUAGE.md](docs/LANGUAGE.md) · full reference [SNLANG_SPEC.md](SN
 | `std.file` / `std.path` / `std.os` | files, paths, env/args |
 | `std.pool` | Generational slot vaults with 64-bit handles (ABA / UAF immune) |
 | `std.delta` | **Tier-G Z-set delta collections** — `ZSet` with exact retraction (add/remove as ±ℤ coefficients), pure `delta`/`apply` operators (the DBSP 𝒟/⊕ primitives), `merge`, `count`, `total`; O(1)/key operations over the O(1) hash map |
+| `std.lattice` | **Tier-L semilattice cells** — `LCell` with three join-semilattice carriers (`max` high-water mark, `gset` grow-only set, `lww` last-writer-wins + logical clock), monotone `inflate` (the only mutator), `merge` (⊔), pure `delta`/`apply` (the mutator law m(X) = X ⊔ m^δ(X)); NO ⊖ on this surface — exact retraction is rejected at compile time (E-LRET) |
 | `std.arena` | Elastic lane bump allocators with instant O(1) bulk rollback |
 | `std.test` | `assert_true`, `assert_eq_int`, `assert_eq_str`, … |
 
