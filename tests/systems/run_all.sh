@@ -435,10 +435,57 @@ else
     echo ">>> test_zset_delta(leaks): SKIPPED (leaks(1) unavailable)"
 fi
 
+# 15. Pinned-lane accumulator headers — the Wave-8 coloring's runtime
+#     mechanics (Impl-I's sn_list_new_lane + the O(1) SCC-exit reclaim
+#     Impl-K measured). Built twice: plain, then ASan (the UAF stress pass
+#     over the restore/reuse cycle; the pinned path performs ZERO mallocs,
+#     so no leaks(1) check is needed — the heap twin's headers are all
+#     sn_release'd).
+echo "-----------------------------------------------------------------"
+echo "15. PINNED-LANE ACCUMULATOR HEADERS (test_pinned_lane.c)"
+echo "-----------------------------------------------------------------"
+OUT_PIN="/tmp/snc_test_pinned_lane"
+rm -f "$OUT_PIN"
+if clang -O1 -g -o "$OUT_PIN" "$DIR/test_pinned_lane.c" "$ROOT/compiler/runtime.c" -lpthread 2>/dev/null; then
+    OUTPUT=$("$OUT_PIN")
+    echo "$OUTPUT"
+    if echo "$OUTPUT" | grep -q "PASS:"; then
+        echo ">>> test_pinned_lane(.c): PASSED"
+    else
+        echo ">>> test_pinned_lane(.c): FAILED"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> test_pinned_lane(.c): BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+echo ""
+
+# 15b. The ASan stress pass of the same pinned-lane test
+echo "-----------------------------------------------------------------"
+echo "15b. PINNED-LANE ACCUMULATOR HEADERS, ASAN STRESS (test_pinned_lane.c)"
+echo "-----------------------------------------------------------------"
+OUT_PIN_ASAN="/tmp/snc_test_pinned_lane_asan"
+rm -f "$OUT_PIN_ASAN"
+if clang -O1 -g -fsanitize=address -o "$OUT_PIN_ASAN" "$DIR/test_pinned_lane.c" "$ROOT/compiler/runtime.c" -lpthread 2>/dev/null; then
+    OUTPUT=$(ASAN_OPTIONS=detect_leaks=0 "$OUT_PIN_ASAN" 2>&1)
+    echo "$OUTPUT"
+    if echo "$OUTPUT" | grep -q "PASS:"; then
+        echo ">>> test_pinned_lane(.c ASan): PASSED (no ASan reports over the lane restore/reuse cycle)"
+    else
+        echo ">>> test_pinned_lane(.c ASan): FAILED"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> test_pinned_lane(.c ASan): BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
 echo ""
 echo "================================================================="
 if [ $FAILURES -eq 0 ]; then
-    echo "  ALL SYSTEMS & SECURITY TESTS PASSED (19 checks)"
+    echo "  ALL SYSTEMS & SECURITY TESTS PASSED (21 checks)"
     exit 0
 else
     echo "  $FAILURES SYSTEMS TESTS FAILED"
