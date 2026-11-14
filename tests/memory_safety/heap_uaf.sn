@@ -1,0 +1,45 @@
+// SNlang Memory Safety Test 3: Heap Use-After-Free and Double-Free
+//
+// Demonstrates heap vulnerabilities when manual free(p) is allowed without move/borrow tracking.
+// In baseline SNlang, free(p) releases the memory block back to the system, but the compiler
+// does not invalidate the identifier `p`. Reading and writing to `p` access dangling heap memory,
+// and calling free(p) again triggers a runtime double-free failure.
+
+fn test_uaf_read() {
+    ref<byte> p = alloc(16)
+    set(p, 42)
+    print("Initial value before free:")
+    print(value(p))
+
+    free(p)
+
+    // 1. Use-After-Free: Read from freed memory
+    print("Value read after free:")
+    print(value(p))
+}
+
+fn test_uaf_write() {
+    ref<byte> p = alloc(16)
+    set(p, 10)
+    free(p)
+
+    // 2. Use-After-Free: Write to freed memory
+    set(p, 99)
+    print("Value written after free:")
+    print(value(p))
+}
+
+fn test_double_free() {
+    ref<byte> p = alloc(16)
+    free(p)
+
+    // 3. Double-Free: Freeing pointer again
+    free(p)
+}
+
+fn main() {
+    print("=== SNlang Heap Use-After-Free Baseline Test ===")
+    test_uaf_read()
+    test_uaf_write()
+    test_double_free()
+}

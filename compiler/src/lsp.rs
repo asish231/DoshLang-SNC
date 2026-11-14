@@ -666,6 +666,14 @@ pub const BUILTINS: &[(&str, u64, &str)] = &[
     ("bytearray_get", 3, "fn bytearray_get(ptr, index) -> int"),
     ("bytearray_len", 3, "fn bytearray_len(ptr) -> int"),
     ("bytearray_slice", 3, "fn bytearray_slice(ptr, start, n) -> ptr"),
+    ("sb_new", 3, "fn sb_new(int cap) -> ptr"),
+    ("sb_append", 3, "fn sb_append(ptr sb, str s)"),
+    ("sb_append_cstr", 3, "fn sb_append_cstr(ptr sb, ptr cs, int len)"),
+    ("sb_append_int", 3, "fn sb_append_int(ptr sb, int val)"),
+    ("sb_append_byte", 3, "fn sb_append_byte(ptr sb, int byte)"),
+    ("sb_to_str", 3, "fn sb_to_str(ptr sb) -> str"),
+    ("sb_len", 3, "fn sb_len(ptr sb) -> int"),
+    ("sb_clear", 3, "fn sb_clear(ptr sb)"),
     ("sha256", 3, "fn sha256(str, out)"),
     ("sha512", 3, "fn sha512(str, out)"),
     ("md5", 3, "fn md5(str, out)"),
@@ -901,6 +909,8 @@ pub fn type_name(t: &crate::types::Type) -> String {
             type_name(ret)
         ),
         Named(n) => n.clone(),
+        Pool(i) => format!("pool<{}>", type_name(i)),
+        Handle(i) => format!("handle<{}>", type_name(i)),
     }
 }
 
@@ -945,6 +955,8 @@ fn type_ast_name(t: &crate::ast::TypeAst) -> String {
         U16 => "u16".into(),
         U32 => "u32".into(),
         U64 => "u64".into(),
+        Pool(i) => format!("pool<{}>", type_ast_name(i)),
+        Handle(i) => format!("handle<{}>", type_ast_name(i)),
     }
 }
 

@@ -719,6 +719,9 @@ blueprint App {
                     if (rel.slice(0, 1) == "/") {
                         rel = rel.slice(1, rel.length())
                     }
+                    if (rel.contains("..") or rel.contains("\\") or rel.slice(0, 1) == "/") {
+                        return Response.not_found("endpoint not found")
+                    }
                     str filepath = self.static_dir + "/" + rel
                     if (file_exists(filepath)) {
                         if (req.method == "HEAD") {

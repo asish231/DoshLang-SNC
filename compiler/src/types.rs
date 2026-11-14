@@ -26,6 +26,10 @@ pub enum Type {
     Ref(Box<Type>),
     /// Exclusive borrow (`mut<T>`).
     Mut(Box<Type>),
+    /// Generational slot vault (`pool<T>`).
+    Pool(Box<Type>),
+    /// 64-bit generational handle (`handle<T>`).
+    Handle(Box<Type>),
     /// Opaque raw pointer (C FFI). No borrow tracking, no auto-deref.
     Ptr,
     Optional(Box<Type>),
@@ -79,6 +83,7 @@ impl Type {
                 | Type::Chan(_)
                 | Type::Ref(_)
                 | Type::Mut(_)
+                | Type::Pool(_)
                 | Type::Ptr
                 | Type::Optional(_)
                 | Type::Blueprint(_)
@@ -121,6 +126,8 @@ impl Type {
             Type::Chan(inner) => TypeAst::Chan(Box::new(inner.to_type_ast())),
             Type::Ref(inner) => TypeAst::Ref(Box::new(inner.to_type_ast())),
             Type::Mut(inner) => TypeAst::Mut(Box::new(inner.to_type_ast())),
+            Type::Pool(inner) => TypeAst::Pool(Box::new(inner.to_type_ast())),
+            Type::Handle(inner) => TypeAst::Handle(Box::new(inner.to_type_ast())),
             Type::Ptr => TypeAst::Ptr,
             Type::Optional(inner) => TypeAst::Optional(Box::new(inner.to_type_ast())),
             Type::Tuple(ts) => TypeAst::Tuple(ts.iter().map(|t| t.to_type_ast()).collect()),
@@ -201,7 +208,26 @@ impl Type {
         // `address(x)` produces a shared borrow; a `mut<T>` binding takes the
         // exclusive form of the same borrow, which the checker validates.
         if let Type::Mut(inner) = self {
-            return matches!(other, Type::Ref(t) if **t == **inner || t.assignable_from(inner, bps));
+            return matches!(other, Type::Ref(t) | Type::Mut(t) if **t == **inner || t.assignable_from(inner, bps));
+        }
+        if let Type::Ref(inner) = self {
+            return matches!(other, Type::Mut(t) | Type::Ref(t) if **t == **inner || t.assignable_from(inner, bps));
+        }
+        if let (Type::Pool(a), Type::Pool(b)) = (self, other) {
+            return matches!(**b, Type::Any) || a == b || a.assignable_from(b, bps);
+        }
+        if let (Type::Handle(a), Type::Handle(b)) = (self, other) {
+            return a == b || a.assignable_from(b, bps);
+        }
+        if (matches!(self, Type::Int) && matches!(other, Type::Handle(_)))
+            || (matches!(self, Type::Handle(_)) && matches!(other, Type::Int))
+        {
+            return true;
+        }
+        if (matches!(self, Type::Ptr) && matches!(other, Type::Pool(_)))
+            || (matches!(self, Type::Pool(_)) && matches!(other, Type::Ptr))
+        {
+            return true;
         }
         // A reference is already a pointer; `ptr p = alloc(n)` is the natural
         // way to obtain an FFI handle.
@@ -340,6 +366,8 @@ impl fmt::Display for Type {
             }
             Type::Ptr => write!(f, "ptr"),
             Type::Mut(inner) => write!(f, "mut<{inner}>"),
+            Type::Pool(inner) => write!(f, "pool<{inner}>"),
+            Type::Handle(inner) => write!(f, "handle<{inner}>"),
             Type::Blueprint(n) | Type::Named(n) | Type::Record(n) | Type::Enum(n) | Type::Contract(n) => write!(f, "{n}"),
             Type::Any => write!(f, "any"),
             Type::Lock => write!(f, "lock"),
@@ -392,6 +420,8 @@ pub fn ast_to_type(t: &TypeAst) -> Type {
         TypeAst::Map(k, v) => Type::Map(Box::new(ast_to_type(k)), Box::new(ast_to_type(v))),
         TypeAst::Chan(i) => Type::Chan(Box::new(ast_to_type(i))),
         TypeAst::Ref(i) => Type::Ref(Box::new(ast_to_type(i))),
+        TypeAst::Pool(i) => Type::Pool(Box::new(ast_to_type(i))),
+        TypeAst::Handle(i) => Type::Handle(Box::new(ast_to_type(i))),
         TypeAst::Optional(i) => Type::Optional(Box::new(ast_to_type(i))),
         TypeAst::Tuple(xs) => Type::Tuple(xs.iter().map(ast_to_type).collect()),
     }
@@ -402,11 +432,13 @@ pub struct FuncSig {
     pub name: String,
     pub llvm: String,
     pub params: Vec<(String, Type, bool)>, // name, type, has_default
+    pub inout_params: Vec<bool>,
     pub ret: Type,
     pub is_method: bool,
     pub blueprint: Option<String>,
     pub is_async: bool,
     pub is_static: bool,
+    pub is_verified: bool,
     /// True for `extern "lib" { fn ... }` declarations: no body is emitted,
     /// the symbol is resolved by the linker.
     pub is_extern: bool,
@@ -451,6 +483,7 @@ pub struct BlueprintInfo {
     pub size: i64,
     pub type_id: i64,
     pub is_generic: bool,
+    pub is_resource: bool,
 }
 
 #[derive(Clone, Debug)]

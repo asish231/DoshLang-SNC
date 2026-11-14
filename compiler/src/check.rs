@@ -2,7 +2,7 @@ use crate::ast::*;
 use crate::diag::Diagnostics;
 use crate::span::Span;
 use crate::types::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Clone, Debug)]
 pub struct EnumVariantInfo {
@@ -47,10 +47,16 @@ struct Checker<'a> {
     diag: &'a mut Diagnostics,
     scopes: Vec<HashMap<String, (Type, bool)>>, // type, is_const
     moved: HashMap<String, Span>,
+    channel_moved: HashSet<String>,
+    freed: HashSet<String>,
     /// owner name -> (borrower name, exclusive)
     borrowed: HashMap<String, (String, bool)>,
     /// borrower name -> owner name
     borrow_owner: HashMap<String, String>,
+    /// container name -> current shrink epoch
+    list_epochs: HashMap<String, u32>,
+    /// borrower name -> (container name, epoch at borrow creation)
+    borrow_epoch: HashMap<String, (String, u32)>,
     /// locals of the function currently being checked, innermost last
     local_scopes: Vec<Vec<String>>,
     current_fn_ret: Type,
@@ -160,8 +166,12 @@ pub fn check_programs(programs: &[Program], diag: &mut Diagnostics) -> CheckDb {
             diag,
             scopes: vec![HashMap::new()],
             moved: HashMap::new(),
+            channel_moved: HashSet::new(),
+            freed: HashSet::new(),
             borrowed: HashMap::new(),
             borrow_owner: HashMap::new(),
+            list_epochs: HashMap::new(),
+            borrow_epoch: HashMap::new(),
             local_scopes: Vec::new(),
             current_fn_ret: Type::Void,
             in_loop: 0,
@@ -246,8 +256,12 @@ pub fn check_programs(programs: &[Program], diag: &mut Diagnostics) -> CheckDb {
             diag,
             scopes: vec![HashMap::new()],
             moved: HashMap::new(),
+            channel_moved: HashSet::new(),
+            freed: HashSet::new(),
             borrowed: HashMap::new(),
             borrow_owner: HashMap::new(),
+            list_epochs: HashMap::new(),
+            borrow_epoch: HashMap::new(),
             local_scopes: Vec::new(),
             current_fn_ret: Type::Void,
             in_loop: 0,
@@ -331,6 +345,8 @@ pub fn substitute_type(t: &TypeAst, params: &[String], args: &[TypeAst]) -> Type
         TypeAst::Optional(i) => TypeAst::Optional(Box::new(substitute_type(i, params, args))),
         TypeAst::Ref(i) => TypeAst::Ref(Box::new(substitute_type(i, params, args))),
         TypeAst::Mut(i) => TypeAst::Mut(Box::new(substitute_type(i, params, args))),
+        TypeAst::Pool(i) => TypeAst::Pool(Box::new(substitute_type(i, params, args))),
+        TypeAst::Handle(i) => TypeAst::Handle(Box::new(substitute_type(i, params, args))),
         TypeAst::Chan(i) => TypeAst::Chan(Box::new(substitute_type(i, params, args))),
         TypeAst::Map(k, v) => TypeAst::Map(
             Box::new(substitute_type(k, params, args)),
@@ -371,6 +387,12 @@ pub fn infer_type_param(
             infer_type_param(p_inner, a_inner, type_param_names, inferred);
         }
         (TypeAst::Mut(p_inner), Type::Mut(a_inner)) => {
+            infer_type_param(p_inner, a_inner, type_param_names, inferred);
+        }
+        (TypeAst::Pool(p_inner), Type::Pool(a_inner)) => {
+            infer_type_param(p_inner, a_inner, type_param_names, inferred);
+        }
+        (TypeAst::Handle(p_inner), Type::Handle(a_inner)) => {
             infer_type_param(p_inner, a_inner, type_param_names, inferred);
         }
         (TypeAst::Chan(p_inner), Type::Chan(a_inner)) => {
@@ -449,8 +471,16 @@ pub fn substitute_stmt(s: &mut Stmt, params: &[String], args: &[TypeAst]) {
         Stmt::SpawnBlock { body, .. }
         | Stmt::GoroutineBlock { body, .. }
         | Stmt::LockBlock { body, .. }
-        | Stmt::Defer { body, .. } => {
+        | Stmt::Defer { body, .. }
+        | Stmt::ErrDefer { body, .. }
+        | Stmt::Region { body, .. }
+        | Stmt::NurseryBlock { body, .. }
+        | Stmt::Frozen { body, .. } => {
             substitute_stmts(body, params, args);
+        }
+        Stmt::Guard { cond, else_body, .. } => {
+            substitute_expr(cond, params, args);
+            substitute_stmts(else_body, params, args);
         }
         Stmt::SpawnExpr { expr, .. } => {
             substitute_expr(expr, params, args);
@@ -466,7 +496,7 @@ pub fn substitute_stmt(s: &mut Stmt, params: &[String], args: &[TypeAst]) {
             }
             for a in new_args {
                 match a {
-                    Arg::Pos(e) | Arg::Named { value: e, .. } => substitute_expr(e, params, args),
+                    Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. } => substitute_expr(e, params, args),
                 }
             }
         }
@@ -503,7 +533,7 @@ pub fn substitute_expr(e: &mut Expr, params: &[String], args: &[TypeAst]) {
             }
             for a in call_args {
                 match a {
-                    Arg::Pos(e) | Arg::Named { value: e, .. } => substitute_expr(e, params, args),
+                    Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. } => substitute_expr(e, params, args),
                 }
             }
         }
@@ -532,7 +562,7 @@ pub fn substitute_expr(e: &mut Expr, params: &[String], args: &[TypeAst]) {
         ExprKind::SuperCall { args: sc_args, .. } => {
             for a in sc_args {
                 match a {
-                    Arg::Pos(e) | Arg::Named { value: e, .. } => substitute_expr(e, params, args),
+                    Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. } => substitute_expr(e, params, args),
                 }
             }
         }
@@ -634,6 +664,7 @@ fn instantiate_blueprint(db: &mut CheckDb, template: &BlueprintItem, args: &[Typ
             size: 0,
             type_id: db.blueprints.values().filter(|b| !b.is_generic && b.size > 0).count() as i64 + 1,
             is_generic: false,
+            is_resource: template.is_resource,
         },
     );
     db.instantiated.insert(mono.clone(), inst.clone());
@@ -744,8 +775,17 @@ fn walk_stmt_for_mono(s: &Stmt, db: &mut CheckDb, diag: &mut Diagnostics) {
                 walk_stmts_for_mono(b, db, diag);
             }
         }
-        Stmt::While { body, .. } | Stmt::ForIn { body, .. } | Stmt::Defer { body, .. } => {
+        Stmt::While { body, .. }
+        | Stmt::ForIn { body, .. }
+        | Stmt::Defer { body, .. }
+        | Stmt::ErrDefer { body, .. }
+        | Stmt::Region { body, .. }
+        | Stmt::NurseryBlock { body, .. }
+        | Stmt::Frozen { body, .. } => {
             walk_stmts_for_mono(body, db, diag);
+        }
+        Stmt::Guard { else_body, .. } => {
+            walk_stmts_for_mono(else_body, db, diag);
         }
         Stmt::ForCount { init, step, body, .. } => {
             walk_stmt_for_mono(init, db, diag);
@@ -782,11 +822,13 @@ fn collect(db: &mut CheckDb, programs: &[Program], diag: &mut Diagnostics) {
                             .iter()
                             .map(|p| (p.name.clone(), ast_to_type(&p.ty), p.default.is_some()))
                             .collect(),
+                        inout_params: m.params.iter().map(|p| p.is_inout).collect(),
                         ret: m.ret.as_ref().map(ast_to_type).unwrap_or(Type::Void),
                         is_method: true,
                         blueprint: None,
                         is_async: false,
                         is_static: false,
+                        is_verified: false,
                         is_extern: false,
                         defaults: vec![],
                     })
@@ -869,6 +911,7 @@ fn collect(db: &mut CheckDb, programs: &[Program], diag: &mut Diagnostics) {
                             size: 0,
                             type_id: db.blueprints.len() as i64 + 1,
                             is_generic: false,
+                            is_resource: b.is_resource,
                         },
                     );
                 } else {
@@ -890,6 +933,7 @@ fn collect(db: &mut CheckDb, programs: &[Program], diag: &mut Diagnostics) {
                             size: 0,
                             type_id: 0,
                             is_generic: true,
+                            is_resource: b.is_resource,
                         },
                     );
                 }
@@ -953,6 +997,7 @@ fn collect(db: &mut CheckDb, programs: &[Program], diag: &mut Diagnostics) {
                     sig.llvm = format!("sn_ext_{}_{}", key, m.name);
                     sig.is_method = true;
                     sig.params.insert(0, ("self".into(), ast_to_type(&e.ty), false));
+                    sig.inout_params.insert(0, false);
                     db.funcs.insert(format!("{key}::{mname}", key = key, mname = m.name), sig);
                     db.extensions
                         .entry(key.clone())
@@ -1021,6 +1066,8 @@ pub fn resolve_type_ast(t: &TypeAst, db: &CheckDb) -> Type {
         TypeAst::Map(k, v) => Type::Map(Box::new(resolve_type_ast(k, db)), Box::new(resolve_type_ast(v, db))),
         TypeAst::Chan(inner) => Type::Chan(Box::new(resolve_type_ast(inner, db))),
         TypeAst::Ref(inner) => Type::Ref(Box::new(resolve_type_ast(inner, db))),
+        TypeAst::Pool(inner) => Type::Pool(Box::new(resolve_type_ast(inner, db))),
+        TypeAst::Handle(inner) => Type::Handle(Box::new(resolve_type_ast(inner, db))),
         TypeAst::Optional(inner) => Type::Optional(Box::new(resolve_type_ast(inner, db))),
         TypeAst::Tuple(ts) => Type::Tuple(ts.iter().map(|x| resolve_type_ast(x, db)).collect()),
         TypeAst::Fn { params, ret } => Type::Fn {
@@ -1117,17 +1164,19 @@ fn fn_sig(f: &FnItem, bp: Option<String>, db: &CheckDb) -> FuncSig {
     };
     FuncSig {
         name: f.name.clone(),
-        llvm,
+        llvm: llvm.replace('.', "_"),
         params: f
             .params
             .iter()
             .map(|p| (p.name.clone(), resolve_type_ast(&p.ty, db), p.default.is_some()))
             .collect(),
+        inout_params: f.params.iter().map(|p| p.is_inout).collect(),
         ret: f.ret.as_ref().map(|t| resolve_type_ast(t, db)).unwrap_or(Type::Void),
         is_method: bp.is_some(),
         blueprint: bp,
         is_async: f.is_async,
         is_static: f.is_static,
+        is_verified: f.is_verified,
         is_extern: false,
         defaults: f.params.iter().map(|p| p.default.clone()).collect(),
     }
@@ -1173,8 +1222,12 @@ fn check_contracts(db: &mut CheckDb, diag: &mut Diagnostics) {
 impl Checker<'_> {
     fn push(&mut self) {
         self.scopes.push(HashMap::new());
+        self.local_scopes.push(Vec::new());
     }
     fn pop(&mut self) {
+        if let Some(frame) = self.local_scopes.pop() {
+            self.end_local_scope(&frame);
+        }
         self.scopes.pop();
     }
     fn declare(&mut self, name: &str, ty: Type, is_const: bool, span: Span) {
@@ -1197,6 +1250,15 @@ impl Checker<'_> {
         }
         if let Some(t) = self.db.globals.get(name) {
             return Some((t.clone(), false));
+        }
+        None
+    }
+
+    fn scope_depth_of(&self, name: &str) -> Option<usize> {
+        for (idx, scope) in self.scopes.iter().enumerate().rev() {
+            if scope.contains_key(name) {
+                return Some(idx);
+            }
         }
         None
     }
@@ -1249,11 +1311,14 @@ impl Checker<'_> {
     fn check_fn(&mut self, f: &FnItem) {
         let prev_static = self.in_static;
         self.in_static = f.is_static;
-        self.push();
         self.moved.clear();
+        self.channel_moved.clear();
+        self.freed.clear();
         self.borrowed.clear();
         self.borrow_owner.clear();
-        self.local_scopes.push(Vec::new());
+        self.list_epochs.clear();
+        self.borrow_epoch.clear();
+        self.push();
         if let Some(bp) = &self.current_bp {
             if !f.is_static {
                 self.declare("self", Type::Blueprint(bp.clone()), true, f.span);
@@ -1281,9 +1346,6 @@ impl Checker<'_> {
             self.check_stmt(s);
         }
         self.in_async = was_async;
-        if let Some(frame) = self.local_scopes.pop() {
-            self.end_local_scope(&frame);
-        }
         self.pop();
         self.in_static = prev_static;
     }
@@ -1350,16 +1412,36 @@ impl Checker<'_> {
                     if Self::is_borrow_type(&decl_ty_clone) {
                         if let Some(val) = value {
                             match &val.kind {
-                                // ref<T> r = address(x)  /  mut<T> m = address(x)
+                                // ref<T> r = address(x)  /  mut<T> m = address(x)  /  xs.push_ref(v)
                                 ExprKind::Call { callee, args, .. } => {
                                     let is_address = matches!(&callee.kind,
                                         ExprKind::Ident(f) if f == "address" || f == "as_ptr");
                                     if is_address {
                                         if let Some(Arg::Pos(a)) = args.first() {
-                                            if let ExprKind::Ident(owner) = &a.kind {
-                                                self.register_borrow(
-                                                    name, owner, exclusive, *span,
-                                                );
+                                            match &a.kind {
+                                                ExprKind::Ident(owner) => {
+                                                    self.register_borrow(
+                                                        name, owner, exclusive, *span,
+                                                    );
+                                                }
+                                                ExprKind::Index { base, .. } | ExprKind::Member { base, .. } => {
+                                                    if let Some(root) = Self::root_var_of_expr(base) {
+                                                        self.borrow_owner.insert(name.to_string(), root.clone());
+                                                        let ep = self.list_epochs.get(&root).copied().unwrap_or(0);
+                                                        self.borrow_epoch.insert(name.to_string(), (root.clone(), ep));
+                                                        self.borrowed.insert(root, (name.to_string(), exclusive));
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                    } else if let ExprKind::Member { base, name: mname } = &callee.kind {
+                                        if mname == "push_ref" {
+                                            if let Some(root) = Self::root_var_of_expr(base) {
+                                                self.borrow_owner.insert(name.to_string(), root.clone());
+                                                let ep = self.list_epochs.get(&root).copied().unwrap_or(0);
+                                                self.borrow_epoch.insert(name.to_string(), (root.clone(), ep));
+                                                self.borrowed.insert(root, (name.to_string(), exclusive));
                                             }
                                         }
                                     }
@@ -1371,19 +1453,21 @@ impl Checker<'_> {
                                         .map(|(t, _)| Self::is_borrow_type(&t))
                                         .unwrap_or(false);
                                     if src_is_borrow {
-                                        // Following a borrow: the source borrow
-                                        // is consumed, and the underlying owner
-                                        // stays borrowed by the new name.
                                         if let Some(owner) =
                                             self.borrow_owner.get(src).cloned()
                                         {
-                                            self.borrowed.remove(&owner);
-                                            self.borrowed.insert(
-                                                owner.clone(),
-                                                (name.to_string(), exclusive),
-                                            );
+                                            if self.borrowed.contains_key(&owner) {
+                                                self.borrowed.remove(&owner);
+                                                self.borrowed.insert(
+                                                    owner.clone(),
+                                                    (name.to_string(), exclusive),
+                                                );
+                                            }
                                             self.borrow_owner
                                                 .insert(name.to_string(), owner);
+                                        }
+                                        if let Some(ep) = self.borrow_epoch.get(src).cloned() {
+                                            self.borrow_epoch.insert(name.to_string(), ep);
                                         }
                                         self.moved.insert(src.clone(), *span);
                                     }
@@ -1393,7 +1477,17 @@ impl Checker<'_> {
                         }
                     }
                 } else {
-                    let vt = value.as_ref().map(|v| self.check_expr(v));
+                    let mut vt = None;
+                    if names.len() == 2 {
+                        if let Some(v) = value {
+                            if let Some(elem) = self.chan_recv_elem_ty(v) {
+                                let tuple_t = Type::Tuple(vec![elem, Type::Bool]);
+                                self.set_ty(v.span, tuple_t.clone());
+                                vt = Some(tuple_t);
+                            }
+                        }
+                    }
+                    let vt = vt.or_else(|| value.as_ref().map(|v| self.check_expr(v)));
                     match vt {
                         Some(Type::Tuple(ts)) if ts.len() == names.len() => {
                             for (n, t) in names.iter().zip(ts.into_iter()) {
@@ -1411,10 +1505,26 @@ impl Checker<'_> {
                 value,
                 span,
             } => {
+                if let ExprKind::Tuple(els) = &target.kind {
+                    if els.len() == 2 {
+                        if let Some(elem) = self.chan_recv_elem_ty(value) {
+                            let tuple_t = Type::Tuple(vec![elem.clone(), Type::Bool]);
+                            self.set_ty(value.span, tuple_t);
+                            for (i, el) in els.iter().enumerate() {
+                                if let ExprKind::Ident(n) = &el.kind {
+                                    if self.lookup(n).is_none() {
+                                        let ty = if i == 0 { elem.clone() } else { Type::Bool };
+                                        self.declare(n, ty, false, el.span);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 let tt = self.check_expr(target);
                 let vt = self.check_expr(value);
                 if let ExprKind::Ident(n) = &target.kind {
-                    if self.lookup(n).map(|(_, c)| c).unwrap_or(false) && *op == AssignOp::Eq {
+                    if self.lookup(n).map(|(_, c)| c).unwrap_or(false) {
                         self.diag.error(*span, format!("cannot assign to const '{n}'"));
                     }
                 }
@@ -1448,16 +1558,77 @@ impl Checker<'_> {
                             }
                         }
                     }
+                    if let Some(root) = Self::root_var_of_expr(target) {
+                        let borrower = self.borrowed.get(&root).map(|(b, _)| b.clone()).or_else(|| {
+                            self.borrow_owner.iter().find(|(_, o)| *o == &root).map(|(b, _)| b.clone())
+                        });
+                        if let Some(borrower) = borrower {
+                            self.diag.error(*span, format!("cannot mutate '{root}' while borrowed by '{borrower}'"));
+                        }
+                    }
+                    if let Some(local_name) = self.local_address_source(value) {
+                        if let Some(local_depth) = self.scope_depth_of(&local_name) {
+                            let mut outlives = false;
+                            match &target.kind {
+                                ExprKind::Member { base, .. } => {
+                                    let bt = self.check_expr(base);
+                                    if matches!(bt, Type::Blueprint(_)) {
+                                        outlives = true;
+                                    } else if let Some(base_root) = Self::root_var_of_expr(base) {
+                                        let base_depth = self.scope_depth_of(&base_root);
+                                        if base_depth.map(|d| d < local_depth).unwrap_or(true) {
+                                            outlives = true;
+                                        }
+                                    }
+                                }
+                                ExprKind::Ident(target_name) => {
+                                    let target_depth = self.scope_depth_of(target_name);
+                                    if target_depth.map(|d| d < local_depth).unwrap_or(true) {
+                                        outlives = true;
+                                    }
+                                }
+                                ExprKind::Index { base, .. } => {
+                                    if let Some(base_root) = Self::root_var_of_expr(base) {
+                                        let base_depth = self.scope_depth_of(&base_root);
+                                        if base_depth.map(|d| d < local_depth).unwrap_or(true) {
+                                            outlives = true;
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                            if outlives {
+                                self.diag.error(
+                                    *span,
+                                    format!("cannot assign address of local '{local_name}': target outlives declaring scope"),
+                                );
+                            }
+                        }
+                    }
                     if let ExprKind::Ident(n) = &target.kind {
-                        if let Some((Type::Ref(_), _)) = self.lookup(n) {
-                            if self.moved.contains_key(n) {
-                                self.diag.error(*span, format!("use of moved ref '{n}'"));
+                        self.freed.remove(n);
+                        self.moved.remove(n);
+                        self.channel_moved.remove(n);
+                        if let Some((t, _)) = self.lookup(n) {
+                            if matches!(t, Type::List(_)) {
+                                let ep = self.list_epochs.entry(n.clone()).or_insert(0);
+                                *ep += 1;
+                            }
+                        }
+                    } else if let ExprKind::Tuple(els) = &target.kind {
+                        for el in els {
+                            if let ExprKind::Ident(n) = &el.kind {
+                                self.freed.remove(n);
+                                self.moved.remove(n);
+                                self.channel_moved.remove(n);
                             }
                         }
                     }
                     if let ExprKind::Ident(n) = &value.kind {
-                        if let Some((Type::Ref(_), _)) = self.lookup(n) {
-                            self.moved.insert(n.clone(), *span);
+                        if let Some((t, _)) = self.lookup(n) {
+                            if Self::is_borrow_type(&t) {
+                                self.moved.insert(n.clone(), *span);
+                            }
                         }
                     }
                 } else {
@@ -1619,7 +1790,7 @@ impl Checker<'_> {
                                                     } else {
                                                         for (i, a) in args.iter().enumerate() {
                                                             let arg_e = match a {
-                                                                Arg::Pos(e) | Arg::Named { value: e, .. } => e,
+                                                                Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. } => e,
                                                             };
                                                             if let ExprKind::Ident(var_name) = &arg_e.kind {
                                                                 if var_name != "_" {
@@ -1705,7 +1876,7 @@ impl Checker<'_> {
                     );
                 }
             }
-            Stmt::Return { value, span } => {
+            Stmt::Return { value, span, .. } => {
                 let vt = value.as_ref().map(|v| self.check_expr(v)).unwrap_or(Type::Void);
                 if !self.current_fn_ret.assignable_from(&vt, &self.db.blueprints) && self.current_fn_ret != vt {
                     self.diag.error(
@@ -1716,18 +1887,39 @@ impl Checker<'_> {
                 // A borrow of a local cannot outlive the function.
                 if Self::is_borrow_type(&self.current_fn_ret) || Self::is_borrow_type(&vt) {
                     if let Some(val) = value {
-                        if let ExprKind::Ident(n) = &val.kind {
-                            if let Some(owner) = self.borrow_owner.get(n).cloned() {
-                                if self.lookup(&owner).is_some() {
-                                    self.diag.error(
-                                        *span,
-                                        format!(
-                                            "cannot return '{n}': it borrows '{owner}', \
-                                             which is local to this function"
-                                        ),
-                                    );
+                        match &val.kind {
+                            ExprKind::Ident(n) => {
+                                if let Some(owner) = self.borrow_owner.get(n).cloned() {
+                                    if self.scopes.iter().any(|s| s.contains_key(&owner)) {
+                                        self.diag.error(
+                                            *span,
+                                            format!(
+                                                "cannot return '{n}': it borrows '{owner}', \
+                                                 which is local to this function"
+                                            ),
+                                        );
+                                    }
                                 }
                             }
+                            ExprKind::Call { callee, args, .. } => {
+                                let is_address = matches!(&callee.kind,
+                                    ExprKind::Ident(f) if f == "address" || f == "as_ptr");
+                                if is_address {
+                                    if let Some(Arg::Pos(a)) = args.first() {
+                                        if let Some(owner) = Self::root_var_of_expr(a) {
+                                            if self.scopes.iter().any(|s| s.contains_key(&owner)) {
+                                                self.diag.error(
+                                                    *span,
+                                                    format!(
+                                                        "cannot assign address of local '{owner}': target outlives declaring scope"
+                                                    ),
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -1738,6 +1930,7 @@ impl Checker<'_> {
                 }
             }
             Stmt::SpawnBlock { body, .. } => {
+                self.check_spawn_block(body);
                 for s in body {
                     self.check_stmt(s);
                 }
@@ -1748,7 +1941,27 @@ impl Checker<'_> {
                 }
             }
             Stmt::SpawnExpr { expr, .. } => {
-                self.check_expr(expr);
+                if let ExprKind::Call { callee: _, args, .. } = &expr.kind {
+                    for a in args {
+                        let arg_expr = match a {
+                            Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. } => e,
+                        };
+                        let t = self.check_expr(arg_expr);
+                        if matches!(t, Type::Ref(_) | Type::Mut(_) | Type::Ptr) {
+                            self.diag.error(
+                                arg_expr.span,
+                                format!("cannot pass reference of type '{t}' to spawn: data race hazard"),
+                            );
+                        } else if let Type::Blueprint(bp) = &t {
+                            self.diag.error(
+                                arg_expr.span,
+                                format!("cannot pass blueprint '{bp}' to spawn without locking"),
+                            );
+                        }
+                    }
+                } else {
+                    self.check_expr(expr);
+                }
             }
             Stmt::LockBlock { name, body, span } => {
                 match self.lookup(name) {
@@ -1804,9 +2017,39 @@ impl Checker<'_> {
                 self.check_ctor_args(&bp, args, *span);
                 self.declare(name, Type::Blueprint(resolved.clone()), false, *span);
             }
-            Stmt::Defer { body, .. } => {
+            Stmt::Defer { body, .. }
+            | Stmt::ErrDefer { body, .. }
+            | Stmt::Region { body, .. }
+            | Stmt::NurseryBlock { body, .. } => {
+                self.push();
                 for s in body {
                     self.check_stmt(s);
+                }
+                self.pop();
+            }
+            Stmt::Frozen { body, .. } => {
+                self.push();
+                for s in body {
+                    self.check_stmt(s);
+                }
+                self.pop();
+            }
+            Stmt::Guard { cond, else_body, .. } => {
+                let ct = self.check_expr(cond);
+                if ct != Type::Bool {
+                    self.diag.error(cond.span, "guard condition must be bool");
+                }
+                let narrow = none_narrow(cond);
+                self.push();
+                if let Some((n, false)) = &narrow {
+                    self.rebind_unwrap(n);
+                }
+                for s in else_body {
+                    self.check_stmt(s);
+                }
+                self.pop();
+                if let Some((n, true)) = &narrow {
+                    self.rebind_unwrap(n);
                 }
             }
             Stmt::NestedFn(f) => {
@@ -1825,8 +2068,20 @@ impl Checker<'_> {
 
     fn check_ctor_args(&mut self, bp: &BlueprintInfo, args: &[Arg], span: Span) {
         for a in args {
+            let val_expr = match a {
+                Arg::Pos(e) | Arg::Inout(e) => e,
+                Arg::Named { value, .. } => value,
+            };
+            if let Some(local_name) = self.local_address_source(val_expr) {
+                if self.scope_depth_of(&local_name).is_some() {
+                    self.diag.error(
+                        val_expr.span,
+                        format!("cannot assign address of local '{local_name}': target outlives declaring scope"),
+                    );
+                }
+            }
             match a {
-                Arg::Pos(e) => {
+                Arg::Pos(e) | Arg::Inout(e) => {
                     self.check_expr(e);
                 }
                 Arg::Named { name, value } => {
@@ -1866,11 +2121,31 @@ impl Checker<'_> {
                 }
             }
             ExprKind::Ident(n) => {
-                if self.moved.contains_key(n) {
-                    if let Some((Type::Ref(_), _)) = self.lookup(n) {
-                        self.diag.error(e.span, format!("use of moved ref '{n}'"));
+                if self.freed.contains(n) {
+                    self.diag.error(e.span, format!("use of freed pointer '{n}'"));
+                } else if self.moved.contains_key(n) {
+                    if self.channel_moved.contains(n) {
+                        self.diag.error(
+                            e.span,
+                            format!("use of moved value '{n}': value was transferred over channel"),
+                        );
+                    } else if let Some((t, _)) = self.lookup(n) {
+                        if Self::is_borrow_type(&t) {
+                            self.diag.error(e.span, format!("use of moved ref '{n}'"));
+                        } else {
+                            self.diag.error(
+                                e.span,
+                                format!("use of moved value '{n}': value was transferred over channel"),
+                            );
+                        }
+                    } else {
+                        self.diag.error(
+                            e.span,
+                            format!("use of moved value '{n}': value was transferred over channel"),
+                        );
                     }
                 }
+                self.check_borrow_epoch(n, e.span);
                 if let Some((t, _)) = self.lookup(n) {
                     t
                 } else if self.db.blueprints.contains_key(n) {
@@ -1933,6 +2208,15 @@ impl Checker<'_> {
                     || n == "select_read"
                     || n == "ptr_int"
                     || n == "bytearray_new"
+                    || n == "sb_new"
+                    || n == "sb_append"
+                    || n == "sb_append_str"
+                    || n == "sb_append_cstr"
+                    || n == "sb_append_int"
+                    || n == "sb_append_byte"
+                    || n == "sb_to_str"
+                    || n == "sb_len"
+                    || n == "sb_clear"
                     || n == "bytearray_len"
                     || n == "bytearray_reserve"
                     || n == "bytearray_push"
@@ -1988,6 +2272,19 @@ impl Checker<'_> {
                     || n == "hton32" || n == "ntoh32"
                     || n == "hton64" || n == "ntoh64"
                     || n == "swap16" || n == "swap32" || n == "swap64"
+                    || n == "lane_alloc"
+                    || n == "lane_save"
+                    || n == "lane_restore"
+                    || n == "lane_used"
+                    || n == "lane_freeze"
+                    || n == "lane_unfreeze"
+                    || n == "pool_new"
+                    || n == "pool_insert"
+                    || n == "pool_get"
+                    || n == "pool_set"
+                    || n == "pool_remove"
+                    || n == "pool_is_valid"
+                    || n == "pool_len"
                 {
                     Type::Named(format!("builtin:{n}"))
                 } else {
@@ -2144,7 +2441,7 @@ impl Checker<'_> {
                 };
                 self.check_arity(&sig, args, e.span);
                 for a in args {
-                    if let Arg::Pos(ex) = a {
+                    if let Arg::Pos(ex) | Arg::Inout(ex) = a {
                         self.check_expr(ex);
                     } else if let Arg::Named { value, .. } = a {
                         self.check_expr(value);
@@ -2159,8 +2456,10 @@ impl Checker<'_> {
                 }
                 match t {
                     Type::Named(n) if n == "future" => Type::Int,
-                    Type::Tuple(ts) if ts.len() == 2 => ts[0].clone(),
-                    other => other,
+                    _ => {
+                        self.diag.error(inner.span, format!("cannot await non-future type '{t}'"));
+                        Type::Int
+                    }
                 }
             }
             ExprKind::Try(inner) => {
@@ -2407,7 +2706,7 @@ impl Checker<'_> {
                 if self.lookup(bpname).is_none() && self.db.blueprints.contains_key(bpname) {
                     for a in args {
                         match a {
-                            Arg::Pos(e) | Arg::Named { value: e, .. } => {
+                            Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. } => {
                                 self.check_expr(e);
                             }
                         }
@@ -2438,7 +2737,7 @@ impl Checker<'_> {
                             } else {
                                 for (i, a) in args.iter().enumerate() {
                                     let arg_expr = match a {
-                                        Arg::Pos(e) | Arg::Named { value: e, .. } => e,
+                                        Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. } => e,
                                     };
                                     let at = self.check_expr(arg_expr);
                                     let expected_ty = &var.fields[i].1;
@@ -2463,9 +2762,30 @@ impl Checker<'_> {
             let bt = self.check_expr(base);
             for a in args {
                 match a {
-                    Arg::Pos(e) | Arg::Named { value: e, .. } => {
+                    Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. } => {
                         self.check_expr(e);
                     }
+                }
+            }
+            if matches!(bt, Type::List(_) | Type::Map(_, _)) {
+                if matches!(name.as_str(), "push" | "push_ref" | "insert" | "clear" | "pop" | "truncate" | "remove") {
+                    if let Some(root) = Self::root_var_of_expr(base) {
+                        let borrower = self.borrowed.get(&root).map(|(b, _)| b.clone()).or_else(|| {
+                            self.borrow_owner.iter().find(|(_, o)| *o == &root).map(|(b, _)| b.clone())
+                        });
+                        if let Some(borrower) = borrower {
+                            self.diag.error(
+                                span,
+                                format!("cannot mutate '{root}' while borrowed by '{borrower}'"),
+                            );
+                        }
+                    }
+                }
+            }
+            if matches!(bt, Type::List(_)) && (name == "pop" || name == "clear" || name == "truncate") {
+                if let Some(root) = Self::root_var_of_expr(base) {
+                    let ep = self.list_epochs.entry(root).or_insert(0);
+                    *ep += 1;
                 }
             }
             let t = self.method_ret(&bt, name, args, span);
@@ -2485,7 +2805,7 @@ impl Checker<'_> {
                     for (i, p) in template.params.iter().enumerate() {
                         if let Some(arg) = args.get(i) {
                             let arg_expr = match arg {
-                                Arg::Pos(e) | Arg::Named { value: e, .. } => e,
+                                Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. } => e,
                             };
                             let aty = self.check_expr(arg_expr);
                             infer_type_param(&p.ty, &aty, &type_param_names, &mut inferred);
@@ -2518,7 +2838,7 @@ impl Checker<'_> {
                 self.db.resolved_calls.insert((callee.span.file, callee.span.start, callee.span.end), mono.clone());
                 for a in args {
                     match a {
-                        Arg::Pos(e) | Arg::Named { value: e, .. } => {
+                        Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. } => {
                             self.check_expr(e);
                         }
                     }
@@ -2528,19 +2848,45 @@ impl Checker<'_> {
                     return sig.ret;
                 }
             }
+            if n == "free" {
+                if args.len() != 1 {
+                    self.diag.error(span, "free expects 1 arg");
+                    return Type::Void;
+                }
+                let arg = &args[0];
+                let arg_expr = match arg {
+                    Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. } => e,
+                };
+                if let Some(p_name) = Self::root_var_of_expr(arg_expr) {
+                    if self.freed.contains(&p_name) {
+                        self.diag.error(span, format!("double free of '{p_name}'"));
+                        return Type::Void;
+                    }
+                    self.check_expr(arg_expr);
+                    self.freed.insert(p_name.clone());
+                    self.moved.insert(p_name, span);
+                    return Type::Void;
+                }
+            }
             for a in args {
                 match a {
-                    Arg::Pos(e) | Arg::Named { value: e, .. } => {
+                    Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. } => {
                         self.check_expr(e);
                     }
                 }
+            }
+            if n == "pool_new" {
+                if let Some(arg) = type_args.first() {
+                    return Type::Pool(Box::new(resolve_type_ast(arg, self.db)));
+                }
+                return Type::Ptr;
             }
             return self.ident_call(n, args, span);
         }
         let ct = self.check_expr(callee);
         for a in args {
             match a {
-                Arg::Pos(e) | Arg::Named { value: e, .. } => {
+                Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. } => {
                     self.check_expr(e);
                 }
             }
@@ -2571,7 +2917,31 @@ impl Checker<'_> {
             return sig.ret;
         }
         match n {
-            "print" | "printn" | "free" | "set" | "panic" => Type::Void,
+            "print" | "printn" | "free" | "panic" => Type::Void,
+            "set" => {
+                if args.len() != 2 {
+                    self.diag.error(span, "set expects 2 args: set(ptr, value)");
+                    return Type::Void;
+                }
+                if let (Some(Arg::Pos(p_expr)), Some(Arg::Pos(v_expr))) = (args.first(), args.get(1)) {
+                    let pt = self.db.expr_ty.get(&(p_expr.span.file, p_expr.span.start, p_expr.span.end)).cloned().unwrap_or(Type::Ptr);
+                    let vt = self.db.expr_ty.get(&(v_expr.span.file, v_expr.span.start, v_expr.span.end)).cloned().unwrap_or(Type::Int);
+                    match &pt {
+                        Type::Ref(inner) | Type::Mut(inner) => {
+                            let int_compat = matches!(**inner, Type::Byte | Type::Int | Type::I8 | Type::I16 | Type::I32 | Type::U8 | Type::U16 | Type::U32 | Type::U64)
+                                && matches!(vt, Type::Byte | Type::Int | Type::I8 | Type::I16 | Type::I32 | Type::U8 | Type::U16 | Type::U32 | Type::U64);
+                            if !inner.assignable_from(&vt, &self.db.blueprints) && !int_compat {
+                                self.diag.error(v_expr.span, format!("cannot store {vt} into pointer to {inner}"));
+                            }
+                        }
+                        Type::Ptr => {}
+                        other => {
+                            self.diag.error(p_expr.span, format!("set requires a ref<T>, mut<T>, or ptr, got {other}"));
+                        }
+                    }
+                }
+                Type::Void
+            }
             "input" | "file_read" => Type::Str,
             "file_write" => Type::Bool,
             "file_read_ex" => Type::Tuple(vec![Type::Str, Type::Error]),
@@ -2622,7 +2992,11 @@ impl Checker<'_> {
             "tcp_write" => Type::Int,
             "tcp_close" => Type::Void,
             "select_read" => Type::Int,
-            "bytearray_new" | "bytearray_slice" => Type::Ptr,
+            "bytearray_new" | "bytearray_slice" | "sb_new" => Type::Ptr,
+            "sb_to_str" => Type::Str,
+            "sb_len" => Type::Int,
+            "sb_append" | "sb_append_str" | "sb_append_cstr" | "sb_append_int" | "sb_append_byte"
+            | "sb_clear" => Type::Void,
             "bytearray_data" => Type::Ptr,
             "sha256" | "sha512" | "md5" | "hmac_sha256" => Type::Ptr,
             "digest_sha256" | "digest_sha512" | "digest_md5" | "digest_hmac_sha256" => Type::Ptr,
@@ -2664,6 +3038,34 @@ impl Checker<'_> {
             "hton16" | "ntoh16" | "swap16" => Type::U16,
             "hton32" | "ntoh32" | "swap32" => Type::U32,
             "hton64" | "ntoh64" | "swap64" => Type::U64,
+            "lane_alloc" | "lane_save" | "pool_new" => Type::Ptr,
+            "lane_restore" | "lane_freeze" | "lane_unfreeze" | "pool_set" | "pool_remove" => Type::Void,
+            "lane_used" | "pool_len" => Type::Int,
+            "pool_is_valid" => Type::Bool,
+            "pool_insert" => {
+                if let Some(Arg::Pos(p_expr)) = args.first() {
+                    let pt = self.db.expr_ty.get(&(p_expr.span.file, p_expr.span.start, p_expr.span.end)).cloned().unwrap_or(Type::Ptr);
+                    if let Type::Pool(elem) = pt {
+                        Type::Handle(elem)
+                    } else {
+                        Type::Int
+                    }
+                } else {
+                    Type::Int
+                }
+            }
+            "pool_get" => {
+                if let Some(Arg::Pos(p_expr)) = args.first() {
+                    let pt = self.db.expr_ty.get(&(p_expr.span.file, p_expr.span.start, p_expr.span.end)).cloned().unwrap_or(Type::Ptr);
+                    if let Type::Pool(elem) = pt {
+                        *elem
+                    } else {
+                        Type::Int
+                    }
+                } else {
+                    Type::Int
+                }
+            }
             _ => {
                 if let Some((Type::Fn { ret, params }, _)) = self.lookup(n) {
                     if args.len() != params.len() {
@@ -2703,7 +3105,7 @@ impl Checker<'_> {
                 continue;
             };
             let expr = match a {
-                Arg::Pos(e) | Arg::Named { value: e, .. } => e,
+                Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. } => e,
             };
             let aty = self.db
                 .expr_ty
@@ -2756,9 +3158,61 @@ impl Checker<'_> {
                     }
                 }
             }
+            self.borrow_epoch.remove(n);
+            self.list_epochs.remove(n);
             // A moved binding becomes valid again in the enclosing scope only if
             // it was declared here; otherwise the move still stands.
             self.moved.remove(n);
+            self.channel_moved.remove(n);
+            self.freed.remove(n);
+        }
+    }
+
+    fn root_var_of_expr(e: &Expr) -> Option<String> {
+        match &e.kind {
+            ExprKind::Ident(n) => Some(n.clone()),
+            ExprKind::Index { base, .. } | ExprKind::Member { base, .. } => Self::root_var_of_expr(base),
+            _ => None,
+        }
+    }
+
+    fn local_address_source(&self, expr: &Expr) -> Option<String> {
+        match &expr.kind {
+            ExprKind::Call { callee, args, .. } => {
+                if let ExprKind::Ident(f) = &callee.kind {
+                    if f == "address" || f == "as_ptr" {
+                        if let Some(arg) = args.first() {
+                            let arg_expr = match arg {
+                                Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. } => e,
+                            };
+                            return Self::root_var_of_expr(arg_expr);
+                        }
+                    }
+                }
+                None
+            }
+            ExprKind::Ident(name) => {
+                if let Some(owner) = self.borrow_owner.get(name) {
+                    Some(owner.clone())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn check_borrow_epoch(&mut self, borrower: &str, span: Span) {
+        if let Some((container, taken_epoch)) = self.borrow_epoch.get(borrower).cloned() {
+            let cur_epoch = self.list_epochs.get(&container).copied().unwrap_or(0);
+            if taken_epoch < cur_epoch {
+                self.diag.error(
+                    span,
+                    format!(
+                        "cannot use '{borrower}': container '{container}' was shrunk or cleared after borrow was taken (shrink-epoch violation)"
+                    ),
+                );
+            }
         }
     }
 
@@ -2787,6 +3241,78 @@ impl Checker<'_> {
                     params.len()
                 ),
             );
+            return;
+        }
+        let inout_flags = if is_method && sig.inout_params.len() > param_offset {
+            &sig.inout_params[param_offset..]
+        } else {
+            &sig.inout_params[..]
+        };
+        let mut inout_roots: Vec<String> = Vec::new();
+        for (i, a) in args.iter().enumerate() {
+            let is_param_inout = inout_flags.get(i).copied().unwrap_or(false);
+            let (expr, arg_marked_inout) = match a {
+                Arg::Inout(e) => (e, true),
+                Arg::Pos(e) | Arg::Named { value: e, .. } => (e, false),
+            };
+            if arg_marked_inout && !is_param_inout {
+                self.diag.error(
+                    expr.span,
+                    format!("parameter {} of '{}' is not declared 'inout'", i + 1, sig.name),
+                );
+            }
+            if is_param_inout {
+                match &expr.kind {
+                    ExprKind::Ident(var) => {
+                        if self.lookup(var).map(|(_, is_c)| is_c).unwrap_or(false) {
+                            self.diag.error(expr.span, format!("cannot pass const '{var}' as 'inout'"));
+                        }
+                        if self.borrowed.contains_key(var) {
+                            self.diag.error(
+                                expr.span,
+                                format!("cannot pass '{var}' as 'inout' while it is borrowed"),
+                            );
+                        }
+                        if inout_roots.contains(var) {
+                            self.diag.error(
+                                expr.span,
+                                format!("cannot pass '{var}' to multiple 'inout' parameters in the same call (law of exclusivity)"),
+                            );
+                        }
+                        inout_roots.push(var.clone());
+                    }
+                    ExprKind::Index { .. } | ExprKind::Member { .. } => {
+                        if let Some(root) = Self::root_var_of_expr(expr) {
+                            if inout_roots.contains(&root) {
+                                self.diag.error(
+                                    expr.span,
+                                    format!("cannot pass '{root}' to multiple 'inout' parameters in the same call (law of exclusivity)"),
+                                );
+                            }
+                            inout_roots.push(root);
+                        }
+                    }
+                    _ => {
+                        self.diag.error(expr.span, "'inout' argument must be a mutable variable");
+                    }
+                }
+            }
+        }
+        for (i, a) in args.iter().enumerate() {
+            let is_param_inout = inout_flags.get(i).copied().unwrap_or(false);
+            if !is_param_inout {
+                let expr = match a {
+                    Arg::Inout(e) | Arg::Pos(e) | Arg::Named { value: e, .. } => e,
+                };
+                if let ExprKind::Ident(var) = &expr.kind {
+                    if inout_roots.contains(var) {
+                        self.diag.error(
+                            expr.span,
+                            format!("cannot pass '{var}' as both 'inout' and shared argument in the same call (law of exclusivity)"),
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -2833,6 +3359,22 @@ impl Checker<'_> {
                 return Some(sig);
             }
             cur = self.db.blueprints.get(&c).and_then(|b| b.parent.clone());
+        }
+        None
+    }
+
+    fn chan_recv_elem_ty(&mut self, expr: &Expr) -> Option<Type> {
+        if let ExprKind::Call { callee, args, .. } = &expr.kind {
+            if args.is_empty() {
+                if let ExprKind::Member { base, name } = &callee.kind {
+                    if name == "receive" {
+                        let bt = self.check_expr(base);
+                        if let Type::Chan(inner) = bt {
+                            return Some(*inner);
+                        }
+                    }
+                }
+            }
         }
         None
     }
@@ -2885,6 +3427,31 @@ impl Checker<'_> {
                 }
                 Type::Void
             }
+            (Type::List(elem), "push_ref") => {
+                if args.len() != 1 {
+                    self.diag.error(span, "push_ref expects 1 arg");
+                    return Type::Ref(elem.clone());
+                }
+                if let Some(Arg::Pos(e)) = args.first() {
+                    let t = self.check_expr(e);
+                    if !elem.assignable_from(&t, &self.db.blueprints) {
+                        self.diag.error(e.span, format!("cannot push {t} into list<{elem}>"));
+                    }
+                }
+                Type::Ref(elem.clone())
+            }
+            (Type::List(elem), "pop") => {
+                if !args.is_empty() {
+                    self.diag.error(span, "pop expects 0 args");
+                }
+                *elem.clone()
+            }
+            (Type::List(_), "clear") => {
+                if !args.is_empty() {
+                    self.diag.error(span, "clear expects 0 args");
+                }
+                Type::Void
+            }
             (Type::List(_), "length") => Type::Int,
             (Type::Map(_, _), "length") => Type::Int,
             (Type::Map(k, _), "keys") => Type::List(k.clone()),
@@ -2902,8 +3469,57 @@ impl Checker<'_> {
                 }
                 Type::Bool
             }
-            (Type::Chan(_), "send") => Type::Void,
-            (Type::Chan(t), "receive") => *t.clone(),
+            (Type::Map(k, v), "insert") => {
+                if args.len() != 2 {
+                    self.diag.error(span, "insert expects 2 args");
+                    return Type::Void;
+                }
+                if let (Some(Arg::Pos(ke)), Some(Arg::Pos(ve))) = (args.first(), args.get(1)) {
+                    let kt = self.check_expr(ke);
+                    let vt = self.check_expr(ve);
+                    if !k.assignable_from(&kt, &self.db.blueprints) {
+                        self.diag.error(ke.span, format!("cannot use key of type {kt} for map<{k}, {v}>"));
+                    }
+                    if !v.assignable_from(&vt, &self.db.blueprints) {
+                        self.diag.error(ve.span, format!("cannot insert value of type {vt} into map<{k}, {v}>"));
+                    }
+                }
+                Type::Void
+            }
+            (Type::Map(_, _), "clear") => {
+                if !args.is_empty() {
+                    self.diag.error(span, "clear expects 0 args");
+                }
+                Type::Void
+            }
+            (Type::Chan(t), "send") => {
+                if args.len() != 1 {
+                    self.diag.error(span, "send expects 1 argument");
+                    return Type::Void;
+                }
+                let arg_expr = match args.first() {
+                    Some(Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. }) => e,
+                    None => return Type::Void,
+                };
+                let at = self.check_expr(arg_expr);
+                if matches!(at, Type::Ref(_) | Type::Mut(_) | Type::Ptr) || matches!(**t, Type::Ref(_) | Type::Mut(_) | Type::Ptr) {
+                    self.diag.error(arg_expr.span, "cannot send references or pointers across channels");
+                } else if !t.assignable_from(&at, &self.db.blueprints) && at != **t {
+                    self.diag.error(arg_expr.span, format!("cannot send value of type {at} over chan<{t}>"));
+                }
+                if let Some(x) = Self::root_var_of_expr(arg_expr) {
+                    self.moved.insert(x.clone(), span);
+                    self.channel_moved.insert(x);
+                }
+                Type::Void
+            }
+            (Type::Chan(t), "receive") => {
+                if let Some(Type::Tuple(ts)) = self.db.expr_ty.get(&(span.file, span.start, span.end)).cloned() {
+                    Type::Tuple(ts)
+                } else {
+                    *t.clone()
+                }
+            }
             (Type::Chan(_), "close") => Type::Void,
             (Type::Error, "message") => Type::Str,
             (Type::Json, "encode") | (Type::Json, "as_str") => Type::Str,
@@ -2916,6 +3532,52 @@ impl Checker<'_> {
             (Type::Json, "get") => Type::Json,
             (Type::Json, "at") => Type::Json,
             (Type::Json, "keys") => Type::List(Box::new(Type::Str)),
+            (Type::Pool(elem), "insert") => {
+                if let Some(Arg::Pos(e)) = args.first() {
+                    let vt = self.check_expr(e);
+                    if !elem.assignable_from(&vt, &self.db.blueprints) {
+                        self.diag.error(e.span, format!("cannot insert {vt} into pool<{elem}>"));
+                    }
+                }
+                Type::Handle(elem.clone())
+            }
+            (Type::Pool(elem), "get") => {
+                if let Some(Arg::Pos(e)) = args.first() {
+                    self.check_expr(e);
+                }
+                (**elem).clone()
+            }
+            (Type::Pool(elem), "get_ref") => {
+                if let Some(Arg::Pos(e)) = args.first() {
+                    self.check_expr(e);
+                }
+                Type::Ref(elem.clone())
+            }
+            (Type::Pool(elem), "set") => {
+                if let Some(Arg::Pos(e)) = args.first() {
+                    self.check_expr(e);
+                }
+                if let Some(Arg::Pos(e)) = args.get(1) {
+                    let vt = self.check_expr(e);
+                    if !elem.assignable_from(&vt, &self.db.blueprints) {
+                        self.diag.error(e.span, format!("cannot set {vt} in pool<{elem}>"));
+                    }
+                }
+                Type::Void
+            }
+            (Type::Pool(_), "remove") => {
+                if let Some(Arg::Pos(e)) = args.first() {
+                    self.check_expr(e);
+                }
+                Type::Void
+            }
+            (Type::Pool(_), "is_valid") => {
+                if let Some(Arg::Pos(e)) = args.first() {
+                    self.check_expr(e);
+                }
+                Type::Bool
+            }
+            (Type::Pool(_), "length") | (Type::Pool(_), "len") => Type::Int,
             (Type::Blueprint(bp), m) => {
                 // Static methods must be invoked as Blueprint.method(), not on an instance.
                 if let Some(sig) = self.blueprint_sig(bp, m).cloned() {
@@ -2944,7 +3606,7 @@ impl Checker<'_> {
                         }
                         for a in args {
                             match a {
-                                Arg::Pos(e) | Arg::Named { value: e, .. } => { self.check_expr(e); }
+                                Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. } => { self.check_expr(e); }
                             }
                         }
                         return cm.ret.clone();
@@ -2987,6 +3649,7 @@ impl Checker<'_> {
             (Type::Chan(_), "open") => Type::Bool,
             (Type::Error, "message") => Type::Str,
             (Type::Json, "length") => Type::Int,
+            (Type::Pool(_), "length") | (Type::Pool(_), "len") => Type::Int,
             (Type::Record(rn), field) => {
                 if let Some(info) = self.db.records.get(rn) {
                     if let Some(f) = info.fields.iter().find(|f| f.name == *field) {
@@ -3077,6 +3740,125 @@ impl Checker<'_> {
             if let Some(scope) = self.scopes.last_mut() {
                 scope.insert(name.to_string(), (*inner, is_const));
             }
+        }
+    }
+
+    fn check_spawn_block(&mut self, body: &[Stmt]) {
+        let mut local_decls = HashSet::new();
+        self.check_spawn_stmts(body, &mut local_decls, false);
+    }
+
+    fn check_spawn_stmts(&mut self, stmts: &[Stmt], locals: &mut HashSet<String>, in_lock: bool) {
+        for s in stmts {
+            match s {
+                Stmt::Decl { names, value, .. } => {
+                    if let Some(v) = value {
+                        self.check_spawn_expr(v, locals, in_lock);
+                    }
+                    for n in names {
+                        locals.insert(n.clone());
+                    }
+                }
+                Stmt::Assign { target, value, .. } => {
+                    self.check_spawn_expr(target, locals, in_lock);
+                    self.check_spawn_expr(value, locals, in_lock);
+                }
+                Stmt::Expr(e) => {
+                    self.check_spawn_expr(e, locals, in_lock);
+                }
+                Stmt::LockBlock { body, .. } => {
+                    self.check_spawn_stmts(body, locals, true);
+                }
+                Stmt::If { cond, then_body, else_ifs, else_body, .. } => {
+                    self.check_spawn_expr(cond, locals, in_lock);
+                    self.check_spawn_stmts(then_body, locals, in_lock);
+                    for (c, b) in else_ifs {
+                        self.check_spawn_expr(c, locals, in_lock);
+                        self.check_spawn_stmts(b, locals, in_lock);
+                    }
+                    if let Some(eb) = else_body {
+                        self.check_spawn_stmts(eb, locals, in_lock);
+                    }
+                }
+                Stmt::While { cond, body, .. } => {
+                    self.check_spawn_expr(cond, locals, in_lock);
+                    self.check_spawn_stmts(body, locals, in_lock);
+                }
+                Stmt::ForCount { init, cond, step, body, .. } => {
+                    self.check_spawn_stmts(std::slice::from_ref(init), locals, in_lock);
+                    self.check_spawn_expr(cond, locals, in_lock);
+                    self.check_spawn_stmts(std::slice::from_ref(step), locals, in_lock);
+                    self.check_spawn_stmts(body, locals, in_lock);
+                }
+                Stmt::ForIn { name, iter, body, .. } => {
+                    self.check_spawn_expr(iter, locals, in_lock);
+                    locals.insert(name.clone());
+                    self.check_spawn_stmts(body, locals, in_lock);
+                }
+                Stmt::Return { value, .. } => {
+                    if let Some(v) = value {
+                        self.check_spawn_expr(v, locals, in_lock);
+                    }
+                }
+                Stmt::Defer { body, .. }
+                | Stmt::ErrDefer { body, .. }
+                | Stmt::Region { body, .. }
+                | Stmt::NurseryBlock { body, .. }
+                | Stmt::Frozen { body, .. } => {
+                    self.check_spawn_stmts(body, locals, in_lock);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn check_spawn_expr(&mut self, e: &Expr, locals: &HashSet<String>, in_lock: bool) {
+        if in_lock {
+            return;
+        }
+        match &e.kind {
+            ExprKind::Ident(n) => {
+                if !locals.contains(n) {
+                    if let Some((t, _)) = self.lookup(n) {
+                        if matches!(t, Type::Ref(_) | Type::Mut(_) | Type::Ptr) {
+                            self.diag.error(
+                                e.span,
+                                format!("cannot access reference '{n}' in spawn without synchronization: data race hazard"),
+                            );
+                        } else if let Type::Blueprint(bp) = &t {
+                            self.diag.error(
+                                e.span,
+                                format!("cannot access blueprint '{bp}' in spawn without locking"),
+                            );
+                        }
+                    }
+                }
+            }
+            ExprKind::Binary { lhs, rhs, .. } => {
+                self.check_spawn_expr(lhs, locals, in_lock);
+                self.check_spawn_expr(rhs, locals, in_lock);
+            }
+            ExprKind::Unary { expr, .. }
+            | ExprKind::Cast { expr, .. }
+            | ExprKind::Await(expr)
+            | ExprKind::Try(expr)
+            | ExprKind::ForceUnwrap(expr)
+            | ExprKind::OptionalChain(expr) => {
+                self.check_spawn_expr(expr, locals, in_lock);
+            }
+            ExprKind::Call { callee, args, .. } => {
+                self.check_spawn_expr(callee, locals, in_lock);
+                for a in args {
+                    let ae = match a {
+                        Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. } => e,
+                    };
+                    self.check_spawn_expr(ae, locals, in_lock);
+                }
+            }
+            ExprKind::Member { base, .. } | ExprKind::Index { base, .. } => {
+                self.check_spawn_expr(base, locals, in_lock);
+            }
+            _ => {}
         }
     }
 }

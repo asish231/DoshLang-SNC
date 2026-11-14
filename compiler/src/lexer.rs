@@ -113,7 +113,8 @@ impl<'a> Lexer<'a> {
                     self.pos += 2;
                     Ok(self.mk(TokenKind::BangBang, start, self.pos, "!!"))
                 } else {
-                    Err(self.err(start, "unexpected '!'"))
+                    self.pos += 1;
+                    Ok(self.mk(TokenKind::Not, start, self.pos, "!"))
                 }
             }
             b'<' => {
@@ -154,6 +155,9 @@ impl<'a> Lexer<'a> {
                 if self.peek_at(1) == Some(b'=') {
                     self.pos += 2;
                     Ok(self.mk(TokenKind::AmpEq, start, self.pos, "&="))
+                } else if self.peek_at(1) == Some(b'&') {
+                    self.pos += 2;
+                    Ok(self.mk(TokenKind::And, start, self.pos, "&&"))
                 } else {
                     self.pos += 1;
                     Ok(self.mk(TokenKind::Amp, start, self.pos, "&"))
@@ -163,6 +167,9 @@ impl<'a> Lexer<'a> {
                 if self.peek_at(1) == Some(b'=') {
                     self.pos += 2;
                     Ok(self.mk(TokenKind::PipeEq, start, self.pos, "|="))
+                } else if self.peek_at(1) == Some(b'|') {
+                    self.pos += 2;
+                    Ok(self.mk(TokenKind::Or, start, self.pos, "||"))
                 } else {
                     self.pos += 1;
                     Ok(self.mk(TokenKind::Pipe, start, self.pos, "|"))
@@ -447,6 +454,16 @@ fn keyword(text: &str) -> TokenKind {
         "extern" => TokenKind::Extern,
         "ptr" => TokenKind::Ptr,
         "mut" => TokenKind::Mut,
+        "inout" => TokenKind::Inout,
+        "guard" => TokenKind::Guard,
+        "errdefer" => TokenKind::Errdefer,
+        "verified" => TokenKind::Verified,
+        "frozen" => TokenKind::Frozen,
+        "resource" => TokenKind::Resource,
+        "region" => TokenKind::Region,
+        "nursery" => TokenKind::Nursery,
+        "pool" => TokenKind::PoolKw,
+        "handle" => TokenKind::HandleKw,
         _ => TokenKind::Ident,
     }
 }

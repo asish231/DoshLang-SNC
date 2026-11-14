@@ -117,6 +117,16 @@ pub enum TokenKind {
     Super,
     Goroutine,
     Asm,
+    Inout,
+    Guard,
+    Errdefer,
+    Verified,
+    Frozen,
+    Resource,
+    Region,
+    PoolKw,
+    HandleKw,
+    Nursery,
 }
 
 #[derive(Clone, Debug)]

@@ -1,0 +1,16 @@
+fn do_region_return() -> int {
+    region {
+        ptr p = lane_alloc(0, 4096)
+        return 99
+    }
+    return 0
+}
+
+fn main() {
+    int res = do_region_return()
+    if (res == 99 and lane_used(0) == 0) {
+        print("PASS: test_region_early_return")
+    } else {
+        print("FAIL: lane memory not rewound on early return")
+    }
+}

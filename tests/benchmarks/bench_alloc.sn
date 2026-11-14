@@ -1,0 +1,68 @@
+// Rapid Object Allocation & Iteration Benchmark
+// Measures allocation throughput and traversal latency across 500,000 blueprint objects.
+// Records GC tracked object counts and execution timing in milliseconds.
+
+blueprint Node {
+    Node next
+    int id = 0
+    int value = 0
+}
+
+fn main() {
+    print("==================================================")
+    print("  SNlang Benchmark: Rapid Object Allocation & Iteration")
+    print("==================================================")
+    int count = 500000
+    int initial_gc = gc_count()
+    int initial_alloc = alloc_live_count()
+    print("Initial GC tracked objects: " + cast(initial_gc, str))
+
+    int t0 = time_now_ms()
+    new Node head()
+    head.id = 0
+    head.value = 0
+    int i = 1
+    while (i < count) {
+        new Node cur()
+        cur.id = i
+        cur.value = i % 100
+        cur.next = head
+        head = cur
+        i = i + 1
+    }
+    int t1 = time_now_ms()
+    int alloc_time = t1 - t0
+    if (alloc_time == 0) {
+        alloc_time = 1
+    }
+
+    int post_alloc_gc = gc_count()
+    print("Allocated objects: " + cast(count, str))
+    print("Allocation elapsed time: " + cast(alloc_time, str) + " ms")
+    int alloc_rate = (count * 1000) / alloc_time
+    print("Allocation throughput: " + cast(alloc_rate, str) + " objects/sec")
+    print("GC tracked objects after allocation: " + cast(post_alloc_gc, str))
+
+    // Traverse and compute checksum
+    int t2 = time_now_ms()
+    int sum = 0
+    Node cur_node = head
+    int traversed = 0
+    while (traversed < count) {
+        sum = sum + cur_node.value
+        cur_node = cur_node.next
+        traversed = traversed + 1
+    }
+    int t3 = time_now_ms()
+    int iter_time = t3 - t2
+    if (iter_time == 0) {
+        iter_time = 1
+    }
+
+    print("Traversed objects: " + cast(traversed, str))
+    print("Traversal elapsed time: " + cast(iter_time, str) + " ms")
+    int iter_rate = (traversed * 1000) / iter_time
+    print("Traversal throughput: " + cast(iter_rate, str) + " objects/sec")
+    print("Checksum sum: " + cast(sum, str))
+    print("==================================================")
+}

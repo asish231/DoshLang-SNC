@@ -1,0 +1,48 @@
+// SNlang Memory Safety Comparison 5: Cycle Collection
+//
+// Demonstrates how SNlang's runtime.c conservative mark-sweep cycle collector
+// successfully reclaims circular reference graphs that would leak under pure reference counting.
+// When unreferenced circular structures are created and gc_collect() is invoked, the collector
+// traverses from stack roots, identifies unreachable cyclic subgraphs, and frees them.
+
+blueprint Node {
+    Node next
+    int id = 0
+}
+
+fn create_cyclic_graph() {
+    new Node a()
+    a.id = 1
+    new Node b()
+    b.id = 2
+
+    // Create mutual reference cycle: a -> b -> a
+    a.next = b
+    b.next = a
+    // Once create_cyclic_graph returns, a and b are unreachable from stack roots.
+}
+
+fn main() {
+    print("=== SNlang Cycle Collector Demonstration ===")
+
+    int initial_objs = gc_count()
+    print("Initial GC tracked object count:")
+    print(initial_objs)
+
+    // Build circular graph
+    create_cyclic_graph()
+
+    int count_with_cycle = gc_count()
+    print("GC object count after allocating cycle:")
+    print(count_with_cycle)
+
+    // Run cycle collection
+    gc_collect()
+
+    int count_after_gc = gc_count()
+    print("GC object count after gc_collect():")
+    print(count_after_gc)
+
+    print("Cycle successfully reclaimed:")
+    print(count_after_gc < count_with_cycle)
+}

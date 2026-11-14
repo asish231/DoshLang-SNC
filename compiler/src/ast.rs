@@ -38,6 +38,7 @@ pub struct FnItem {
     pub is_async: bool,
     pub is_static: bool,
     pub is_abstract: bool,
+    pub is_verified: bool,
     pub access: Access,
     pub name: String,
     pub type_params: Vec<TypeParam>,
@@ -49,6 +50,7 @@ pub struct FnItem {
 
 #[derive(Clone, Debug)]
 pub struct Param {
+    pub is_inout: bool,
     pub ty: TypeAst,
     pub name: String,
     pub default: Option<Expr>,
@@ -101,6 +103,7 @@ pub enum Variance {
 #[derive(Clone, Debug)]
 pub struct BlueprintItem {
     pub name: String,
+    pub is_resource: bool,
     pub type_params: Vec<TypeParam>,
     pub parent: Option<String>,
     pub contracts: Vec<String>,
@@ -169,6 +172,8 @@ pub enum TypeAst {
     Map(Box<TypeAst>, Box<TypeAst>),
     Chan(Box<TypeAst>),
     Ref(Box<TypeAst>),
+    Pool(Box<TypeAst>),
+    Handle(Box<TypeAst>),
     Optional(Box<TypeAst>),
     Tuple(Vec<TypeAst>),
     Fn {
@@ -226,6 +231,29 @@ pub enum Stmt {
     },
     Return {
         value: Option<Expr>,
+        from_fn: Option<String>,
+        span: Span,
+    },
+    Guard {
+        cond: Expr,
+        else_body: Vec<Stmt>,
+        span: Span,
+    },
+    ErrDefer {
+        body: Vec<Stmt>,
+        span: Span,
+    },
+    Region {
+        body: Vec<Stmt>,
+        span: Span,
+    },
+    NurseryBlock {
+        body: Vec<Stmt>,
+        span: Span,
+    },
+    Frozen {
+        names: Vec<String>,
+        body: Vec<Stmt>,
         span: Span,
     },
     Stop(Span),
@@ -333,6 +361,7 @@ pub enum InterpPart {
 #[derive(Clone, Debug)]
 pub enum Arg {
     Pos(Expr),
+    Inout(Expr),
     Named { name: String, value: Expr },
 }
 

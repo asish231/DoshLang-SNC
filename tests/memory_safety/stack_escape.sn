@@ -1,0 +1,36 @@
+// SNlang Memory Safety Test 1: Stack Reference Escape
+//
+// Demonstrates escaping local stack references into a return value and into a blueprint.
+// In baseline SNlang without lifetime analysis, taking the address of a local variable
+// allows pointers to point to popped/invalid stack frames, causing undefined behavior
+// and stack corruption.
+
+blueprint Holder {
+    ref<int> target
+}
+
+// 1. Escaping local reference via return value
+fn escape_return() -> ref<int> {
+    int local = 42
+    return address(local)
+}
+
+// 2. Escaping local reference into a blueprint outliving the block scope
+fn escape_blueprint() {
+    new Holder h()
+    if (true) {
+        int local = 99
+        h.target = address(local)
+    }
+    print("Dangling blueprint pointer value:")
+    print(value(h.target))
+}
+
+fn main() {
+    print("=== SNlang Stack Escape Baseline Test ===")
+    ref<int> p = escape_return()
+    print("Dangling return pointer value:")
+    print(value(p))
+
+    escape_blueprint()
+}

@@ -94,6 +94,8 @@ count = "hello"   // ERROR: type mismatch
 | `%`      | Modulo         | `x % 2`         |
 | `**`     | Power          | `x ** 3`        |
 
+> **Fixed-Point Scaling (`dec(X)`):** Fixed-point multiplication and division automatically maintain exact precision by rescaling with $10^X$ (e.g. `1.50 * 2.00` yields `3.00`, and `1.50 / 2.00` yields `0.75`), preventing IEEE floating-point imprecision.
+
 ### Comparison
 
 | Operator | Description          | Example       |
@@ -337,6 +339,32 @@ byte first = value(block)       // 0xFF
 free(block)
 ```
 
+### Compile-Time Memory Safety (Rust-Grade Guarantees)
+
+SNlang enforces strict compile-time safety checks on references and pointers without requiring complex lifetime syntax:
+1. **Stack Escape Prevention:** An address of a local variable (`address(x)`) cannot outlive the variable's declaring scope. Assigning a stack address to a blueprint field, returning it from a function, or assigning it to an outer variable triggers: `cannot assign address of local '{name}': target outlives declaring scope`.
+2. **Collection Invalidation Protection:** While an element of a `list` or `map` is borrowed (`ref<T>`), mutating operations (`push`, `insert`, `clear`) are rejected at compile time: `cannot mutate '{name}' while borrowed by '{borrower}'`.
+3. **Affine Memory Deallocation:** Calling `free(p)` consumes the pointer. Subsequent reads, writes, or deallocations trigger `use of freed pointer '{name}'` or `double free of '{name}'`.
+4. **Thread Isolation in `spawn`:** Passing unsynchronized mutable references or unlocked blueprints across threads in `spawn` is blocked at compile time to prevent data races.
+
+See `tests/memory_safety/` for executable exploit test suites and comparison with Rust.
+
+### High-Performance Systems Allocators
+
+SNlang includes zero-overhead native allocators for high-throughput systems programming:
+
+1. **Generational Pools (`std.pool` / `pool<T>` / `handle<T>`):**
+   - Implements 64-bit generation-indexed slotmaps: 32-bit slot index + 32-bit generation counter.
+   - Provides O(1) allocation, retrieval, and deallocation.
+   - Immune to the ABA problem and dangling pointers: accessing a deleted handle is detected immediately (`is_valid(h) == false`), preventing use-after-free bugs without garbage collector pauses.
+
+2. **Elastic Lane Arenas (`region { ... }` / `std.arena`):**
+   - High-speed bump allocation backed by 256 MB virtual memory reservations per lane.
+   - Scope-bound `region { }` automatically captures the lane watermark on entry and rewinds it on exit, delivering instant O(1) bulk deallocation.
+   - **Scope Unwind Guarantee:** Early returns (`return`) or errors (`try`) inside a `region { }` automatically restore the lane watermark, ensuring zero memory leaks on early exit paths.
+   - `frozen { }` blocks lock lanes into read-only mode to prevent accidental allocation or mutation.
+   - See `tests/systems/` for executable test suites.
+
 ### Why This Is Easier Than C
 
 | Task               | C Syntax                | SNlang Syntax            |
@@ -471,17 +499,18 @@ SNlang has a **teaching OOP subset**, not full Java/C++ OOP:
 | Concept | Status |
 |---------|--------|
 | Blueprints (classes), `self`, fields, methods | ✅ |
-| Single inheritance (`from`) + `super.method()` | ✅ MVP |
+| Single inheritance (`from`) + `super.method()` | ✅ |
 | Contracts + `follows` (compile-time interface check) | ✅ |
 | Field access: `open` / `closed` / `guarded` | ✅ enforced at compile time |
 | Optional `fn create()` after field init | ✅ |
-| Subtype polymorphism (`Child` where `Parent` expected) | ✅ MVP (`type_id` dispatch) |
-| Contract-typed variables (`Drawable x`) | ❌ |
-| Virtual / dynamic dispatch | ✅ MVP (not vtable-based) |
-| Generic blueprints (`blueprint Box<T>`) | ✅ MVP (monomorphize at `new`) |
-| Static (class) members, abstract classes | ❌ |
-| Method-level `private` / properties | ❌ |
-| Heterogeneous collections (`list<Animal>` mixed subtypes) | ❌ |
+| Subtype polymorphism (`Child` where `Parent` expected) | ✅ Vtable dispatch |
+| Contract-typed variables (`Drawable x`) | ✅ |
+| Virtual / dynamic dispatch | ✅ Full Vtable dispatch |
+| Method devirtualization | ✅ LLVM direct calls for known types (1B calls/sec) |
+| Generic blueprints (`blueprint Box<T>`) | ✅ Monomorphize at `new` |
+| Static members, abstract classes | ✅ |
+| Method-level `closed` / `guarded` | ✅ |
+| Heterogeneous collections (`list<Animal>` mixed subtypes) | ✅ |
 
 ---
 
@@ -640,16 +669,60 @@ use std.test        // assert_true, assert_eq_int, assert_eq_str, …
 
 ## 18. Concurrency / Threads
 
-### Spawning Threads
+### Spawning Green Tasks (Work-Stealing Scheduler)
+
+`spawn` executes tasks cooperatively on a lightweight M:N work-stealing pool across available CPU cores:
 
 ```text
 fn downloadFile(str url) {
     print("Downloading: " + url)
 }
 
-// Spawn new thread, continues immediately
+// Spawns lightweight green task
 spawn downloadFile("https://example.com/data.zip")
-print("This runs immediately, no waiting!")
+```
+
+In benchmarks (`tests/concurrency/bench_spawn_scale.sn`), SNlang executes **10,000 concurrent green tasks in ~16–20 ms**.
+
+### Structured Concurrency (`nursery`)
+
+The `nursery` scope guarantees that all child `spawn` tasks are completed before execution leaves the block, eliminating orphaned background tasks:
+
+```text
+nursery {
+    spawn worker(1)
+    spawn worker(2)
+} // The closing brace automatically joins all child tasks!
+
+print("All workers finished cleanly!")
+```
+
+> **Guaranteed Scope Unwind:** Even if a function executes an early `return` or propagates an error (`try`) from within a `nursery { }`, the compiler emits unwind joins to guarantee all spawned tasks finish before the calling stack frame exits.
+
+### Move-on-Send Channels (Zero-Lock Data-Race Immunity)
+
+Channels enforce affine ownership transfer at compile time. Sending an object over a channel moves it, preventing the sender from accessing or mutating it:
+
+```text
+chan<str> messages
+
+str payload = "Order #101"
+messages.send(payload) // 'payload' is moved to the channel
+
+// print(payload) // COMPILE ERROR: use of moved value 'payload'
+```
+
+> **Deep Ownership Transfer:** Sending an object member (`messages.send(p.data)`) or collection element (`messages.send(xs[0])`) automatically transfers ownership of the root container variable (`p` or `xs`), preventing concurrent read/write data races across threads.
+
+### Safe Channel Receive & Status Check
+
+Receiving from a channel supports tuple destructuring to detect closed channels without crashing:
+
+```text
+str msg, bool ok = messages.receive()
+if (not ok) {
+    print("Channel was closed by sender!")
+}
 ```
 
 ### Channels (Safe Communication)
@@ -748,6 +821,26 @@ str name = "Alice"
 int age = 25
 str msg = "My name is {name} and I am {age} years old"
 ```
+
+### High-Performance String Building (`StringBuilder`)
+
+For tight loops, large payload serialization, or continuous concatenation, standard `str + str` incurs $O(N^2)$ reallocation overhead. `StringBuilder` provides amortized $O(1)$ exponential capacity growth:
+
+```text
+use std.string
+
+new StringBuilder sb(64)
+sb.append("Hello")
+sb.append(" ")
+sb.append("World")
+sb.append_int(42)
+
+print(sb.to_str())     // "Hello World42"
+print(sb.len())        // 14
+sb.clear()             // resets length to 0 without reallocating buffer
+```
+
+In benchmarks (`tests/benchmarks/bench_string.sn`), `StringBuilder` processes 50,000 appends in **2 ms**, delivering an estimated **~150× speedup** over naive concatenation.
 
 ---
 

@@ -1,0 +1,24 @@
+// SNlang Memory Safety Test 2: Collection Invalidation During Active Borrow
+//
+// Demonstrates mutating a collection via .push() while holding an element borrow (ref<int>).
+// In baseline SNlang, taking address(numbers[0]) creates a raw pointer to list backing storage.
+// When numbers.push() grows the list, the runtime reallocates the storage, turning `first`
+// into a dangling pointer to freed memory.
+
+fn main() {
+    print("=== SNlang List Invalidation Baseline Test ===")
+    list<int> numbers = [10, 20, 30]
+
+    // Borrow reference to the first element
+    ref<int> first = address(numbers[0])
+    print("Initial first element:")
+    print(value(first))
+
+    // Mutating collection invalidates backing array
+    numbers.push(40)
+    numbers.push(50)
+    numbers.push(60)
+
+    print("Element reference after mutating push calls:")
+    print(value(first))
+}

@@ -72,11 +72,13 @@ More: [docs/LANGUAGE.md](docs/LANGUAGE.md) · full reference [SNLANG_SPEC.md](SN
 
 | Area | Highlights |
 |---|---|
-| Types | `int`, `bool`, `str`, `list<T>`, `map<K,V>`, `T?`, `error`, `chan`, `ref`, `lock`, `json`, `any`, `record`, fn types |
+| Types | `int`, `bool`, `str`, `list<T>`, `map<K,V>`, `T?`, `error`, `chan`, `ref`, `mut`, `lock`, `json`, `any`, `record`, fn types |
+| Safety | Compile-time Rust-grade guarantees: stack escape checks, collection borrow locks, affine UAF/double-free prevention, thread-race checks |
+| Speed | LLVM method devirtualization (1B calls/sec), native `StringBuilder` (~150× faster strings), ARC borrow elision |
 | Null | `otherwise`, `x!!`, `x?.m()`, smart unwrap after `if (x != none)` |
 | Errors | `(T, error)`, `try`, `panic` — not Java exceptions |
 | OOP | `blueprint`, inheritance, `closed`/`guarded`, MVP polymorphism + generics |
-| Concurrency | `spawn`, `goroutine` pool, channels, locks |
+| Concurrency | Work-stealing green tasks (`spawn`), structured concurrency (`nursery`), move-on-send channels (`chan<T>`), locks |
 | Modules | `use std.math`, `use mylib.calc` |
 | Tooling | `snc fmt`, `snc lsp`, `snc debug`, `snc translate`, `snc pkg` |
 
@@ -85,12 +87,14 @@ More: [docs/LANGUAGE.md](docs/LANGUAGE.md) · full reference [SNLANG_SPEC.md](SN
 | Package | Role |
 |---|---|
 | `std.math` | `abs`, `min`, `max`, `pow`, `clamp`, `sign` |
-| `std.string` | `isEmpty`, `repeat` (+ built-in string methods) |
+| `std.string` | `isEmpty`, `repeat`, `StringBuilder` (amortized O(1) buffer) |
 | `std.io` | `println` |
 | `std.json` | `parse` / `encode` |
 | `std.time` | `now_ms`, `sleep_ms`, `format` |
 | `std.http` / `std.net` | HTTP client + `serve_once`; **HTTPS via verified `curl`** |
 | `std.file` / `std.path` / `std.os` | files, paths, env/args |
+| `std.pool` | Generational slot vaults with 64-bit handles (ABA / UAF immune) |
+| `std.arena` | Elastic lane bump allocators with instant O(1) bulk rollback |
 | `std.test` | `assert_true`, `assert_eq_int`, `assert_eq_str`, … |
 
 HTTP details: [docs/HTTP.md](docs/HTTP.md)
@@ -119,10 +123,8 @@ Commit `sn.lock.toml` in apps. Registry `index.json` format and a static-server 
 | Remote registry | **MVP** | Fetch `index.json` + tarball; loud error on bad extract (no stub `lib.sn`) |
 | Lockfile / publish | **Done** | `sn.lock.toml`; `pkg publish` → `.tar.gz` |
 | async/await | **MVP** | Blocking futures |
-| Goroutines | **MVP** | Fixed 4-worker pool |
-| OOP polymorphism | **MVP** | `type_id` dispatch |
-| Generic blueprints | **MVP** | Monomorphize `Box<int>` |
-| Borrow checker | **MVP** | Move on `ref` assign only |
+| Concurrency & Nurseries | **Hardened** | Work-stealing pool, `nursery { }` task groups, move-on-send channels, `(val, ok)` close handling (see `tests/concurrency/`) |
+| Speed / Devirtualization | **Done** | Direct call lowering in `ir.rs`, native `StringBuilder` in `runtime.c` (see `tests/benchmarks/`) |
 | LSP | **Scaffold** | Diagnostics with line/col ranges; symbols |
 | Self-hosting | **Scaffold** | Lexer demo only |
 | Central registry hosting | **Not done** | Bring your own static host |

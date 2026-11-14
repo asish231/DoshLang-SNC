@@ -1,0 +1,58 @@
+// Generational slot vault pool.
+//
+//   use std.pool
+//   let p = Pool.new(8)
+//   int h1 = p.insert(42)
+//   int val = p.get(h1)
+//   p.set(h1, 99)
+//   bool valid = p.is_valid(h1)
+//   p.remove(h1)
+//   int count = p.len()
+
+blueprint Pool {
+    ptr raw
+
+    fn create(int elem_size = 8) {
+        if (self.raw == none) {
+            self.raw = pool_new(elem_size)
+        }
+    }
+
+    static fn new(int elem_size = 8) -> Pool {
+        new Pool p()
+        p.raw = pool_new(elem_size)
+        return p
+    }
+
+    fn insert(int val) -> int {
+        return pool_insert(self.raw, val)
+    }
+
+    fn get(int handle) -> int {
+        return pool_get(self.raw, handle)
+    }
+
+    fn set(int handle, int val) {
+        pool_set(self.raw, handle, val)
+    }
+
+    fn remove(int handle) {
+        pool_remove(self.raw, handle)
+    }
+
+    fn is_valid(int handle) -> bool {
+        return pool_is_valid(self.raw, handle)
+    }
+
+    fn len() -> int {
+        return pool_len(self.raw)
+    }
+}
+
+fn pool(int elem_size = 8) -> Pool {
+    return Pool.new(elem_size)
+}
+
+fn new_pool() -> Pool {
+    return Pool.new(8)
+}

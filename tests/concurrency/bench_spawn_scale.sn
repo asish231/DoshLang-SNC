@@ -1,0 +1,40 @@
+// Concurrency Benchmark: Spawning 10,000+ Green Tasks on Work-Stealing Pool
+//
+// Verifies high-throughput green task spawning and execution on the work-stealing pool.
+// Spawns 10,000 lightweight green tasks inside a structured nursery and ensures
+// all tasks execute correctly without thread exhaustion or runtime crashes.
+
+blueprint Accumulator {
+    int count = 0
+}
+
+fn main() {
+    print("=== Concurrency Benchmark: Spawning 10,000 Green Tasks ===")
+    new Accumulator acc()
+    lock mu
+    int total_tasks = 10000
+
+    int t_start = time_now_ms()
+
+    nursery {
+        for (int i = 0, i < total_tasks, i += 1) {
+            spawn {
+                lock(mu) {
+                    acc.count += 1
+                }
+            }
+        }
+    }
+
+    int t_elapsed = time_now_ms() - t_start
+    print("Total tasks completed:")
+    print(acc.count)
+    print("Elapsed time (ms):")
+    print(t_elapsed)
+
+    if (acc.count == total_tasks) {
+        print("PASS: successfully executed 10,000 green tasks on work-stealing pool")
+    } else {
+        print("FAIL: task count mismatch")
+    }
+}

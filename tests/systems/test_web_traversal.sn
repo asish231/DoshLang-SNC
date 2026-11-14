@@ -1,0 +1,33 @@
+// Systems Test: Web Path Traversal Defense in std.web
+//
+// Verifies path traversal attacks (.. and \\ and leading /) in static file serving
+// are blocked and return 404 (endpoint not found).
+
+use std.web
+
+fn main() {
+    print("=== Systems Test: Web Path Traversal Defense ===")
+    let app = App.create()
+    app.serve_static("/static", "/tmp")
+
+    // Attack 1: directory traversal with '..'
+    let req1, err1 = parse_request("GET /static/../../etc/passwd HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    Response res1 = app.dispatch(req1)
+    print("res1 status (.. traversal): " + cast(res1.status, str))
+
+    // Attack 2: backslash traversal
+    let req2, err2 = parse_request("GET /static/..\\..\\windows\\win.ini HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    Response res2 = app.dispatch(req2)
+    print("res2 status (\\\\ traversal): " + cast(res2.status, str))
+
+    // Attack 3: leading slash in rel path
+    let req3, err3 = parse_request("GET /static//etc/shadow HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    Response res3 = app.dispatch(req3)
+    print("res3 status (// traversal): " + cast(res3.status, str))
+
+    if (res1.status == 404 and res2.status == 404 and res3.status == 404) {
+        print("PASS: test_web_traversal")
+    } else {
+        print("FAIL: test_web_traversal")
+    }
+}

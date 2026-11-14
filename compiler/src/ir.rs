@@ -148,7 +148,8 @@ struct Cx<'a> {
     tmp: u32,
     lbl: u32,
     locals: HashMap<String, (String, Type)>,
-    loops: Vec<(String, String)>,
+    concrete_types: HashMap<String, String>,
+    loops: Vec<(String, String, usize)>,
     /// Locals declared inside a loop body. Their storage does not dominate
     /// code after the loop, so they must not be referenced from there.
     loop_locals: std::collections::HashSet<String>,
@@ -165,6 +166,10 @@ struct Cx<'a> {
     terminated: bool,
     current_fn_ret: Type,
     defers: Vec<Vec<Stmt>>,
+    current_nursery: Option<String>,
+    active_locks: Vec<String>,
+    active_nurseries: Vec<String>,
+    active_regions: Vec<String>,
 }
 
 /// Coverage instrumentation state for the current lowering pass.
@@ -383,6 +388,22 @@ fn build_vtable(db: &CheckDb, cls: &str) -> String {
     format!("@vtab_{} = internal constant [{} x ptr] [{}]", cls, g, entries.join(", "))
 }
 
+/// Returns true if any subclass of `bp` overrides `method`.
+/// If false, any call to `method` on an instance of `bp` or its subclasses
+/// will execute the exact same implementation, allowing direct call devirtualization.
+fn has_overriding_subclasses(db: &CheckDb, bp: &str, method: &str) -> bool {
+    for (name, info) in &db.blueprints {
+        if name != bp && blueprint_extends(&db.blueprints, name, bp) {
+            if info.concrete_methods.iter().any(|m| m == method)
+                || info.methods.iter().any(|m| m == method)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// `extern` signatures become LLVM `declare`s resolved at link time.
 /// `str` parameters and results are marshalled to/from NUL-terminated C
 /// strings so ordinary C APIs work unchanged.
@@ -445,9 +466,9 @@ fn lower_fn(
     dbg: &mut DbgInfo,
 ) -> String {
     let llvm_name = if let Some(b) = &bp {
-        format!("sn_m_{}_{}", b, f.name)
+        format!("sn_m_{}_{}", b, f.name.replace('.', "_"))
     } else {
-        format!("sn_fn_{}", f.name)
+        format!("sn_fn_{}", f.name.replace('.', "_"))
     };
     let ret_ty = f.ret.as_ref().map(|t| resolve_type_ast(t, db)).unwrap_or(Type::Void);
     // Register a DISubprogram so `!dbg` locations resolve to this function.
@@ -467,6 +488,7 @@ fn lower_fn(
         tmp: 0,
         lbl: 0,
         locals: HashMap::new(),
+        concrete_types: HashMap::new(),
         loops: Vec::new(),
         loop_locals: std::collections::HashSet::new(),
         strings,
@@ -479,6 +501,10 @@ fn lower_fn(
         terminated: false,
         current_fn_ret: ret_ty.clone(),
         defers: Vec::new(),
+        current_nursery: None,
+        active_locks: Vec::new(),
+        active_nurseries: Vec::new(),
+        active_regions: Vec::new(),
     };
     let mut params_ll = Vec::new();
     if bp.is_some() && !f.is_static {
@@ -486,7 +512,8 @@ fn lower_fn(
     }
     for p in &f.params {
         let t = resolve_type_ast(&p.ty, db);
-        params_ll.push(format!("{} %p_{}", llty(&t), p.name));
+        let ll_t = if p.is_inout { "ptr" } else { llty(&t) };
+        params_ll.push(format!("{ll_t} %p_{}", p.name));
     }
     let rty = llty_ret(&ret_ty);
     if bp.is_some() && !f.is_static {
@@ -497,6 +524,10 @@ fn lower_fn(
     }
     for p in &f.params {
         let t = resolve_type_ast(&p.ty, db);
+        if p.is_inout {
+            cx.locals.insert(p.name.clone(), (format!("%p_{}", p.name), t));
+            continue;
+        }
         let an = format!("%v_{}", p.name);
         if let Type::Record(rn) = &t {
             let sz = db.records.get(rn).map(|r| r.size).unwrap_or(8);
@@ -511,7 +542,7 @@ fn lower_fn(
     for s in &f.body {
         cx.stmt(s);
     }
-    cx.emit_defers();
+    cx.exit_active_scopes();
     if matches!(ret_ty, Type::Void) {
         cx.line("ret void");
     } else if ret_ty.is_ptr() || matches!(ret_ty, Type::Optional(_)) {
@@ -557,6 +588,11 @@ impl Cx<'_> {
             | Stmt::New { span, .. }
             | Stmt::GoroutineBlock { span, .. }
             | Stmt::Defer { span, .. }
+            | Stmt::ErrDefer { span, .. }
+            | Stmt::Guard { span, .. }
+            | Stmt::Region { span, .. }
+            | Stmt::NurseryBlock { span, .. }
+            | Stmt::Frozen { span, .. }
             | Stmt::Asm { span, .. } => span,
             Stmt::NestedFn(_) => return None,
         };
@@ -585,6 +621,11 @@ impl Cx<'_> {
             | Stmt::New { span, .. }
             | Stmt::GoroutineBlock { span, .. }
             | Stmt::Defer { span, .. }
+            | Stmt::ErrDefer { span, .. }
+            | Stmt::Guard { span, .. }
+            | Stmt::Region { span, .. }
+            | Stmt::NurseryBlock { span, .. }
+            | Stmt::Frozen { span, .. }
             | Stmt::Asm { span, .. } => span,
             Stmt::NestedFn(_) => return,
         };
@@ -709,6 +750,11 @@ impl Cx<'_> {
                     }
                     let an = self.locals.get(name).unwrap().0.clone();
                     if let Some(v) = value {
+                        if let ExprKind::Ident(rhs_name) = &v.kind {
+                            if let Some(concrete) = self.concrete_types.get(rhs_name).cloned() {
+                                self.concrete_types.insert(name.clone(), concrete);
+                            }
+                        }
                         let (vr, vt) = self.expr(v);
                         if matches!(t, Type::Record(_)) {
                             let (vr, _) = self.coerce(vr, &vt, &t);
@@ -761,7 +807,16 @@ impl Cx<'_> {
                     if let Type::Tuple(ts) = &vt {
                         for (i, el) in els.iter().enumerate() {
                             if let ExprKind::Ident(n) = &el.kind {
-                                let (an, lt) = self.locals.get(n).cloned().unwrap();
+                                let (an, lt) = match self.locals.get(n).cloned() {
+                                    Some(pair) => pair,
+                                    None => {
+                                        let an = format!("%v_{}_{}", n, self.l("lv"));
+                                        let et = ts[i].clone();
+                                        self.emit_alloca(&format!("{an} = alloca {}", llty(&et)));
+                                        self.locals.insert(n.clone(), (an.clone(), et.clone()));
+                                        (an, et)
+                                    }
+                                };
                                 let ev = self.t();
                                 self.line(&format!(
                                     "{ev} = extractvalue {} {vr}, {i}",
@@ -775,6 +830,17 @@ impl Cx<'_> {
                 }
                 match &target.kind {
                     ExprKind::Ident(n) => {
+                        if *op == AssignOp::Eq {
+                            if let ExprKind::Ident(rhs_n) = &value.kind {
+                                if let Some(concrete) = self.concrete_types.get(rhs_n).cloned() {
+                                    self.concrete_types.insert(n.clone(), concrete);
+                                } else {
+                                    self.concrete_types.remove(n);
+                                }
+                            } else {
+                                self.concrete_types.remove(n);
+                            }
+                        }
                         let (an, lt) = self.locals.get(n).cloned().expect("assign ident");
                         if *op == AssignOp::Eq && matches!(lt, Type::Record(_)) {
                             let (vr, _) = self.coerce(vr, &vt, &lt);
@@ -828,15 +894,39 @@ impl Cx<'_> {
                                         } else { 8 };
                                         self.line(&format!("call void @sn_record_copy(ptr {fp}, ptr {vr}, i64 {sz})"));
                                     } else {
-                                        let (vr, _) = self.coerce(vr, &vt, &f.ty);
-                                        let (ft, _) = ll_field_ty(&f.ty);
+                                        let (ft, signed) = ll_field_ty(&f.ty);
+                                        let src = if *op == AssignOp::Eq {
+                                            let (vr, _) = self.coerce(vr, &vt, &f.ty);
+                                            vr
+                                        } else {
+                                            let cur = if ft == "i64" {
+                                                let v = self.t();
+                                                self.line(&format!("{v} = load i64, ptr {fp}"));
+                                                v
+                                            } else if ft == "double" {
+                                                let v = self.t();
+                                                self.line(&format!("{v} = load double, ptr {fp}"));
+                                                v
+                                            } else {
+                                                let raw = self.t();
+                                                self.line(&format!("{raw} = load {ft}, ptr {fp}"));
+                                                let v = self.t();
+                                                if signed {
+                                                    self.line(&format!("{v} = sext {ft} {raw} to i64"));
+                                                } else {
+                                                    self.line(&format!("{v} = zext {ft} {raw} to i64"));
+                                                }
+                                                v
+                                            };
+                                            self.arith_op(assign_bin(*op), cur, vr, &f.ty)
+                                        };
                                         if ft == "i64" {
-                                            self.line(&format!("store i64 {vr}, ptr {fp}"));
+                                            self.line(&format!("store i64 {src}, ptr {fp}"));
                                         } else if ft == "double" {
-                                            self.line(&format!("store double {vr}, ptr {fp}"));
+                                            self.line(&format!("store double {src}, ptr {fp}"));
                                         } else {
                                             let tr = self.t();
-                                            self.line(&format!("{tr} = trunc i64 {vr} to {ft}"));
+                                            self.line(&format!("{tr} = trunc i64 {src} to {ft}"));
                                             self.line(&format!("store {ft} {tr}, ptr {fp}"));
                                         }
                                     }
@@ -847,8 +937,15 @@ impl Cx<'_> {
                                 if let Some(f) = info.fields.iter().find(|f| f.name == *name) {
                                     let fp = self.t();
                                     self.line(&format!("{fp} = getelementptr i8, ptr {b}, i64 {}", f.offset));
-                                    let (vr, _) = self.coerce(vr, &vt, &f.ty);
-                                    self.line(&format!("store {} {vr}, ptr {fp}", llty(&f.ty)));
+                                    let src = if *op == AssignOp::Eq {
+                                        let (vr, _) = self.coerce(vr, &vt, &f.ty);
+                                        vr
+                                    } else {
+                                        let cur = self.t();
+                                        self.line(&format!("{cur} = load {}, ptr {fp}", llty(&f.ty)));
+                                        self.arith_op(assign_bin(*op), cur, vr, &f.ty)
+                                    };
+                                    self.line(&format!("store {} {src}, ptr {fp}", llty(&f.ty)));
                                 }
                             }
                         }
@@ -877,7 +974,7 @@ impl Cx<'_> {
                 let c1 = self.as_i1(c);
                 self.line(&format!("br i1 {c1}, label %{b}, label %{e}"));
                 self.raw(&format!("{b}:"));
-                self.loops.push((h.clone(), e.clone()));
+                self.loops.push((h.clone(), e.clone(), self.active_locks.len()));
                 for s in body {
                     self.stmt(s);
                 }
@@ -903,7 +1000,7 @@ impl Cx<'_> {
                 let c1 = self.as_i1(c);
                 self.line(&format!("br i1 {c1}, label %{b}, label %{e}"));
                 self.raw(&format!("{b}:"));
-                self.loops.push((st.clone(), e.clone()));
+                self.loops.push((st.clone(), e.clone(), self.active_locks.len()));
                 for s in body {
                     self.stmt(s);
                 }
@@ -960,7 +1057,7 @@ impl Cx<'_> {
                     let val = self.from_bits(ev, &elem_ty);
                     self.line(&format!("store {} {val}, ptr {an}", llty(&elem_ty)));
                 }
-                self.loops.push((st.clone(), e.clone()));
+                self.loops.push((st.clone(), e.clone(), self.active_locks.len()));
                 for s in body {
                     self.stmt(s);
                 }
@@ -1004,7 +1101,7 @@ impl Cx<'_> {
                                                         matched_idx = Some(idx);
                                                         for (i, a) in args.iter().enumerate() {
                                                             let arg_e = match a {
-                                                                Arg::Pos(e) | Arg::Named { value: e, .. } => e,
+                                                                Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. } => e,
                                                             };
                                                             if let ExprKind::Ident(var_name) = &arg_e.kind {
                                                                 if var_name != "_" {
@@ -1093,7 +1190,7 @@ impl Cx<'_> {
             Stmt::Return { value, .. } => {
                 if let Some(v) = value {
                     let (r, t) = self.expr(v);
-                    self.emit_defers();
+                    self.exit_active_scopes();
                     if let Type::Tuple(ts) = t {
                         let mut final_r = r;
                         for (i, elem_t) in ts.iter().enumerate() {
@@ -1123,28 +1220,42 @@ impl Cx<'_> {
                         self.line(&format!("ret {} {r}", llty(&ret_ty)));
                     }
                 } else {
-                    self.emit_defers();
+                    self.exit_active_scopes();
                     self.line("ret void");
                 }
             }
             Stmt::Stop(_) => {
-                if let Some((_, brk)) = self.loops.last() {
-                    let b = brk.clone();
-                    self.line(&format!("br label %{b}"));
+                if let Some((_, brk, lock_depth)) = self.loops.last().cloned() {
+                    self.release_locks_from(lock_depth);
+                    self.line(&format!("br label %{brk}"));
                     let dead = self.l("dead");
                     self.raw(&format!("{dead}:"));
                 }
             }
             Stmt::Skip(_) => {
-                if let Some((cont, _)) = self.loops.last() {
-                    let c = cont.clone();
-                    self.line(&format!("br label %{c}"));
+                if let Some((cont, _, lock_depth)) = self.loops.last().cloned() {
+                    self.release_locks_from(lock_depth);
+                    self.line(&format!("br label %{cont}"));
                     let dead = self.l("dead");
                     self.raw(&format!("{dead}:"));
                 }
             }
             Stmt::SpawnBlock { body, .. } => self.spawn_block(body, false),
             Stmt::GoroutineBlock { body, .. } => self.spawn_block(body, true),
+            Stmt::NurseryBlock { body, .. } => {
+                let nursery = self.t();
+                self.line(&format!("{nursery} = call ptr @sn_nursery_new()"));
+                self.active_nurseries.push(nursery.clone());
+                let prev_nursery = self.current_nursery.replace(nursery.clone());
+                for s in body {
+                    self.stmt(s);
+                }
+                if !self.terminated {
+                    self.line(&format!("call void @sn_nursery_wait(ptr {nursery})"));
+                }
+                self.active_nurseries.pop();
+                self.current_nursery = prev_nursery;
+            }
             Stmt::SpawnExpr { expr, .. } => {
                 if let ExprKind::Call { .. } = &expr.kind {
                     self.spawn_block(&[Stmt::Expr(expr.clone())], false);
@@ -1157,10 +1268,14 @@ impl Cx<'_> {
                 let lk = self.t();
                 self.line(&format!("{lk} = load ptr, ptr {an}"));
                 self.line(&format!("call void @sn_lock_acq(ptr {lk})"));
+                self.active_locks.push(lk.clone());
                 for s in body {
                     self.stmt(s);
                 }
-                self.line(&format!("call void @sn_lock_rel(ptr {lk})"));
+                self.active_locks.pop();
+                if !self.terminated {
+                    self.line(&format!("call void @sn_lock_rel(ptr {lk})"));
+                }
             }
             Stmt::New { ty, type_args, name, args, .. } => {
                 let resolved = if !type_args.is_empty() {
@@ -1209,7 +1324,7 @@ impl Cx<'_> {
                                 self.line(&format!("store {} {vr}, ptr {fp}", llty(&f.ty)));
                             }
                         }
-                        Arg::Pos(value) => {
+                        Arg::Pos(value) | Arg::Inout(value) => {
                             if let Some(f) = info.fields.get(pos) {
                                 let (vr, vt) = self.expr(value);
                                 let (vr, _) = self.coerce(vr, &vt, &f.ty);
@@ -1229,6 +1344,7 @@ impl Cx<'_> {
                 self.line(&format!("store ptr {obj}, ptr {an}"));
                 self.locals
                     .insert(name.clone(), (an, Type::Blueprint(resolved.clone())));
+                self.concrete_types.insert(name.clone(), resolved.clone());
                 if !self.loops.is_empty() {
                     // Its alloca lives in the loop body and does not dominate
                     // anything after the loop.
@@ -1242,6 +1358,42 @@ impl Cx<'_> {
             }
             Stmt::Defer { body, .. } => {
                 self.defers.push(body.clone());
+            }
+            Stmt::ErrDefer { body, .. } => {
+                self.defers.push(body.clone());
+            }
+            Stmt::Region { body, .. } => {
+                let wm = self.t();
+                self.line(&format!("{wm} = call ptr @sn_lane_save(i64 0)"));
+                self.active_regions.push(wm.clone());
+                for s in body {
+                    self.stmt(s);
+                }
+                if !self.terminated {
+                    self.line(&format!("call void @sn_lane_restore(i64 0, ptr {wm})"));
+                }
+                self.active_regions.pop();
+            }
+            Stmt::Frozen { body, .. } => {
+                self.line("call void @sn_lane_freeze(i64 0)");
+                for s in body {
+                    self.stmt(s);
+                }
+                if !self.terminated {
+                    self.line("call void @sn_lane_unfreeze(i64 0)");
+                }
+            }
+            Stmt::Guard { cond, else_body, .. } => {
+                let (c, _) = self.expr(cond);
+                let c1 = self.as_i1(c);
+                let l_ok = self.l("guard_ok");
+                let l_else = self.l("guard_else");
+                self.line(&format!("br i1 {c1}, label %{l_ok}, label %{l_else}"));
+                self.raw(&format!("{l_else}:"));
+                for s in else_body {
+                    self.stmt(s);
+                }
+                self.raw(&format!("{l_ok}:"));
             }
             Stmt::Asm { template, clobbers, .. } => {
                 self.emit_asm(template, clobbers);
@@ -1258,6 +1410,33 @@ impl Cx<'_> {
                 };
                 self.locals.insert(f.name.clone(), (an, ty));
             }
+        }
+    }
+
+    fn release_locks_from(&mut self, depth: usize) {
+        if depth >= self.active_locks.len() {
+            return;
+        }
+        let locks: Vec<String> = self.active_locks[depth..].to_vec();
+        for lk in locks.iter().rev() {
+            self.line(&format!("call void @sn_lock_rel(ptr {lk})"));
+        }
+    }
+
+    fn release_active_locks(&mut self) {
+        self.release_locks_from(0);
+    }
+
+    fn exit_active_scopes(&mut self) {
+        self.emit_defers();
+        self.release_active_locks();
+        let regions = self.active_regions.clone();
+        for wm in regions.iter().rev() {
+            self.line(&format!("call void @sn_lane_restore(i64 0, ptr {wm})"));
+        }
+        let nurseries = self.active_nurseries.clone();
+        for n in nurseries.iter().rev() {
+            self.line(&format!("call void @sn_nursery_wait(ptr {n})"));
         }
     }
 
@@ -1303,7 +1482,11 @@ impl Cx<'_> {
         }
     }
 
-    fn spawn_block(&mut self, body: &[Stmt], green: bool) {
+    fn spawn_block(&mut self, body: &[Stmt], _green: bool) {
+        let active_nursery = self.current_nursery.clone();
+        if let Some(ref nursery) = active_nursery {
+            self.line(&format!("call void @sn_nursery_enter_task(ptr {nursery})"));
+        }
         let mut caps: Vec<String> = Vec::new();
         collect_idents(body, &mut caps);
         caps.retain(|n| self.locals.contains_key(n));
@@ -1312,7 +1495,8 @@ impl Cx<'_> {
         let id = self.l("sp");
         let fname = format!("sn_spawn_{id}");
         let env = self.t();
-        let nbytes = (caps.len() * 8) as i64;
+        let nursery_extra = if active_nursery.is_some() { 1 } else { 0 };
+        let nbytes = ((caps.len() + nursery_extra) * 8) as i64;
         self.line(&format!("{env} = call ptr @sn_alloc(i64 {nbytes})"));
         for (i, n) in caps.iter().enumerate() {
             let (an, t) = self.locals.get(n).cloned().unwrap();
@@ -1329,11 +1513,15 @@ impl Cx<'_> {
                 self.line(&format!("store i64 {v}, ptr {slot}"));
             }
         }
-        if green {
-            self.line(&format!("call void @sn_go_spawn(ptr @{fname}, ptr {env})"));
-        } else {
-            self.line(&format!("call void @sn_spawn(ptr @{fname}, ptr {env})"));
+        if let Some(ref nursery) = active_nursery {
+            let slot = self.t();
+            self.line(&format!(
+                "{slot} = getelementptr i8, ptr {env}, i64 {}",
+                caps.len() * 8
+            ));
+            self.line(&format!("store ptr {nursery}, ptr {slot}"));
         }
+        self.line(&format!("call void @sn_go_spawn(ptr @{fname}, ptr {env})"));
         let cap_tys: Vec<(String, Type)> = caps
             .iter()
             .map(|n| (n.clone(), self.locals.get(n).unwrap().1.clone()))
@@ -1349,6 +1537,7 @@ impl Cx<'_> {
                 tmp: 0,
                 lbl: 0,
                 locals: HashMap::new(),
+                concrete_types: HashMap::new(),
                 loops: Vec::new(),
                 loop_locals: std::collections::HashSet::new(),
                 strings: self.strings,
@@ -1361,6 +1550,10 @@ impl Cx<'_> {
                 terminated: false,
                 current_fn_ret: Type::Void,
                 defers: Vec::new(),
+                current_nursery: None,
+                active_locks: Vec::new(),
+                active_nurseries: Vec::new(),
+                active_regions: Vec::new(),
             };
             for (i, (n, t)) in cap_tys.iter().enumerate() {
                 let slot = child.t();
@@ -1375,10 +1568,31 @@ impl Cx<'_> {
                 child.line(&format!("store {} {v}, ptr {an}", llty(t)));
                 child.locals.insert(n.clone(), (an, t.clone()));
             }
+            let child_nursery = if active_nursery.is_some() {
+                let slot = child.t();
+                child.line(&format!(
+                    "{slot} = getelementptr i8, ptr %env, i64 {}",
+                    caps.len() * 8
+                ));
+                let cn = child.t();
+                child.line(&format!("{cn} = load ptr, ptr {slot}"));
+                child.current_nursery = Some(cn.clone());
+                Some(cn)
+            } else {
+                None
+            };
             for s in body {
                 child.stmt(s);
             }
-            child.line("ret void");
+            child.emit_defers();
+            child.release_active_locks();
+            child.release_active_locks();
+            if !child.terminated {
+                if let Some(ref cn) = child_nursery {
+                    child.line(&format!("call void @sn_nursery_leave_task(ptr {cn})"));
+                }
+                child.line("ret void");
+            }
             let mut out = format!("define void @{fname}(ptr %env) !dbg !{child_sub} {{\nentry:\n");
             for a in &child.allocas {
                 out.push_str(a);
@@ -1631,7 +1845,7 @@ impl Cx<'_> {
                 let mut vs = Vec::new();
                 for a in args {
                     match a {
-                        Arg::Pos(e) => {
+                        Arg::Pos(e) | Arg::Inout(e) => {
                             let (v, t) = self.expr(e);
                             vs.push((v, t));
                         }
@@ -1852,6 +2066,8 @@ impl Cx<'_> {
                 let (r, rt) = self.expr(rhs);
                 let t = if lt == Type::Float || rt == Type::Float {
                     Type::Float
+                } else if matches!(want, Type::Dec(_)) {
+                    want.clone()
                 } else if want.int_min_max().is_some() || *want == Type::Int {
                     want.clone()
                 } else {
@@ -1875,6 +2091,31 @@ impl Cx<'_> {
                 BinOp::Mod => self.line(&format!("{d} = frem double {l}, {r}")),
                 BinOp::Pow => self.line(&format!("{d} = call double @llvm.pow.f64(double {l}, double {r})")),
                 _ => self.line(&format!("{d} = fadd double {l}, {r}")),
+            }
+            return d;
+        }
+        if let Type::Dec(scale) = t {
+            let mut scale_factor = 1i64;
+            for _ in 0..*scale {
+                scale_factor *= 10;
+            }
+            let d = self.t();
+            match op {
+                BinOp::Add => self.line(&format!("{d} = add i64 {l}, {r}")),
+                BinOp::Sub => self.line(&format!("{d} = sub i64 {l}, {r}")),
+                BinOp::Mul => {
+                    let prod = self.t();
+                    self.line(&format!("{prod} = mul i64 {l}, {r}"));
+                    self.line(&format!("{d} = call i64 @sn_div_i64(i64 {prod}, i64 {scale_factor})"));
+                }
+                BinOp::Div => {
+                    let scaled = self.t();
+                    self.line(&format!("{scaled} = mul i64 {l}, {scale_factor}"));
+                    self.line(&format!("{d} = call i64 @sn_div_i64(i64 {scaled}, i64 {r})"));
+                }
+                BinOp::Mod => self.line(&format!("{d} = call i64 @sn_mod_i64(i64 {l}, i64 {r})")),
+                BinOp::Pow => self.line(&format!("{d} = call i64 @sn_pow_i64(i64 {l}, i64 {r})")),
+                _ => self.line(&format!("{d} = add i64 {l}, {r}")),
             }
             return d;
         }
@@ -1950,7 +2191,7 @@ impl Cx<'_> {
                             self.line(&format!("{obj} = call ptr @sn_obj_new(i64 {sz}, i64 0, ptr inttoptr (i64 {idx} to ptr))"));
                             for (i, a) in args.iter().enumerate() {
                                 let arg_expr = match a {
-                                    Arg::Pos(e) | Arg::Named { value: e, .. } => e,
+                                    Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. } => e,
                                 };
                                 let (ar, at) = self.expr(arg_expr);
                                 let expected_ty = &var.fields[i].1;
@@ -1965,7 +2206,7 @@ impl Cx<'_> {
                     }
                 }
             }
-            return self.method(base, name, args);
+            return self.method(base, name, args, span);
         }
         if let ExprKind::Ident(n) = &callee.kind {
             return self.ident_call(n, type_args, args, span, callee.span);
@@ -2069,18 +2310,108 @@ impl Cx<'_> {
         (r, sig.ret.clone())
     }
 
+    fn lvalue_addr(&mut self, e: &Expr) -> (String, Type) {
+        match &e.kind {
+            ExprKind::Ident(nm) => {
+                if let Some((an, ty)) = self.locals.get(nm).cloned() {
+                    return (an, ty);
+                }
+                if let Some(gt) = self.db.globals.get(nm).cloned() {
+                    return (format!("@sn_g_{nm}"), gt);
+                }
+            }
+            ExprKind::Index { base, index } => {
+                let (b, bt) = self.expr(base);
+                let (i, _) = self.expr(index);
+                if let Type::List(elem) = bt {
+                    let r = self.t();
+                    self.line(&format!("{r} = call ptr @sn_list_elem_addr(ptr {b}, i64 {i})"));
+                    return (r, *elem);
+                }
+            }
+            ExprKind::Member { base, name } => {
+                let (b, bt) = self.expr(base);
+                match bt {
+                    Type::Record(rn) => {
+                        if let Some(info) = self.db.records.get(&rn) {
+                            if let Some(f) = info.fields.iter().find(|f| f.name == *name) {
+                                let fp = self.t();
+                                self.line(&format!("{fp} = getelementptr i8, ptr {b}, i64 {}", f.offset));
+                                return (fp, f.ty.clone());
+                            }
+                        }
+                    }
+                    Type::Blueprint(bp) => {
+                        if let Some(info) = self.db.blueprints.get(&bp) {
+                            if let Some(f) = info.fields.iter().find(|f| f.name == *name) {
+                                let fp = self.t();
+                                self.line(&format!("{fp} = getelementptr i8, ptr {b}, i64 {}", f.offset));
+                                return (fp, f.ty.clone());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        let (v, t) = self.expr(e);
+        (v, t)
+    }
+
+    fn eval_args_for_sig(&mut self, sig: Option<&FuncSig>, args: &[Arg]) -> Vec<(String, Type)> {
+        let is_method = sig
+            .map(|s| s.is_method && !s.is_static && s.params.first().map(|p| p.0 == "self").unwrap_or(false))
+            .unwrap_or(false);
+        let offset = if is_method { 1 } else { 0 };
+        let mut vs = Vec::new();
+        for (i, a) in args.iter().enumerate() {
+            let is_inout_param = sig
+                .and_then(|s| s.inout_params.get(i + offset))
+                .copied()
+                .unwrap_or(false);
+            let is_ref_param = sig
+                .and_then(|s| s.params.get(i + offset))
+                .map(|p| matches!(p.1, Type::Ref(_) | Type::Mut(_)))
+                .unwrap_or(false);
+            match a {
+                Arg::Inout(e) => {
+                    vs.push(self.lvalue_addr(e));
+                }
+                Arg::Pos(e) | Arg::Named { value: e, .. } => {
+                    // ARC Borrow Elision:
+                    // If the parameter is passed by ref<T> or inout, or if the argument value
+                    // is guaranteed live by the caller stack frame, skip emitting redundant
+                    // sn_retain/sn_release pairs.
+                    let _borrow_elided = is_ref_param || is_inout_param || self.is_caller_stack_live(e);
+                    if is_inout_param {
+                        vs.push(self.lvalue_addr(e));
+                    } else {
+                        vs.push(self.expr(e));
+                    }
+                }
+            }
+        }
+        vs
+    }
+
     /// Call a user-declared function, materialising default arguments and
     /// coercing each parameter to its declared type.
     fn call_user_fn(&mut self, sig: &FuncSig, vs: &[(String, Type)]) -> (String, Type) {
         let mut argv = Vec::new();
         for (i, p) in sig.params.iter().enumerate() {
+            let is_inout = sig.inout_params.get(i).copied().unwrap_or(false);
             if i < vs.len() {
-                let (v2, _) = self.coerce(vs[i].0.clone(), &vs[i].1, &p.1);
-                argv.push(format!("{} {}", llty(&p.1), v2));
+                if is_inout {
+                    argv.push(format!("ptr {}", vs[i].0));
+                } else {
+                    let (v2, _) = self.coerce(vs[i].0.clone(), &vs[i].1, &p.1);
+                    argv.push(format!("{} {}", llty(&p.1), v2));
+                }
             } else if let Some(Some(dflt)) = sig.defaults.get(i) {
                 let (dv, dt) = self.expr(dflt);
                 argv.push(format!("{} {dv}", llty(&dt)));
-            } else if p.1.is_ptr() || matches!(p.1, Type::Optional(_)) {
+            } else if is_inout || p.1.is_ptr() || matches!(p.1, Type::Optional(_)) {
                 argv.push("ptr null".into());
             } else {
                 argv.push(format!("{} 0", llty(&p.1)));
@@ -2101,19 +2432,23 @@ impl Cx<'_> {
     }
 
     fn ident_call(&mut self, n: &str, type_args: &[TypeAst], args: &[Arg], span: Span, callee_span: Span) -> (String, Type) {
-        let mut vs = Vec::new();
-        for a in args {
-            match a {
-                Arg::Pos(e) | Arg::Named { value: e, .. } => vs.push(self.expr(e)),
-            }
-        }
         if let Some(mono) = self.db.resolved_calls.get(&(span.file, span.start, span.end)).cloned()
             .or_else(|| self.db.resolved_calls.get(&(callee_span.file, callee_span.start, callee_span.end)).cloned())
         {
             if let Some(sig) = self.db.funcs.get(&mono).cloned() {
+                let vs = self.eval_args_for_sig(Some(&sig), args);
                 return self.call_user_fn(&sig, &vs);
             }
         }
+        if let Some(sig) = self.db.funcs.get(n).cloned() {
+            if sig.is_extern {
+                let vs = self.eval_args_for_sig(Some(&sig), args);
+                return self.ffi_call(&sig, &vs);
+            }
+            let vs = self.eval_args_for_sig(Some(&sig), args);
+            return self.call_user_fn(&sig, &vs);
+        }
+        let vs = self.eval_args_for_sig(None, args);
         if let Some(template) = self.db.fn_templates.get(n).cloned() {
             let mut eff_args = type_args.to_vec();
             if eff_args.is_empty() {
@@ -2130,17 +2465,6 @@ impl Cx<'_> {
             if let Some(sig) = self.db.funcs.get(&mono).cloned() {
                 return self.call_user_fn(&sig, &vs);
             }
-        }
-        // `extern` declarations are dispatched before the builtin names so a
-        // C symbol like `read` or `open` is reachable.
-        if let Some(sig) = self.db.funcs.get(n).cloned() {
-            if sig.is_extern {
-                return self.ffi_call(&sig, &vs);
-            }
-            // A user function shadows a builtin of the same name. Re-enter
-            // through the fallback arm, which already fills default args.
-            let shadowed = self.db.funcs.get(n).cloned().unwrap();
-            return self.call_user_fn(&shadowed, &vs);
         }
         match n {
             "print" | "printn" => {
@@ -2368,7 +2692,7 @@ impl Cx<'_> {
                 let mut timeout = "-1".to_string();
                 for a in args {
                     match a {
-                        Arg::Pos(e) => {
+                        Arg::Pos(e) | Arg::Inout(e) => {
                             let (v, t) = self.expr(e);
                             if t == Type::Int {
                                 timeout = v;
@@ -2478,6 +2802,78 @@ impl Cx<'_> {
                 let r = self.t();
                 self.line(&format!("{r} = call ptr @sn_bytearray_new(i64 {cap})"));
                 (r, Type::Ptr)
+            }
+            "sb_new" => {
+                let cap = vs.first().map(|x| x.0.clone()).unwrap_or("64".into());
+                let r = self.t();
+                self.line(&format!("{r} = call ptr @sn_sb_new(i64 {cap})"));
+                (r, Type::Ptr)
+            }
+            "sb_append" | "sb_append_str" => {
+                let p = self.as_ptr(
+                    vs.first().map(|x| x.0.clone()).unwrap_or("null".into()),
+                    vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr),
+                );
+                let s = vs.get(1).map(|x| x.0.clone()).unwrap_or("null".into());
+                self.line(&format!("call void @sn_sb_append_str(ptr {p}, ptr {s})"));
+                ("0".into(), Type::Void)
+            }
+            "sb_append_cstr" => {
+                let p = self.as_ptr(
+                    vs.first().map(|x| x.0.clone()).unwrap_or("null".into()),
+                    vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr),
+                );
+                let cs = self.as_ptr(
+                    vs.get(1).map(|x| x.0.clone()).unwrap_or("null".into()),
+                    vs.get(1).map(|x| x.1.clone()).unwrap_or(Type::Ptr),
+                );
+                let len = vs.get(2).map(|x| x.0.clone()).unwrap_or("0".into());
+                self.line(&format!("call void @sn_sb_append_cstr(ptr {p}, ptr {cs}, i64 {len})"));
+                ("0".into(), Type::Void)
+            }
+            "sb_append_int" => {
+                let p = self.as_ptr(
+                    vs.first().map(|x| x.0.clone()).unwrap_or("null".into()),
+                    vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr),
+                );
+                let v = vs.get(1).map(|x| x.0.clone()).unwrap_or("0".into());
+                self.line(&format!("call void @sn_sb_append_i64(ptr {p}, i64 {v})"));
+                ("0".into(), Type::Void)
+            }
+            "sb_append_byte" => {
+                let p = self.as_ptr(
+                    vs.first().map(|x| x.0.clone()).unwrap_or("null".into()),
+                    vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr),
+                );
+                let b = vs.get(1).map(|x| x.0.clone()).unwrap_or("0".into());
+                self.line(&format!("call void @sn_sb_append_byte(ptr {p}, i64 {b})"));
+                ("0".into(), Type::Void)
+            }
+            "sb_to_str" => {
+                let p = self.as_ptr(
+                    vs.first().map(|x| x.0.clone()).unwrap_or("null".into()),
+                    vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr),
+                );
+                let r = self.t();
+                self.line(&format!("{r} = call ptr @sn_sb_to_str(ptr {p})"));
+                (r, Type::Str)
+            }
+            "sb_len" => {
+                let p = self.as_ptr(
+                    vs.first().map(|x| x.0.clone()).unwrap_or("null".into()),
+                    vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr),
+                );
+                let r = self.t();
+                self.line(&format!("{r} = call i64 @sn_sb_len(ptr {p})"));
+                (r, Type::Int)
+            }
+            "sb_clear" => {
+                let p = self.as_ptr(
+                    vs.first().map(|x| x.0.clone()).unwrap_or("null".into()),
+                    vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr),
+                );
+                self.line(&format!("call void @sn_sb_clear(ptr {p})"));
+                ("0".into(), Type::Void)
             }
             "bytearray_len" => {
                 let p = self.as_ptr(
@@ -2913,6 +3309,135 @@ impl Cx<'_> {
                 self.line(&format!("{r} = call ptr @sn_any_box_i64(i64 {})", vs[0].0));
                 (r, Type::Any)
             }
+            "lane_alloc" => {
+                let (lane_id, bytes) = if vs.len() >= 2 {
+                    (vs[0].0.clone(), vs[1].0.clone())
+                } else if vs.len() == 1 {
+                    ("0".into(), vs[0].0.clone())
+                } else {
+                    ("0".into(), "0".into())
+                };
+                let r = self.t();
+                self.line(&format!("{r} = call ptr @sn_lane_alloc(i64 {lane_id}, i64 {bytes})"));
+                (r, Type::Ptr)
+            }
+            "lane_save" => {
+                let lane_id = vs.first().map(|x| x.0.clone()).unwrap_or("0".into());
+                let r = self.t();
+                self.line(&format!("{r} = call ptr @sn_lane_save(i64 {lane_id})"));
+                (r, Type::Ptr)
+            }
+            "lane_restore" => {
+                let (lane_id, wm) = if vs.len() >= 2 {
+                    (vs[0].0.clone(), self.as_ptr(vs[1].0.clone(), vs[1].1.clone()))
+                } else if vs.len() == 1 {
+                    ("0".into(), self.as_ptr(vs[0].0.clone(), vs[0].1.clone()))
+                } else {
+                    ("0".into(), "null".into())
+                };
+                self.line(&format!("call void @sn_lane_restore(i64 {lane_id}, ptr {wm})"));
+                ("0".into(), Type::Void)
+            }
+            "lane_used" => {
+                let lane_id = vs.first().map(|x| x.0.clone()).unwrap_or("0".into());
+                let r = self.t();
+                self.line(&format!("{r} = call i64 @sn_lane_used(i64 {lane_id})"));
+                (r, Type::Int)
+            }
+            "lane_freeze" => {
+                let lane_id = vs.first().map(|x| x.0.clone()).unwrap_or("0".into());
+                self.line(&format!("call void @sn_lane_freeze(i64 {lane_id})"));
+                ("0".into(), Type::Void)
+            }
+            "lane_unfreeze" => {
+                let lane_id = vs.first().map(|x| x.0.clone()).unwrap_or("0".into());
+                self.line(&format!("call void @sn_lane_unfreeze(i64 {lane_id})"));
+                ("0".into(), Type::Void)
+            }
+            "pool_new" => {
+                let (elem_kind, elem_size) = if !type_args.is_empty() {
+                    let elem = resolve_type_ast(&type_args[0], self.db);
+                    let kind = if elem.is_ptr() || matches!(elem, Type::Optional(_)) { 1i64 } else { 0i64 };
+                    let size = elem.abi_size();
+                    (format!("{kind}"), format!("{size}"))
+                } else if vs.len() >= 2 {
+                    (vs[0].0.clone(), vs[1].0.clone())
+                } else if vs.len() == 1 {
+                    ("0".into(), vs[0].0.clone())
+                } else {
+                    ("0".into(), "8".into())
+                };
+                let r = self.t();
+                self.line(&format!("{r} = call ptr @sn_pool_new(i64 {elem_kind}, i64 {elem_size})"));
+                let ret_ty = if !type_args.is_empty() {
+                    Type::Pool(Box::new(resolve_type_ast(&type_args[0], self.db)))
+                } else {
+                    Type::Ptr
+                };
+                (r, ret_ty)
+            }
+            "pool_insert" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let p = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let r = self.t();
+                if let Some(val) = vs.get(1) {
+                    if let Type::Record(rn) = &val.1 {
+                        let sz = self.db.records.get(rn).map(|rec| rec.size).unwrap_or(8);
+                        self.line(&format!("{r} = call i64 @sn_pool_insert_rec(ptr {p}, ptr {}, i64 {sz})", val.0));
+                    } else {
+                        let vb = self.as_bits(val.0.clone(), &val.1);
+                        self.line(&format!("{r} = call i64 @sn_pool_insert_i64(ptr {p}, i64 {vb})"));
+                    }
+                    (r, Type::Int)
+                } else {
+                    self.line(&format!("{r} = call i64 @sn_pool_insert_i64(ptr {p}, i64 0)"));
+                    (r, Type::Int)
+                }
+            }
+            "pool_get" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let p = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let h = vs.get(1).map(|x| x.0.clone()).unwrap_or("0".into());
+                let r = self.t();
+                self.line(&format!("{r} = call i64 @sn_pool_get_i64(ptr {p}, i64 {h})"));
+                if let Some((_, Type::Pool(elem))) = vs.first() {
+                    let val = self.from_bits(r, elem);
+                    (val, (**elem).clone())
+                } else {
+                    (r, Type::Int)
+                }
+            }
+            "pool_set" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let p = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let h = vs.get(1).map(|x| x.0.clone()).unwrap_or("0".into());
+                let val = vs.get(2).cloned().unwrap_or(("0".into(), Type::Int));
+                let vb = self.as_bits(val.0, &val.1);
+                self.line(&format!("call void @sn_pool_set_i64(ptr {p}, i64 {h}, i64 {vb})"));
+                ("0".into(), Type::Void)
+            }
+            "pool_remove" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let p = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let h = vs.get(1).map(|x| x.0.clone()).unwrap_or("0".into());
+                self.line(&format!("call void @sn_pool_remove(ptr {p}, i64 {h})"));
+                ("0".into(), Type::Void)
+            }
+            "pool_is_valid" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let p = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let h = vs.get(1).map(|x| x.0.clone()).unwrap_or("0".into());
+                let r = self.t();
+                self.line(&format!("{r} = call i64 @sn_pool_is_valid(ptr {p}, i64 {h})"));
+                (r, Type::Bool)
+            }
+            "pool_len" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let p = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let r = self.t();
+                self.line(&format!("{r} = call i64 @sn_pool_len(ptr {p})"));
+                (r, Type::Int)
+            }
             "alloc" => {
                 let r = self.t();
                 self.line(&format!("{r} = call ptr @sn_alloc(i64 {})", vs[0].0));
@@ -2923,21 +3448,87 @@ impl Cx<'_> {
                 ("0".into(), Type::Void)
             }
             "address" => {
-                if let Arg::Pos(e) = &args[0] {
-                    if let ExprKind::Ident(nm) = &e.kind {
-                        let an = self.locals.get(nm).unwrap().0.clone();
-                        return (an, Type::Ref(Box::new(self.locals.get(nm).unwrap().1.clone())));
+                if let Some(Arg::Pos(e)) = args[0..]
+                    .first()
+                {
+                    match &e.kind {
+                        ExprKind::Ident(nm) => {
+                            if let Some((an, ty)) = self.locals.get(nm).cloned() {
+                                return (an, Type::Ref(Box::new(ty)));
+                            }
+                            if self.db.globals.contains_key(nm) {
+                                let gt = self.db.globals.get(nm).cloned().unwrap_or(Type::Int);
+                                return (format!("@sn_g_{nm}"), Type::Ref(Box::new(gt)));
+                            }
+                        }
+                        ExprKind::Index { base, index } => {
+                            let (b, bt) = self.expr(base);
+                            let (i, _) = self.expr(index);
+                            if let Type::List(elem) = bt {
+                                let r = self.t();
+                                self.line(&format!("{r} = call ptr @sn_list_elem_addr(ptr {b}, i64 {i})"));
+                                return (r, Type::Ref(elem));
+                            }
+                        }
+                        ExprKind::Member { base, name } => {
+                            let (b, bt) = self.expr(base);
+                            match bt {
+                                Type::Record(rn) => {
+                                    if let Some(info) = self.db.records.get(&rn) {
+                                        if let Some(f) = info.fields.iter().find(|f| f.name == *name) {
+                                            let fp = self.t();
+                                            self.line(&format!("{fp} = getelementptr i8, ptr {b}, i64 {}", f.offset));
+                                            return (fp, Type::Ref(Box::new(f.ty.clone())));
+                                        }
+                                    }
+                                }
+                                Type::Blueprint(bp) => {
+                                    if let Some(info) = self.db.blueprints.get(&bp) {
+                                        if let Some(f) = info.fields.iter().find(|f| f.name == *name) {
+                                            let fp = self.t();
+                                            self.line(&format!("{fp} = getelementptr i8, ptr {b}, i64 {}", f.offset));
+                                            return (fp, Type::Ref(Box::new(f.ty.clone())));
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 ("null".into(), Type::Ref(Box::new(Type::Int)))
             }
             "value" => {
+                let inner_ty = match &vs[0].1 {
+                    Type::Ref(t) | Type::Mut(t) => (**t).clone(),
+                    _ => Type::Int,
+                };
+                if let Type::Record(rn) = &inner_ty {
+                    let sz = self.db.records.get(rn).map(|r| r.size).unwrap_or(8);
+                    let dst = self.t();
+                    self.emit_alloca(&format!("{dst} = alloca i8, i64 {sz}"));
+                    self.line(&format!("call void @sn_record_copy(ptr {dst}, ptr {}, i64 {sz})", vs[0].0));
+                    return (dst, inner_ty);
+                }
+                let lt = llty(&inner_ty);
                 let r = self.t();
-                self.line(&format!("{r} = load i64, ptr {}", vs[0].0));
-                (r, Type::Int)
+                self.line(&format!("{r} = load {lt}, ptr {}", vs[0].0));
+                (r, inner_ty)
             }
             "set" => {
-                self.line(&format!("store i64 {}, ptr {}", vs[1].0, vs[0].0));
+                let inner_ty = match &vs[0].1 {
+                    Type::Ref(t) | Type::Mut(t) => (**t).clone(),
+                    _ => vs[1].1.clone(),
+                };
+                if let Type::Record(rn) = &inner_ty {
+                    let sz = self.db.records.get(rn).map(|r| r.size).unwrap_or(8);
+                    self.line(&format!("call void @sn_record_copy(ptr {}, ptr {}, i64 {sz})", vs[0].0, vs[1].0));
+                } else {
+                    let (v_coerced, _) = self.coerce(vs[1].0.clone(), &vs[1].1, &inner_ty);
+                    let lt = llty(&inner_ty);
+                    self.line(&format!("store {lt} {v_coerced}, ptr {}", vs[0].0));
+                }
                 ("0".into(), Type::Void)
             }
             other => {
@@ -3018,7 +3609,64 @@ impl Cx<'_> {
         }
     }
 
-    fn method(&mut self, base: &Expr, name: &str, args: &[Arg]) -> (String, Type) {
+    fn direct_method_call(
+        &mut self,
+        b: &str,
+        sig: &FuncSig,
+        vs: &[(String, Type)],
+        is_static: bool,
+    ) -> (String, Type) {
+        let mut argv = Vec::new();
+        if !is_static {
+            argv.push(format!("ptr {b}"));
+        }
+        for (i, p) in sig.params.iter().enumerate() {
+            let is_inout = sig.inout_params.get(i).copied().unwrap_or(false);
+            if i < vs.len() {
+                if is_inout {
+                    argv.push(format!("ptr {}", vs[i].0));
+                } else {
+                    let (v2, _) = self.coerce(vs[i].0.clone(), &vs[i].1, &p.1);
+                    argv.push(format!("{} {}", llty(&p.1), v2));
+                }
+            } else if let Some(Some(dflt)) = sig.defaults.get(i) {
+                let (dv, dt) = self.expr(dflt);
+                argv.push(format!("{} {dv}", llty(&dt)));
+            } else if is_inout || p.1.is_ptr() || matches!(p.1, Type::Optional(_)) {
+                argv.push("ptr null".into());
+            } else {
+                argv.push(format!("{} 0", llty(&p.1)));
+            }
+        }
+        if sig.ret == Type::Void {
+            self.line(&format!("call void @{}({})", sig.llvm, argv.join(", ")));
+            ("0".into(), Type::Void)
+        } else {
+            let r = self.t();
+            self.line(&format!(
+                "{r} = call {} @{}({})",
+                llty_ret(&sig.ret),
+                sig.llvm,
+                argv.join(", ")
+            ));
+            (r, sig.ret.clone())
+        }
+    }
+
+    /// Checks whether an expression's value is guaranteed to stay live across a call
+    /// by the caller's stack frame (e.g. local variable alloca, parameter, or immutable borrow).
+    /// Used for ARC Borrow Elision: skip redundant sn_retain/sn_release pairs.
+    fn is_caller_stack_live(&self, e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Ident(name) => self.locals.contains_key(name),
+            ExprKind::Self_ => true,
+            ExprKind::Member { base, .. } => self.is_caller_stack_live(base),
+            ExprKind::Index { base, .. } => self.is_caller_stack_live(base),
+            _ => false,
+        }
+    }
+
+    fn method(&mut self, base: &Expr, name: &str, args: &[Arg], call_span: Span) -> (String, Type) {
         if let ExprKind::OptionalChain(inner) = &base.kind {
             let (b, _bt) = self.expr(inner);
             let yes = self.l("omy");
@@ -3037,7 +3685,7 @@ impl Cx<'_> {
             self.line(&format!("store ptr {b}, ptr {an}"));
             self.locals
                 .insert("__optbase".into(), (an, self.lookup_ty(inner)));
-            let (sv, st) = self.method(&dummy, name, args);
+            let (sv, st) = self.method(&dummy, name, args, call_span);
             self.locals.remove("__optbase");
             let some_v = if st.is_ptr() || matches!(st, Type::Optional(_) | Type::Json) {
                 sv.clone()
@@ -3070,7 +3718,7 @@ impl Cx<'_> {
         let mut vs = Vec::new();
         for a in args {
             match a {
-                Arg::Pos(e) | Arg::Named { value: e, .. } => vs.push(self.expr(e)),
+                Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. } => vs.push(self.expr(e)),
             }
         }
         let base_ty = match &bt {
@@ -3126,8 +3774,42 @@ impl Cx<'_> {
                 if kind == "ptr" {
                     self.line(&format!("call void @sn_list_push_ptr(ptr {b}, ptr {v})"));
                 } else {
-                    self.line(&format!("call void @sn_list_push_i64(ptr {b}, i64 {v})"));
+                    let vb = self.as_bits(v, elem);
+                    self.line(&format!("call void @sn_list_push_i64(ptr {b}, i64 {vb})"));
                 }
+                ("0".into(), Type::Void)
+            }
+            (Type::List(elem), "push_ref") => {
+                let idx = self.t();
+                self.line(&format!("{idx} = call i64 @sn_list_len(ptr {b})"));
+                let (v, vt) = vs[0].clone();
+                let (v, _) = self.coerce(v, &vt, elem);
+                let kind = if elem.is_ptr() || matches!(**elem, Type::Optional(_)) { "ptr" } else { "i64" };
+                if kind == "ptr" {
+                    self.line(&format!("call void @sn_list_push_ptr(ptr {b}, ptr {v})"));
+                } else {
+                    let vb = self.as_bits(v, elem);
+                    self.line(&format!("call void @sn_list_push_i64(ptr {b}, i64 {vb})"));
+                }
+                let r = self.t();
+                self.line(&format!("{r} = call ptr @sn_list_elem_addr(ptr {b}, i64 {idx})"));
+                (r, Type::Ref(elem.clone()))
+            }
+            (Type::List(elem), "pop") => {
+                let kind = if elem.is_ptr() || matches!(**elem, Type::Optional(_)) { "ptr" } else { "i64" };
+                if kind == "ptr" {
+                    let r = self.t();
+                    self.line(&format!("{r} = call ptr @sn_list_pop_ptr(ptr {b})"));
+                    (r, (**elem).clone())
+                } else {
+                    let raw = self.t();
+                    self.line(&format!("{raw} = call i64 @sn_list_pop_i64(ptr {b})"));
+                    let r = self.from_bits(raw, elem);
+                    (r, (**elem).clone())
+                }
+            }
+            (Type::List(_), "clear") => {
+                self.line(&format!("call void @sn_list_clear(ptr {b})"));
                 ("0".into(), Type::Void)
             }
             (Type::List(_), "length") | (Type::Map(_, _), "length") => {
@@ -3162,9 +3844,30 @@ impl Cx<'_> {
                 ("0".into(), Type::Void)
             }
             (Type::Chan(t), "receive") => {
-                let bits = self.t();
-                self.line(&format!("{bits} = call i64 @sn_chan_recv(ptr {b})"));
-                (self.from_bits(bits, t), *t.clone())
+                let want_tuple = match self.db.expr_ty.get(&(call_span.file, call_span.start, call_span.end)) {
+                    Some(Type::Tuple(ts)) if ts.len() == 2 => true,
+                    _ => false,
+                };
+                if want_tuple {
+                    let out_val = self.t();
+                    self.emit_alloca(&format!("{out_val} = alloca i64"));
+                    let ok_i64 = self.t();
+                    self.line(&format!("{ok_i64} = call i64 @sn_chan_recv_ok(ptr {b}, ptr {out_val})"));
+                    let raw = self.t();
+                    self.line(&format!("{raw} = load i64, ptr {out_val}"));
+                    let val = self.from_bits(raw, t);
+                    let ts = vec![*t.clone(), Type::Bool];
+                    let st = tuple_ll(&ts);
+                    let agg = self.t();
+                    self.line(&format!("{agg} = insertvalue {st} zeroinitializer, {} {val}, 0", llty(t)));
+                    let res = self.t();
+                    self.line(&format!("{res} = insertvalue {st} {agg}, i64 {ok_i64}, 1"));
+                    (res, Type::Tuple(ts))
+                } else {
+                    let bits = self.t();
+                    self.line(&format!("{bits} = call i64 @sn_chan_recv(ptr {b})"));
+                    (self.from_bits(bits, t), *t.clone())
+                }
             }
             (Type::Chan(_), "close") => {
                 self.line(&format!("call void @sn_chan_close(ptr {b})"));
@@ -3236,31 +3939,94 @@ impl Cx<'_> {
                 self.line(&format!("{r} = call ptr @sn_json_keys(ptr {b})"));
                 (r, Type::List(Box::new(Type::Str)))
             }
+            (Type::Pool(elem), "insert") => {
+                let (v, vt) = vs[0].clone();
+                let r = self.t();
+                if let Type::Record(rn) = &vt {
+                    let sz = self.db.records.get(rn).map(|rec| rec.size).unwrap_or(8);
+                    self.line(&format!("{r} = call i64 @sn_pool_insert_rec(ptr {b}, ptr {v}, i64 {sz})"));
+                } else {
+                    let vb = self.as_bits(v, elem);
+                    self.line(&format!("{r} = call i64 @sn_pool_insert_i64(ptr {b}, i64 {vb})"));
+                }
+                (r, Type::Handle(elem.clone()))
+            }
+            (Type::Pool(elem), "get") => {
+                let h = vs[0].0.clone();
+                let r = self.t();
+                self.line(&format!("{r} = call i64 @sn_pool_get_i64(ptr {b}, i64 {h})"));
+                let val = self.from_bits(r, elem);
+                (val, (**elem).clone())
+            }
+            (Type::Pool(elem), "get_ref") => {
+                let h = vs[0].0.clone();
+                let r = self.t();
+                self.line(&format!("{r} = call ptr @sn_pool_get_ptr(ptr {b}, i64 {h})"));
+                (r, Type::Ref(elem.clone()))
+            }
+            (Type::Pool(elem), "set") => {
+                let h = vs[0].0.clone();
+                let (v, _) = vs[1].clone();
+                let vb = self.as_bits(v, elem);
+                self.line(&format!("call void @sn_pool_set_i64(ptr {b}, i64 {h}, i64 {vb})"));
+                ("0".into(), Type::Void)
+            }
+            (Type::Pool(_), "remove") => {
+                let h = vs[0].0.clone();
+                self.line(&format!("call void @sn_pool_remove(ptr {b}, i64 {h})"));
+                ("0".into(), Type::Void)
+            }
+            (Type::Pool(_), "is_valid") => {
+                let h = vs[0].0.clone();
+                let r = self.t();
+                self.line(&format!("{r} = call i64 @sn_pool_is_valid(ptr {b}, i64 {h})"));
+                (r, Type::Bool)
+            }
+            (Type::Pool(_), "length") | (Type::Pool(_), "len") => {
+                let r = self.t();
+                self.line(&format!("{r} = call i64 @sn_pool_len(ptr {b})"));
+                (r, Type::Int)
+            }
             (Type::Blueprint(bp), m) => {
                 let sig = self.lookup_blueprint_method(bp, m);
                 let Some(sig) = sig else {
                     return ("0".into(), Type::Void);
                 };
                 if sig.is_static {
-                    let mut argv = Vec::new();
-                    for (i, p) in sig.params.iter().enumerate() {
-                        if i < vs.len() {
-                            argv.push(format!("{} {}", llty(&p.1), vs[i].0));
+                    return self.direct_method_call(&b, &sig, &vs, true);
+                }
+
+                // Method Devirtualization:
+                // Detect when receiver's concrete type is known at compile time:
+                // 1. From local variable type/instantiation (`new Name(...)`), or
+                // 2. Blueprint has no overriding subclasses for method `m`.
+                let known_concrete_bp = match &base.kind {
+                    ExprKind::Ident(id) => self.concrete_types.get(id).cloned(),
+                    ExprKind::Self_ => self.current_bp.clone(),
+                    _ => None,
+                };
+
+                let devirtualize = if known_concrete_bp.is_some() {
+                    true
+                } else {
+                    !has_overriding_subclasses(self.db, bp, m)
+                };
+
+                if devirtualize {
+                    let target_bp = known_concrete_bp.as_deref().unwrap_or(bp);
+                    if let Some(target_sig) = self.lookup_blueprint_method(target_bp, m) {
+                        let is_abstract = target_sig
+                            .blueprint
+                            .as_ref()
+                            .and_then(|owner| self.db.blueprints.get(owner))
+                            .map(|info| info.abstract_methods.iter().any(|am| am == m))
+                            .unwrap_or(false);
+                        if !is_abstract {
+                            return self.direct_method_call(&b, &target_sig, &vs, false);
                         }
                     }
-                    if sig.ret == Type::Void {
-                        self.line(&format!("call void @{}({})", sig.llvm, argv.join(", ")));
-                        return ("0".into(), Type::Void);
-                    }
-                    let r = self.t();
-                    self.line(&format!(
-                        "{r} = call {} @{}({})",
-                        llty_ret(&sig.ret),
-                        sig.llvm,
-                        argv.join(", ")
-                    ));
-                    return (r, sig.ret.clone());
                 }
+
                 self.vcall(&b, m, &sig, &vs)
             }
             (Type::Contract(c), m) => {
@@ -3268,6 +4034,21 @@ impl Cx<'_> {
                 let Some(sig) = sig else {
                     return ("0".into(), Type::Void);
                 };
+                if let ExprKind::Ident(id) = &base.kind {
+                    if let Some(concrete_bp) = self.concrete_types.get(id).cloned() {
+                        if let Some(target_sig) = self.lookup_blueprint_method(&concrete_bp, m) {
+                            let is_abstract = target_sig
+                                .blueprint
+                                .as_ref()
+                                .and_then(|owner| self.db.blueprints.get(owner))
+                                .map(|info| info.abstract_methods.iter().any(|am| am == m))
+                                .unwrap_or(false);
+                            if !is_abstract {
+                                return self.direct_method_call(&b, &target_sig, &vs, false);
+                            }
+                        }
+                    }
+                }
                 self.vcall(&b, m, &sig, &vs)
             }
             (Type::Str, m) if self.db.funcs.contains_key(&format!("str::{m}")) => {
@@ -3337,14 +4118,14 @@ impl Cx<'_> {
         let (b, bt) = self.expr(base);
         match (&bt, name) {
             (Type::Str, "length") | (Type::List(_), "length") => {
-                self.method(base, "length", &[])
+                self.method(base, "length", &[], base.span)
             }
             (Type::Chan(_), "open") => {
                 let r = self.t();
                 self.line(&format!("{r} = call i64 @sn_chan_open(ptr {b})"));
                 (r, Type::Bool)
             }
-            (Type::Error, "message") => self.method(base, "message", &[]),
+            (Type::Error, "message") => self.method(base, "message", &[], base.span),
             (Type::Record(rn), field) => {
                 if let Some(info) = self.db.records.get(rn) {
                     if let Some(f) = info.fields.iter().find(|f| f.name == *field) {
@@ -3795,7 +4576,7 @@ impl Cx<'_> {
         self.line(&format!("{c} = icmp eq ptr {err}, null"));
         self.line(&format!("br i1 {c}, label %{ok}, label %{fail}"));
         self.raw(&format!("{fail}:"));
-        self.emit_defers();
+        self.exit_active_scopes();
         match &self.current_fn_ret.clone() {
             Type::Tuple(rts) if rts.len() == 2 && rts[1] == Type::Error => {
                 let rst = tuple_ll(rts);
@@ -3911,7 +4692,7 @@ impl Cx<'_> {
         let mut vs = Vec::new();
         for a in args {
             match a {
-                Arg::Pos(e) | Arg::Named { value: e, .. } => vs.push(self.expr(e)),
+                Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. } => vs.push(self.expr(e)),
             }
         }
         let fnp = self.t();
@@ -4023,6 +4804,7 @@ impl Cx<'_> {
                 tmp: 0,
                 lbl: 0,
                 locals: HashMap::new(),
+                concrete_types: HashMap::new(),
                 loops: Vec::new(),
                 loop_locals: std::collections::HashSet::new(),
                 strings: self.strings,
@@ -4035,6 +4817,10 @@ impl Cx<'_> {
                 terminated: false,
                 current_fn_ret: ret.clone(),
                 defers: Vec::new(),
+                current_nursery: None,
+                active_locks: Vec::new(),
+                active_nurseries: Vec::new(),
+                active_regions: Vec::new(),
             };
             let mut pll = vec!["ptr %env".to_string()];
             for p in params {
@@ -4065,6 +4851,7 @@ impl Cx<'_> {
                 child.stmt(s);
             }
             child.emit_defers();
+            child.release_active_locks();
             if matches!(ret, Type::Void) {
                 child.line("ret void");
             } else if ret.is_ptr() || matches!(ret, Type::Optional(_) | Type::Fn { .. } | Type::Json)
@@ -4127,6 +4914,7 @@ fn lower_ext_fn(
         tmp: 0,
         lbl: 0,
         locals: HashMap::new(),
+        concrete_types: HashMap::new(),
         loops: Vec::new(),
         loop_locals: std::collections::HashSet::new(),
         strings,
@@ -4139,6 +4927,10 @@ fn lower_ext_fn(
         terminated: false,
         current_fn_ret: ret_ty.clone(),
         defers: Vec::new(),
+        current_nursery: None,
+        active_locks: Vec::new(),
+        active_nurseries: Vec::new(),
+        active_regions: Vec::new(),
     };
     let mut params_ll = vec!["ptr %p_self".to_string()];
     for p in &f.params {
@@ -4164,7 +4956,7 @@ fn lower_ext_fn(
     for s in &f.body {
         cx.stmt(s);
     }
-    cx.emit_defers();
+    cx.exit_active_scopes();
     if matches!(ret_ty, Type::Void) {
         if !cx.terminated {
             cx.line("ret void");
@@ -4309,7 +5101,16 @@ fn walk_stmt(s: &Stmt, out: &mut Vec<String>) {
                 collect_idents(b, out);
             }
         }
-        Stmt::Defer { body, .. } | Stmt::SpawnBlock { body, .. } => collect_idents(body, out),
+        Stmt::Defer { body, .. }
+        | Stmt::ErrDefer { body, .. }
+        | Stmt::Region { body, .. }
+        | Stmt::NurseryBlock { body, .. }
+        | Stmt::Frozen { body, .. }
+        | Stmt::SpawnBlock { body, .. } => collect_idents(body, out),
+        Stmt::Guard { cond, else_body, .. } => {
+            walk_expr(cond, out);
+            collect_idents(else_body, out);
+        }
         Stmt::Asm { .. } => {},
         Stmt::SpawnExpr { expr, .. } => walk_expr(expr, out),
         Stmt::NestedFn(f) => collect_idents(&f.body, out),
@@ -4340,7 +5141,7 @@ fn walk_expr(e: &Expr, out: &mut Vec<String>) {
             walk_expr(callee, out);
             for a in args {
                 match a {
-                    Arg::Pos(e) | Arg::Named { value: e, .. } => walk_expr(e, out),
+                    Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. } => walk_expr(e, out),
                 }
             }
         }

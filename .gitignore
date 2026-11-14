@@ -31,6 +31,9 @@ packages/dist/
 # Scratch
 /tmp/
 SELF_HOSTING_GAP_ANALYSIS.md
+./approch
+approch/
+approch/**
 
 # Web & SQLite binaries
 website_server

@@ -1,0 +1,81 @@
+// String Concatenation vs Native StringBuilder Benchmark
+// Measures execution latency and throughput between repeated immutable string concatenation
+// (which triggers quadratic O(N^2) buffer reallocations and copies)
+// and StringBuilder (which uses amortized O(N) exponential capacity doubling).
+
+use std.string
+
+fn main() {
+    print("==================================================")
+    print("  SNlang Benchmark: String Concatenation vs StringBuilder")
+    print("==================================================")
+
+    // 1. Baseline: repeated string concatenation str + str (5,000 iterations)
+    int n_base = 5000
+    print("Running Baseline (str + str, " + cast(n_base, str) + " iterations)...")
+    int t0 = time_now_ms()
+    str s = ""
+    int i = 0
+    while (i < n_base) {
+        s = s + "x"
+        i += 1
+    }
+    int t1 = time_now_ms()
+    int elapsed_base = t1 - t0
+    if (elapsed_base == 0) {
+        elapsed_base = 1
+    }
+    print("Baseline (5,000 iters): " + cast(elapsed_base, str) + " ms (length=" + cast(s.length(), str) + ")")
+
+    // 2. Optimized: StringBuilder (5,000 iterations)
+    print("Running StringBuilder (5,000 iterations)...")
+    int t2 = time_now_ms()
+    new StringBuilder sb5k()
+    int j = 0
+    while (j < n_base) {
+        sb5k.append("x")
+        j += 1
+    }
+    str res5k = sb5k.to_str()
+    int t3 = time_now_ms()
+    int elapsed_sb5k = t3 - t2
+    if (elapsed_sb5k == 0) {
+        elapsed_sb5k = 1
+    }
+    print("StringBuilder (5,000 iters): " + cast(elapsed_sb5k, str) + " ms (length=" + cast(res5k.length(), str) + ")")
+
+    // Speedup at 5,000 iterations
+    int speedup_5k = elapsed_base / elapsed_sb5k
+    if (speedup_5k == 0) {
+        speedup_5k = 1
+    }
+    print("Speedup multiplier (5,000 iters): " + cast(speedup_5k, str) + "x")
+
+    // 3. Optimized: StringBuilder (50,000 iterations)
+    int n_sb50k = 50000
+    print("Running StringBuilder (50,000 iterations)...")
+    int t4 = time_now_ms()
+    new StringBuilder sb50k()
+    int k = 0
+    while (k < n_sb50k) {
+        sb50k.append("x")
+        k += 1
+    }
+    str res50k = sb50k.to_str()
+    int t5 = time_now_ms()
+    int elapsed_sb50k = t5 - t4
+    if (elapsed_sb50k == 0) {
+        elapsed_sb50k = 1
+    }
+    print("StringBuilder (50,000 iters): " + cast(elapsed_sb50k, str) + " ms (length=" + cast(res50k.length(), str) + ")")
+
+    // Extrapolated quadratic baseline for 50k: (50k/5k)^2 = 100x the 5k time
+    int est_base_50k = elapsed_base * 100
+    int speedup_50k = est_base_50k / elapsed_sb50k
+    if (speedup_50k == 0) {
+        speedup_50k = 1
+    }
+    print("Extrapolated baseline for 50,000 iters (O(N^2)): ~" + cast(est_base_50k, str) + " ms")
+    print("Estimated speedup multiplier (50,000 iters): ~" + cast(speedup_50k, str) + "x")
+    print("==================================================")
+}

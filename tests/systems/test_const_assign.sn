@@ -1,0 +1,10 @@
+// Systems Test: Reject Compound Assignment to Const Variables
+//
+// Verifies compile-time rejection of compound assignment to a const variable:
+// const x = 10; x += 1
+
+fn main() {
+    const x = 10
+    x += 1
+    print(x)
+}

@@ -1,0 +1,52 @@
+// Concurrency Test: Reading from Closed Channels
+//
+// Verifies that reading from a closed channel returns (val, false) without crashing.
+// Channels in SNlang do not panic or abort on closed read.
+
+fn main() {
+    print("=== Concurrency Test: Reading From Closed Channel ===")
+
+    chan<int> ch
+    ch.send(100)
+    ch.send(200)
+
+    // Close the channel while items are buffered
+    ch.close()
+
+    // 1. Drain existing buffered elements; returns (value, true)
+    int val1 = 0
+    bool ok1 = false
+    val1, ok1 = ch.receive()
+    print("Item 1:")
+    print(val1)
+    print(ok1)
+
+    int val2 = 0
+    bool ok2 = false
+    val2, ok2 = ch.receive()
+    print("Item 2:")
+    print(val2)
+    print(ok2)
+
+    // 2. Read from closed empty channel; returns (0, false) without crash
+    int val3 = 999
+    bool ok3 = true
+    val3, ok3 = ch.receive()
+    print("Item 3 (closed empty):")
+    print(val3)
+    print(ok3)
+
+    // 3. Repeated read on closed empty channel; returns (0, false)
+    int val4 = 888
+    bool ok4 = true
+    val4, ok4 = ch.receive()
+    print("Item 4 (closed empty repeat):")
+    print(val4)
+    print(ok4)
+
+    if (val1 == 100 && ok1 && val2 == 200 && ok2 && val3 == 0 && !ok3 && val4 == 0 && !ok4) {
+        print("PASS: closed channel returned (val, false) without crashing")
+    } else {
+        print("FAIL: unexpected values or ok flags from closed channel")
+    }
+}

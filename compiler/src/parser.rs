@@ -35,10 +35,17 @@ impl Parser {
     fn parse_item(&mut self) -> Result<Item, String> {
         match self.peek_kind() {
             TokenKind::Use => Ok(Item::Use(self.parse_use()?)),
-            TokenKind::Async | TokenKind::Fn => Ok(Item::Fn(self.parse_fn()?)),
-            TokenKind::Blueprint => Ok(Item::Blueprint(self.parse_blueprint()?)),
+            TokenKind::Async | TokenKind::Fn | TokenKind::Verified => Ok(Item::Fn(self.parse_fn()?)),
+            TokenKind::Blueprint | TokenKind::Resource => Ok(Item::Blueprint(self.parse_blueprint()?)),
             TokenKind::Record => Ok(Item::Record(self.parse_record()?)),
-            TokenKind::PackedKw => Ok(Item::Record(self.parse_packed_record()?)),
+            TokenKind::PackedKw => {
+                if matches!(self.peek_n(1), TokenKind::EnumKw) {
+                    self.bump(); // consume `packed`
+                    Ok(Item::Enum(self.parse_enum()?))
+                } else {
+                    Ok(Item::Record(self.parse_packed_record()?))
+                }
+            }
             TokenKind::EnumKw => Ok(Item::Enum(self.parse_enum()?)),
             TokenKind::Extension => Ok(Item::Extension(self.parse_extension()?)),
             TokenKind::Extern => Ok(Item::Extern(self.parse_extern()?)),
@@ -85,6 +92,7 @@ impl Parser {
             is_async: false,
             is_static: false,
             is_abstract: true,
+            is_verified: false,
             access: Access::Open,
             name,
             type_params: Vec::new(),
@@ -97,6 +105,7 @@ impl Parser {
 
     fn parse_fn(&mut self) -> Result<FnItem, String> {
         let start_span = self.peek().span;
+        let is_verified = self.eat_if(TokenKind::Verified);
         let is_abstract = self.eat_if(TokenKind::Abstract);
         let access = if self.eat_if(TokenKind::Open) {
             Access::Open
@@ -109,7 +118,11 @@ impl Parser {
         };
         let is_async = self.eat_if(TokenKind::Async);
         self.eat(TokenKind::Fn)?;
-        let name = self.expect_ident()?;
+        let mut name = self.expect_ident()?;
+        if self.eat_if(TokenKind::Dot) {
+            let vname = self.expect_ident()?;
+            name = format!("{name}.{vname}");
+        }
         let mut type_params = Vec::new();
         if self.eat_if(TokenKind::Lt) {
             type_params.push(self.parse_type_param()?);
@@ -152,6 +165,7 @@ impl Parser {
             is_async,
             is_static: false,
             is_abstract,
+            is_verified,
             access,
             name,
             type_params,
@@ -163,6 +177,7 @@ impl Parser {
     }
 
     fn parse_param(&mut self) -> Result<Param, String> {
+        let is_inout = self.eat_if(TokenKind::Inout);
         let ty = self.parse_type()?;
         let name = self.expect_ident()?;
         let default = if self.eat_if(TokenKind::Eq) {
@@ -170,11 +185,22 @@ impl Parser {
         } else {
             None
         };
-        Ok(Param { ty, name, default })
+        Ok(Param {
+            is_inout,
+            ty,
+            name,
+            default,
+        })
     }
 
     fn parse_blueprint(&mut self) -> Result<BlueprintItem, String> {
-        let start = self.eat(TokenKind::Blueprint)?;
+        let start = self.peek().span;
+        let is_resource = self.eat_if(TokenKind::Resource);
+        if !is_resource {
+            self.eat(TokenKind::Blueprint)?;
+        } else {
+            self.eat_if(TokenKind::Blueprint);
+        }
         let name = self.expect_ident()?;
         let mut type_params = Vec::new();
         if self.eat_if(TokenKind::Lt) {
@@ -219,6 +245,7 @@ impl Parser {
         self.eat(TokenKind::RBrace)?;
         Ok(BlueprintItem {
             name,
+            is_resource,
             type_params,
             parent,
             contracts,
@@ -595,6 +622,20 @@ impl Parser {
                 self.eat_gt()?;
                 Ok(TypeAst::Mut(Box::new(inner)))
             }
+            TokenKind::PoolKw => {
+                self.bump();
+                self.eat(TokenKind::Lt)?;
+                let inner = self.parse_type()?;
+                self.eat_gt()?;
+                Ok(TypeAst::Pool(Box::new(inner)))
+            }
+            TokenKind::HandleKw => {
+                self.bump();
+                self.eat(TokenKind::Lt)?;
+                let inner = self.parse_type()?;
+                self.eat_gt()?;
+                Ok(TypeAst::Handle(Box::new(inner)))
+            }
             TokenKind::Ident => {
                 let name = self.expect_ident()?;
                 if self.at(TokenKind::Lt) {
@@ -639,13 +680,83 @@ impl Parser {
             TokenKind::For => self.parse_for(),
             TokenKind::Match => self.parse_match(),
             TokenKind::Return => {
-                let span = self.bump().span;
-                let value = if self.starts_expr() {
+                let start = self.bump().span;
+                let value = if self.starts_expr() && !self.at(TokenKind::From) {
                     Some(self.parse_expr()?)
                 } else {
                     None
                 };
-                Ok(Stmt::Return { value, span })
+                let from_fn = if self.eat_if(TokenKind::From) {
+                    Some(self.expect_ident()?)
+                } else {
+                    None
+                };
+                Ok(Stmt::Return {
+                    value,
+                    from_fn,
+                    span: start.merge(self.prev_span()),
+                })
+            }
+            TokenKind::Guard => {
+                let start = self.bump().span;
+                let has_paren = self.eat_if(TokenKind::LParen);
+                let cond = self.parse_expr()?;
+                if has_paren {
+                    self.eat(TokenKind::RParen)?;
+                }
+                if !self.eat_if(TokenKind::Else) {
+                    self.eat(TokenKind::Otherwise)?;
+                }
+                let else_body = self.parse_block()?;
+                Ok(Stmt::Guard {
+                    cond,
+                    else_body,
+                    span: start.merge(self.prev_span()),
+                })
+            }
+            TokenKind::Errdefer => {
+                let span = self.bump().span;
+                let body = self.parse_block()?;
+                Ok(Stmt::ErrDefer {
+                    span: span.merge(self.prev_span()),
+                    body,
+                })
+            }
+            TokenKind::Region => {
+                let span = self.bump().span;
+                let body = self.parse_block()?;
+                Ok(Stmt::Region {
+                    span: span.merge(self.prev_span()),
+                    body,
+                })
+            }
+            TokenKind::Nursery => {
+                let span = self.bump().span;
+                let body = self.parse_block()?;
+                Ok(Stmt::NurseryBlock {
+                    span: span.merge(self.prev_span()),
+                    body,
+                })
+            }
+            TokenKind::Frozen => {
+                let start = self.bump().span;
+                self.eat(TokenKind::LParen)?;
+                let mut names = Vec::new();
+                if !self.at(TokenKind::RParen) {
+                    loop {
+                        names.push(self.expect_ident()?);
+                        if !self.eat_if(TokenKind::Comma) {
+                            break;
+                        }
+                    }
+                }
+                self.eat(TokenKind::RParen)?;
+                let body = self.parse_block()?;
+                Ok(Stmt::Frozen {
+                    names,
+                    body,
+                    span: start.merge(self.prev_span()),
+                })
             }
             TokenKind::Stop => {
                 let span = self.bump().span;
@@ -671,7 +782,7 @@ impl Parser {
                     body,
                 })
             }
-            TokenKind::Fn | TokenKind::Async => {
+            TokenKind::Fn | TokenKind::Async | TokenKind::Verified => {
                 if self.at(TokenKind::Fn) && matches!(self.peek_n(1), TokenKind::LParen) {
                     let expr = self.parse_expr()?;
                     self.finish_expr_stmt(expr)
@@ -887,8 +998,14 @@ impl Parser {
         } else {
             self.eat(TokenKind::Let)?;
         }
-        let ty = if is_const && is_type_start(self.peek_kind()) {
-            Some(self.parse_type()?)
+        let ty = if is_const {
+            if matches!(self.peek_kind(), TokenKind::Ident) && matches!(self.peek_n(1), TokenKind::Eq | TokenKind::Comma) {
+                None
+            } else if is_type_start(self.peek_kind()) {
+                Some(self.parse_type()?)
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -1474,7 +1591,9 @@ impl Parser {
             return Ok(args);
         }
         loop {
-            if self.at(TokenKind::Ident) && matches!(self.peek_n(1), TokenKind::Colon) {
+            if self.eat_if(TokenKind::Inout) {
+                args.push(Arg::Inout(self.parse_expr()?));
+            } else if self.at(TokenKind::Ident) && matches!(self.peek_n(1), TokenKind::Colon) {
                 let name = self.expect_ident()?;
                 self.eat(TokenKind::Colon)?;
                 let value = self.parse_expr()?;
@@ -1586,6 +1705,20 @@ impl Parser {
                 self.bump();
                 Ok(Expr {
                     kind: ExprKind::Ident("error".into()),
+                    span: tok.span,
+                })
+            }
+            TokenKind::PoolKw => {
+                self.bump();
+                Ok(Expr {
+                    kind: ExprKind::Ident("pool".into()),
+                    span: tok.span,
+                })
+            }
+            TokenKind::HandleKw => {
+                self.bump();
+                Ok(Expr {
+                    kind: ExprKind::Ident("handle".into()),
                     span: tok.span,
                 })
             }
@@ -1839,6 +1972,18 @@ impl Parser {
                 self.bump();
                 Ok("default".into())
             }
+            TokenKind::New => {
+                self.bump();
+                Ok("new".into())
+            }
+            TokenKind::PoolKw => {
+                self.bump();
+                Ok("pool".into())
+            }
+            TokenKind::HandleKw => {
+                self.bump();
+                Ok("handle".into())
+            }
             _ => Err(self.error("expected identifier")),
         }
     }
@@ -1977,6 +2122,8 @@ fn is_type_start(k: TokenKind) -> bool {
             | TokenKind::AnyKw
             | TokenKind::Ptr
             | TokenKind::Mut
+            | TokenKind::PoolKw
+            | TokenKind::HandleKw
             | TokenKind::Ident
             | TokenKind::LParen
             | TokenKind::Fn

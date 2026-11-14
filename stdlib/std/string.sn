@@ -15,3 +15,50 @@ fn repeat(str s, int n) -> str {
     return out
 }
 
+blueprint StringBuilder {
+    ptr raw = sb_new(64)
+
+    static fn create(int cap) -> StringBuilder {
+        new StringBuilder sb()
+        sb.raw = sb_new(cap)
+        return sb
+    }
+
+    fn append(str s) {
+        sb_append(self.raw, s)
+    }
+
+    fn append_int(int v) {
+        sb_append_int(self.raw, v)
+    }
+
+    fn append_byte(int b) {
+        sb_append_byte(self.raw, b)
+    }
+
+    fn to_str() -> str {
+        return sb_to_str(self.raw)
+    }
+
+    fn len() -> int {
+        return sb_len(self.raw)
+    }
+
+    fn length() -> int {
+        return sb_len(self.raw)
+    }
+
+    fn clear() {
+        sb_clear(self.raw)
+    }
+}
+
+fn string_builder(int cap) -> StringBuilder {
+    return StringBuilder.create(cap)
+}
+
+fn new_string_builder() -> StringBuilder {
+    return StringBuilder.create(64)
+}
+
+

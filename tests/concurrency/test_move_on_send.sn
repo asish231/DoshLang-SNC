@@ -1,0 +1,27 @@
+// Concurrency Test: Move-on-Send Channel Ownership Transfer
+//
+// Verifies compile-time rejection when a value is sent across a channel
+// and accessed afterwards. Once an identifier is sent, ownership is transferred
+// to prevent concurrent access and data races.
+
+blueprint Message {
+    int id = 0
+    str content = ""
+}
+
+fn main() {
+    print("=== Concurrency Test: Move-on-Send Channels ===")
+    chan<Message> ch
+
+    new Message msg()
+    msg.id = 42
+    msg.content = "payload"
+
+    // Sending msg transfers ownership across the channel:
+    ch.send(msg)
+
+    // COMPILE-TIME REJECTION EXPECTED:
+    // Any access to `msg` after `ch.send(msg)` must trigger compile error:
+    // "use of moved value 'msg': value was transferred over channel"
+    print(msg.id)
+}

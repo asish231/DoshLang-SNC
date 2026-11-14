@@ -37,6 +37,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/mman.h>
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || \
     defined(__NetBSD__) || defined(__DragonFly__)
 #include <sys/sysctl.h>
@@ -105,8 +106,11 @@ typedef struct Map {
     int64_t val_kind;
     int64_t len;
     int64_t cap;
+    int64_t hcap;
     int64_t *keys;
     int64_t *vals;
+    uint64_t *hashes;
+    int64_t *buckets;
 } Map;
 
 typedef struct Err {
@@ -264,7 +268,29 @@ typedef struct ByteArray {
     unsigned char *data;
 } ByteArray;
 
-enum { KIND_BYTEARRAY = 20 };
+typedef struct Sb {
+    int64_t rc;
+    int64_t kind;
+    int64_t cap;
+    int64_t len;
+    char *buf;
+} Sb;
+
+enum { KIND_BYTEARRAY = 20, KIND_POOL = 21, KIND_STRBUILDER = 22 };
+
+typedef struct SnPool {
+    int64_t rc;
+    int64_t kind;
+    int64_t elem_kind;
+    int64_t elem_size;
+    uint32_t len;
+    uint32_t cap;
+    uint32_t active_count;
+    uint32_t free_head;
+    uint8_t *slots;
+    uint32_t *generations;
+    uint32_t *free_next;
+} SnPool;
 
 /* --------------------------------------------------------------------- */
 /*  Cycle collector                                                       */
@@ -394,8 +420,13 @@ static int gc_stack_bounds(void **lo, void **hi) {
     if (rc != 0) return 0;
 #endif
     if (!addr || sz == 0) return 0;
+#if defined(__APPLE__)
+    *lo = (char *)addr - sz;
+    *hi = addr;
+#else
     *lo = addr;
     *hi = (char *)addr + sz;
+#endif
     return 1;
 }
 
@@ -462,8 +493,21 @@ static void gc_mark(void *p) {
         /* fn and env are raw code/raw env, not traced. */
         break;
     }
-    case KIND_BYTEARRAY: {
-        /* data is raw bytes, not traced. */
+    case KIND_BYTEARRAY:
+    case KIND_STRBUILDER: {
+        /* data/buf is raw bytes, not traced. */
+        break;
+    }
+    case KIND_POOL: {
+        SnPool *pl = (SnPool *)p;
+        if (pl->elem_kind == 1) {
+            for (uint32_t i = 0; i < pl->len; i++) {
+                if ((pl->generations[i] & 1u) != 0) {
+                    int64_t raw = *(int64_t *)(pl->slots + (size_t)i * (size_t)pl->elem_size);
+                    gc_mark((void *)(intptr_t)raw);
+                }
+            }
+        }
         break;
     }
     default:
@@ -496,18 +540,22 @@ static void gc_scan_range(void *lo, void *hi) {
 }
 
 /* Frees one object exactly as sn_release would at refcount zero. */
+static int list_is_slab_backed(List *l);
+
 static void gc_free(void *p) {
     Obj *o = (Obj *)p;
     switch (o->kind) {
     case KIND_LIST: {
         List *l = (List *)p;
-        free(l->items);
+        if (!list_is_slab_backed(l)) free(l->items);
         break;
     }
     case KIND_MAP: {
         Map *m = (Map *)p;
         free(m->keys);
         free(m->vals);
+        free(m->hashes);
+        free(m->buckets);
         break;
     }
     case KIND_ERR: {
@@ -544,6 +592,18 @@ static void gc_free(void *p) {
         free(b->data);
         break;
     }
+    case KIND_STRBUILDER: {
+        Sb *sb = (Sb *)p;
+        free(sb->buf);
+        break;
+    }
+    case KIND_POOL: {
+        SnPool *pl = (SnPool *)p;
+        free(pl->slots);
+        free(pl->generations);
+        free(pl->free_next);
+        break;
+    }
     case KIND_JSON:
     case KIND_CLOS:
     case KIND_STR:
@@ -575,12 +635,13 @@ void sn_gc_collect(void) {
             break;
         }
     }
+    for (int64_t i = 0; i < g_gc_count; i++) g_gc_objs[i].marked = 0;
+
     /* The collecting thread's own frames: a generous bounded window above the
        current stack pointer. Caller frames always sit at higher addresses, so
        this covers every live frame without walking off the stack. */
-    gc_scan_range(sp, (char *)sp + GC_SELF_SCAN);
-
-    for (int64_t i = 0; i < g_gc_count; i++) g_gc_objs[i].marked = 0;
+    void *scan_hi = top ? top : (void *)((char *)sp + GC_SELF_SCAN);
+    gc_scan_range(sp, scan_hi);
 
     int64_t i;
     for (i = 0; i < g_gc_nroots; i++) gc_mark(g_gc_roots[i]);
@@ -696,7 +757,7 @@ void sn_release(void *p) {
         if (l->elem_kind == 1) {
             for (int64_t i = 0; i < l->len; i++) sn_release((void *)(intptr_t)l->items[i]);
         }
-        free(l->items);
+        if (!list_is_slab_backed(l)) free(l->items);
         free(l);
         break;
     }
@@ -710,6 +771,8 @@ void sn_release(void *p) {
         }
         free(m->keys);
         free(m->vals);
+        free(m->hashes);
+        free(m->buckets);
         free(m);
         break;
     }
@@ -753,6 +816,28 @@ void sn_release(void *p) {
     case KIND_BYTEARRAY: {
         ByteArray *b = (ByteArray *)p;
         free(b->data);
+        free(p);
+        break;
+    }
+    case KIND_STRBUILDER: {
+        Sb *sb = (Sb *)p;
+        free(sb->buf);
+        free(p);
+        break;
+    }
+    case KIND_POOL: {
+        SnPool *pl = (SnPool *)p;
+        if (pl->elem_kind == 1) {
+            for (uint32_t i = 0; i < pl->len; i++) {
+                if ((pl->generations[i] & 1u) != 0) {
+                    int64_t raw = *(int64_t *)(pl->slots + (size_t)i * (size_t)pl->elem_size);
+                    sn_release((void *)(intptr_t)raw);
+                }
+            }
+        }
+        free(pl->slots);
+        free(pl->generations);
+        free(pl->free_next);
         free(p);
         break;
     }
@@ -967,6 +1052,45 @@ void sn_printn_str(void *p) { printf("%s", sn_str_cstr(p)); }
 void sn_print_none(void) { printf("none\n"); }
 void sn_printn_none(void) { printf("none"); }
 
+/* Non-moving virtual-memory backing for List so references into a growing
+   list remain valid across arbitrary .push() calls (Goose / SN-Strata invariant). */
+#define SN_LIST_SLAB_BYTES (256ULL * 1024ULL * 1024ULL)
+static uint8_t *g_list_slab_base = NULL;
+static uint8_t *g_list_slab_top = NULL;
+static uint8_t *g_list_slab_limit = NULL;
+
+static int64_t *list_alloc_backing(size_t initial_cap) {
+    /* Each list gets a 512 KB virtual-address window (65,536 elements) from the
+       256 MB non-moving slab if available; OS pages are committed lazily on touch,
+       so idle capacity uses 0 bytes of physical RAM and elements NEVER move on growth
+       up to 65,536 elements. */
+    size_t window_elems = 65536;
+    size_t window_bytes = window_elems * sizeof(int64_t);
+#ifndef _WIN32
+    if (!g_list_slab_base) {
+        uint8_t *mem = (uint8_t *)mmap(NULL, (size_t)SN_LIST_SLAB_BYTES,
+                                       PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (mem != MAP_FAILED) {
+            g_list_slab_base = mem;
+            g_list_slab_top = mem;
+            g_list_slab_limit = mem + SN_LIST_SLAB_BYTES;
+        }
+    }
+    if (g_list_slab_top && g_list_slab_top + window_bytes <= g_list_slab_limit) {
+        int64_t *p = (int64_t *)g_list_slab_top;
+        g_list_slab_top += window_bytes;
+        return p;
+    }
+#endif
+    return (int64_t *)xmalloc(sizeof(int64_t) * initial_cap);
+}
+
+static int list_is_slab_backed(List *l) {
+    if (!g_list_slab_base || !l || !l->items) return 0;
+    uint8_t *p = (uint8_t *)l->items;
+    return p >= g_list_slab_base && p < g_list_slab_limit;
+}
+
 void *sn_list_new(int64_t elem_kind) {
     List *l = (List *)xmalloc(sizeof(List));
     l->rc = 1;
@@ -974,15 +1098,22 @@ void *sn_list_new(int64_t elem_kind) {
     gc_track(l, (int64_t)sizeof(List));
     l->elem_kind = elem_kind;
     l->len = 0;
-    l->cap = 4;
-    l->items = (int64_t *)xmalloc(sizeof(int64_t) * (size_t)l->cap);
+    l->items = list_alloc_backing(4);
+    l->cap = list_is_slab_backed(l) ? 65536 : 4;
     return l;
 }
 
 static void list_grow(List *l) {
     if (l->len < l->cap) return;
+    int64_t old_cap = l->cap;
     l->cap *= 2;
-    l->items = (int64_t *)realloc(l->items, sizeof(int64_t) * (size_t)l->cap);
+    if (list_is_slab_backed(l)) {
+        int64_t *ni = (int64_t *)xmalloc(sizeof(int64_t) * (size_t)l->cap);
+        memcpy(ni, l->items, sizeof(int64_t) * (size_t)old_cap);
+        l->items = ni;
+    } else {
+        l->items = (int64_t *)realloc(l->items, sizeof(int64_t) * (size_t)l->cap);
+    }
 }
 
 void sn_list_push_i64(void *p, int64_t v) {
@@ -1039,6 +1170,103 @@ void sn_list_set_ptr(void *p, int64_t i, void *v) {
     l->items[i] = (int64_t)(intptr_t)v;
 }
 
+void *sn_list_elem_addr(void *p, int64_t i) {
+    List *l = (List *)p;
+    bounds(l, i);
+    return (void *)&l->items[i];
+}
+
+int64_t sn_list_pop_i64(void *p) {
+    List *l = (List *)p;
+    if (!l || l->len <= 0) {
+        fprintf(stderr, "runtime error: pop from empty list\n");
+        exit(1);
+    }
+    l->len--;
+    return l->items[l->len];
+}
+
+void *sn_list_pop_ptr(void *p) {
+    List *l = (List *)p;
+    if (!l || l->len <= 0) {
+        fprintf(stderr, "runtime error: pop from empty list\n");
+        exit(1);
+    }
+    l->len--;
+    return (void *)(intptr_t)l->items[l->len];
+}
+
+void sn_list_clear(void *p) {
+    if (!p) return;
+    List *l = (List *)p;
+    if (l->elem_kind == 1) {
+        for (int64_t i = 0; i < l->len; i++) {
+            sn_release((void *)(intptr_t)l->items[i]);
+        }
+    }
+    l->len = 0;
+}
+
+static uint64_t map_hash_key(Map *m, int64_t key) {
+    uint64_t h;
+    if (m->key_kind == 1 && key != 0) {
+        Str *s = (Str *)(intptr_t)key;
+        h = 14695981039346656037ULL;
+        for (int64_t i = 0; i < s->len; i++) {
+            h ^= (uint8_t)s->data[i];
+            h *= 1099511628211ULL;
+        }
+    } else {
+        h = (uint64_t)key;
+        h = (h ^ (h >> 30)) * 0xbf58476d1ce4e5b9ULL;
+        h = (h ^ (h >> 27)) * 0x94d049bb133111ebULL;
+        h = h ^ (h >> 31);
+    }
+    return h | 1ULL;
+}
+
+static int key_eq(Map *m, int64_t a, int64_t b) {
+    if (m->key_kind == 1) return (int)sn_str_eq((void *)(intptr_t)a, (void *)(intptr_t)b);
+    return a == b;
+}
+
+static void map_rehash(Map *m, int64_t new_hcap) {
+    int64_t *nb = (int64_t *)calloc((size_t)new_hcap, sizeof(int64_t));
+    if (!nb) {
+        fprintf(stderr, "out of memory\n");
+        exit(1);
+    }
+    uint64_t mask = (uint64_t)new_hcap - 1;
+    for (int64_t i = 0; i < m->len; i++) {
+        uint64_t slot = m->hashes[i] & mask;
+        while (nb[slot] != 0) {
+            slot = (slot + 1) & mask;
+        }
+        nb[slot] = i + 1;
+    }
+    free(m->buckets);
+    m->buckets = nb;
+    m->hcap = new_hcap;
+}
+
+static int64_t map_find_index(Map *m, int64_t key, uint64_t h, uint64_t *out_bucket) {
+    uint64_t mask = (uint64_t)m->hcap - 1;
+    uint64_t slot = h & mask;
+    for (;;) {
+        int64_t b = m->buckets[slot];
+        if (b == 0) {
+            if (out_bucket) *out_bucket = slot;
+            return -1;
+        }
+        int64_t idx = b - 1;
+        if (m->hashes[idx] == h && key_eq(m, m->keys[idx], key)) {
+            if (out_bucket) *out_bucket = slot;
+            return idx;
+        }
+        slot = (slot + 1) & mask;
+    }
+}
+
 void *sn_map_new(int64_t key_kind, int64_t val_kind) {
     Map *m = (Map *)xmalloc(sizeof(Map));
     m->rc = 1;
@@ -1047,54 +1275,63 @@ void *sn_map_new(int64_t key_kind, int64_t val_kind) {
     m->key_kind = key_kind;
     m->val_kind = val_kind;
     m->len = 0;
-    m->cap = 4;
-    m->keys = (int64_t *)xmalloc(sizeof(int64_t) * 4);
-    m->vals = (int64_t *)xmalloc(sizeof(int64_t) * 4);
+    m->cap = 8;
+    m->hcap = 16;
+    m->keys = (int64_t *)xmalloc(sizeof(int64_t) * 8);
+    m->vals = (int64_t *)xmalloc(sizeof(int64_t) * 8);
+    m->hashes = (uint64_t *)xmalloc(sizeof(uint64_t) * 8);
+    m->buckets = (int64_t *)calloc(16, sizeof(int64_t));
     return m;
-}
-
-static int key_eq(Map *m, int64_t a, int64_t b) {
-    if (m->key_kind == 1) return (int)sn_str_eq((void *)(intptr_t)a, (void *)(intptr_t)b);
-    return a == b;
 }
 
 void sn_map_set(void *p, int64_t key, int64_t val) {
     if (!p) return;
     Map *m = (Map *)p;
-    for (int64_t i = 0; i < m->len; i++) {
-        if (key_eq(m, m->keys[i], key)) {
-            if (m->val_kind == 1) {
-                sn_release((void *)(intptr_t)m->vals[i]);
-                sn_retain((void *)(intptr_t)val);
-            }
-            m->vals[i] = val;
-            return;
+    if ((m->len + 1) * 4 >= m->hcap * 3) {
+        map_rehash(m, m->hcap * 2);
+    }
+    uint64_t h = map_hash_key(m, key);
+    uint64_t bucket = 0;
+    int64_t idx = map_find_index(m, key, h, &bucket);
+    if (idx >= 0) {
+        if (m->val_kind == 1) {
+            sn_release((void *)(intptr_t)m->vals[idx]);
+            sn_retain((void *)(intptr_t)val);
         }
+        m->vals[idx] = val;
+        return;
     }
     if (m->len == m->cap) {
         m->cap *= 2;
         m->keys = (int64_t *)realloc(m->keys, sizeof(int64_t) * (size_t)m->cap);
         m->vals = (int64_t *)realloc(m->vals, sizeof(int64_t) * (size_t)m->cap);
+        m->hashes = (uint64_t *)realloc(m->hashes, sizeof(uint64_t) * (size_t)m->cap);
     }
     if (m->key_kind == 1) sn_retain((void *)(intptr_t)key);
     if (m->val_kind == 1) sn_retain((void *)(intptr_t)val);
-    m->keys[m->len] = key;
-    m->vals[m->len] = val;
+    int64_t new_idx = m->len;
+    m->keys[new_idx] = key;
+    m->vals[new_idx] = val;
+    m->hashes[new_idx] = h;
+    m->buckets[bucket] = new_idx + 1;
     m->len++;
 }
 
 int64_t sn_map_has(void *p, int64_t key) {
     if (!p) return 0;
     Map *m = (Map *)p;
-    for (int64_t i = 0; i < m->len; i++) if (key_eq(m, m->keys[i], key)) return 1;
-    return 0;
+    if (m->len == 0) return 0;
+    uint64_t h = map_hash_key(m, key);
+    return map_find_index(m, key, h, NULL) >= 0 ? 1 : 0;
 }
 
 int64_t sn_map_get(void *p, int64_t key) {
     if (!p) return 0;
     Map *m = (Map *)p;
-    for (int64_t i = 0; i < m->len; i++) if (key_eq(m, m->keys[i], key)) return m->vals[i];
-    return 0;
+    if (m->len == 0) return 0;
+    uint64_t h = map_hash_key(m, key);
+    int64_t idx = map_find_index(m, key, h, NULL);
+    return idx >= 0 ? m->vals[idx] : 0;
 }
 
 int64_t sn_map_len(void *p) { return p ? ((Map *)p)->len : 0; }
@@ -1650,8 +1887,9 @@ void *sn_chan_new(void) {
 
 void sn_chan_notify(void);
 
-void sn_chan_send(void *p, int64_t v) {
+int64_t sn_chan_send(void *p, int64_t v) {
     Chan *c = (Chan *)p;
+    if (!c) return 0;
 #ifdef _WIN32
     EnterCriticalSection(&c->mu);
 #else
@@ -1663,8 +1901,7 @@ void sn_chan_send(void *p, int64_t v) {
 #else
         pthread_mutex_unlock(&c->mu);
 #endif
-        fprintf(stderr, "send on closed channel\n");
-        exit(1);
+        return 0;
     }
     if (c->len == c->cap) {
         int64_t *nb = (int64_t *)xmalloc(sizeof(int64_t) * (size_t)c->cap * 2);
@@ -1684,10 +1921,15 @@ void sn_chan_send(void *p, int64_t v) {
     pthread_mutex_unlock(&c->mu);
 #endif
     sn_chan_notify();
+    return 1;
 }
 
-int64_t sn_chan_recv(void *p) {
+int64_t sn_chan_recv_ok(void *p, int64_t *out_val) {
     Chan *c = (Chan *)p;
+    if (!c) {
+        if (out_val) *out_val = 0;
+        return 0;
+    }
 #ifdef _WIN32
     EnterCriticalSection(&c->mu);
     while (c->len == 0 && !c->closed) SleepConditionVariableCS(&c->cv, &c->mu, INFINITE);
@@ -1701,8 +1943,8 @@ int64_t sn_chan_recv(void *p) {
 #else
         pthread_mutex_unlock(&c->mu);
 #endif
-        fprintf(stderr, "receive on closed empty channel\n");
-        exit(1);
+        if (out_val) *out_val = 0;
+        return 0;
     }
     int64_t v = c->buf[c->head];
     c->head = (c->head + 1) % c->cap;
@@ -1712,6 +1954,13 @@ int64_t sn_chan_recv(void *p) {
 #else
     pthread_mutex_unlock(&c->mu);
 #endif
+    if (out_val) *out_val = v;
+    return 1;
+}
+
+int64_t sn_chan_recv(void *p) {
+    int64_t v = 0;
+    sn_chan_recv_ok(p, &v);
     return v;
 }
 
@@ -1764,6 +2013,93 @@ void sn_lock_rel(void *p) {
 #endif
 }
 
+/* --------------------------------------------------------------------- */
+/*  Structured Concurrency Nursery Runtime                               */
+/* --------------------------------------------------------------------- */
+#ifdef _WIN32
+typedef struct SnNursery {
+    CRITICAL_SECTION mu;
+    CONDITION_VARIABLE cv;
+    int64_t active_tasks;
+} SnNursery;
+#else
+typedef struct SnNursery {
+    pthread_mutex_t mu;
+    pthread_cond_t cv;
+    int64_t active_tasks;
+} SnNursery;
+#endif
+
+void *sn_nursery_new(void) {
+    SnNursery *n = (SnNursery *)xmalloc(sizeof(SnNursery));
+    n->active_tasks = 0;
+#ifdef _WIN32
+    InitializeCriticalSection(&n->mu);
+    InitializeConditionVariable(&n->cv);
+#else
+    pthread_mutex_init(&n->mu, NULL);
+    pthread_cond_init(&n->cv, NULL);
+#endif
+    return n;
+}
+
+void sn_nursery_enter_task(void *nursery) {
+    if (!nursery) return;
+    SnNursery *n = (SnNursery *)nursery;
+#ifdef _WIN32
+    EnterCriticalSection(&n->mu);
+    n->active_tasks++;
+    LeaveCriticalSection(&n->mu);
+#else
+    pthread_mutex_lock(&n->mu);
+    n->active_tasks++;
+    pthread_mutex_unlock(&n->mu);
+#endif
+}
+
+void sn_nursery_leave_task(void *nursery) {
+    if (!nursery) return;
+    SnNursery *n = (SnNursery *)nursery;
+#ifdef _WIN32
+    EnterCriticalSection(&n->mu);
+    n->active_tasks--;
+    if (n->active_tasks == 0) {
+        WakeAllConditionVariable(&n->cv);
+    }
+    LeaveCriticalSection(&n->mu);
+#else
+    pthread_mutex_lock(&n->mu);
+    n->active_tasks--;
+    if (n->active_tasks == 0) {
+        pthread_cond_broadcast(&n->cv);
+    }
+    pthread_mutex_unlock(&n->mu);
+#endif
+}
+
+void sn_nursery_wait(void *nursery) {
+    if (!nursery) return;
+    SnNursery *n = (SnNursery *)nursery;
+#ifdef _WIN32
+    EnterCriticalSection(&n->mu);
+    while (n->active_tasks > 0) {
+        SleepConditionVariableCS(&n->cv, &n->mu, INFINITE);
+    }
+    LeaveCriticalSection(&n->mu);
+    DeleteCriticalSection(&n->mu);
+    free(n);
+#else
+    pthread_mutex_lock(&n->mu);
+    while (n->active_tasks > 0) {
+        pthread_cond_wait(&n->cv, &n->mu);
+    }
+    pthread_mutex_unlock(&n->mu);
+    pthread_mutex_destroy(&n->mu);
+    pthread_cond_destroy(&n->cv);
+    free(n);
+#endif
+}
+
 typedef struct SpawnJob {
     void (*fn)(void *);
     void *arg;
@@ -1785,25 +2121,30 @@ static void *spawn_tramp(void *p) {
     char anchor = 0;
     {
         void *lo = NULL, *hi = NULL;
-#ifndef _WIN32
-        /* POSIX only: g_spawn_attr records the about-to-be-created thread's
-           stack so its frames count as GC roots. Windows threads created via
-           _beginthreadex fall back to the anchor window below. */
-        if (g_spawn_attr) {
-            void *addr = NULL;
-            size_t sz = 0;
-            if (pthread_attr_getstack(g_spawn_attr, &addr, &sz) == 0 && addr && sz) {
-                lo = addr;
-                hi = (char *)addr + sz;
-            }
-        }
-#endif
-        if (lo && hi) {
+        if (gc_stack_bounds(&lo, &hi)) {
             sn_gc_register_thread(lo, hi);
         } else {
-            sn_gc_register_thread((char *)&anchor + (1 << 20), &anchor);
+#ifndef _WIN32
+            /* POSIX only: g_spawn_attr records the about-to-be-created thread's
+               stack so its frames count as GC roots. Windows threads created via
+               _beginthreadex fall back to the anchor window below. */
+            if (g_spawn_attr) {
+                void *addr = NULL;
+                size_t sz = 0;
+                if (pthread_attr_getstack(g_spawn_attr, &addr, &sz) == 0 && addr && sz) {
+                    lo = addr;
+                    hi = (char *)addr + sz;
+                }
+            }
+#endif
+            if (lo && hi) {
+                sn_gc_register_thread(lo, hi);
+            } else {
+                sn_gc_register_thread((char *)&anchor + (1 << 20), &anchor);
+            }
         }
     }
+    sn_gc_enter();
     j->fn(j->arg);
     sn_gc_leave();
     free(j);
@@ -4515,6 +4856,81 @@ void sn_bytearray_hmac_sha256(const char *key, int64_t keylen, const char *msg,
 }
 
 /* --------------------------------------------------------------------- */
+/*  StringBuilder: high-performance native string builder                */
+/* --------------------------------------------------------------------- */
+
+static void sb_reserve(Sb *sb, int64_t need) {
+    if (need <= sb->cap) return;
+    int64_t ncap = sb->cap > 0 ? sb->cap : 64;
+    while (ncap < need) ncap *= 2;
+    sb->buf = (char *)realloc(sb->buf, (size_t)ncap);
+    if (!sb->buf) {
+        fprintf(stderr, "out of memory\n");
+        exit(1);
+    }
+    sb->cap = ncap;
+}
+
+void *sn_sb_new(int64_t cap) {
+    Sb *sb = (Sb *)xmalloc(sizeof(Sb));
+    sb->rc = 1;
+    sb->kind = KIND_STRBUILDER;
+    int64_t c = cap > 0 ? cap : 64;
+    sb->cap = c;
+    sb->len = 0;
+    sb->buf = (char *)xmalloc((size_t)c);
+    gc_track(sb, (int64_t)sizeof(Sb));
+    return sb;
+}
+
+void sn_sb_append_cstr(void *sb_ptr, const char *s, int64_t len) {
+    if (!sb_ptr || !s || len <= 0) return;
+    Sb *sb = (Sb *)sb_ptr;
+    sb_reserve(sb, sb->len + len);
+    memcpy(sb->buf + sb->len, s, (size_t)len);
+    sb->len += len;
+}
+
+void sn_sb_append_str(void *sb_ptr, void *str_ptr) {
+    if (!sb_ptr || !str_ptr) return;
+    const char *s = sn_str_cstr(str_ptr);
+    int64_t len = sn_str_len(str_ptr);
+    sn_sb_append_cstr(sb_ptr, s, len);
+}
+
+void sn_sb_append_i64(void *sb_ptr, int64_t val) {
+    if (!sb_ptr) return;
+    Sb *sb = (Sb *)sb_ptr;
+    sb_reserve(sb, sb->len + 32);
+    int n = snprintf(sb->buf + sb->len, 32, "%" PRId64, val);
+    if (n > 0) sb->len += n;
+}
+
+void sn_sb_append_byte(void *sb_ptr, int64_t b) {
+    if (!sb_ptr) return;
+    Sb *sb = (Sb *)sb_ptr;
+    sb_reserve(sb, sb->len + 1);
+    sb->buf[sb->len++] = (char)(b & 0xff);
+}
+
+void *sn_sb_to_str(void *sb_ptr) {
+    if (!sb_ptr) return sn_str_from_cstr("");
+    Sb *sb = (Sb *)sb_ptr;
+    return sn_str_new(sb->buf, sb->len);
+}
+
+int64_t sn_sb_len(void *sb_ptr) {
+    if (!sb_ptr) return 0;
+    return ((Sb *)sb_ptr)->len;
+}
+
+void sn_sb_clear(void *sb_ptr) {
+    if (!sb_ptr) return;
+    Sb *sb = (Sb *)sb_ptr;
+    sb->len = 0;
+}
+
+/* --------------------------------------------------------------------- */
 /*  Raw pointer access, for FFI out-parameters and buffers                */
 /* --------------------------------------------------------------------- */
 
@@ -4683,39 +5099,30 @@ static int deque_pop(GoDeque *d, void (**pfn)(void *), void **parg) {
 
 static void *go_worker(void *p) {
     int i = (int)(intptr_t)p;
-    /* Register this worker's stack so the collector can treat its frame as a
-       root. The GC refuses to run while a mutator is active, so scanning is
-       never racy. */
     char anchor = 0;
-    {
-        void *lo = NULL, *hi = NULL;
-        if (gc_stack_bounds(&lo, &hi)) {
-            sn_gc_register_thread(lo, hi);
-        } else {
-            sn_gc_register_thread((char *)&anchor + (1 << 20), &anchor);
-        }
-    }
+    void *lo = NULL, *hi = NULL;
+    int has_bounds = gc_stack_bounds(&lo, &hi);
+
     for (;;) {
         void (*fn)(void *) = NULL;
         void *arg = NULL;
-        if (deque_pop(&g_deques[i], &fn, &arg)) {
+        int got = deque_pop(&g_deques[i], &fn, &arg);
+        if (!got) {
+            /* steal from the other workers' queues (oldest-first) */
+            for (int k = 1; k < g_go_nworkers; k++) {
+                int v = (i + k) % g_go_nworkers;
+                if (deque_pop(&g_deques[v], &fn, &arg)) { got = 1; break; }
+            }
+        }
+        if (got) {
+            if (has_bounds) {
+                sn_gc_register_thread(lo, hi);
+            } else {
+                sn_gc_register_thread((char *)&anchor + (1 << 20), &anchor);
+            }
             sn_gc_enter();
             fn(arg);
             sn_gc_leave();
-            pthread_mutex_lock(&g_go_mu);
-            g_go_pending--;
-            if (g_go_pending == 0) pthread_cond_broadcast(&g_go_cv);
-            pthread_mutex_unlock(&g_go_mu);
-            continue;
-        }
-        /* steal from the other workers' queues (oldest-first) */
-        int stole = 0;
-        for (int k = 1; k < g_go_nworkers; k++) {
-            int v = (i + k) % g_go_nworkers;
-            if (deque_pop(&g_deques[v], &fn, &arg)) { stole = 1; break; }
-        }
-        if (stole) {
-            fn(arg);
             pthread_mutex_lock(&g_go_mu);
             g_go_pending--;
             if (g_go_pending == 0) pthread_cond_broadcast(&g_go_cv);
@@ -4764,7 +5171,8 @@ void sn_go_spawn(void (*fn)(void *), void *arg) {
     g_go_pending++;
     pthread_mutex_unlock(&g_go_mu);
     /* round-robin submit across worker queues */
-    int idx = __sync_fetch_and_add(&g_go_rr, 1) % g_go_nworkers;
+    unsigned int u = (unsigned int)__sync_fetch_and_add(&g_go_rr, 1);
+    int idx = (int)(u % (unsigned int)g_go_nworkers);
     if (!deque_push(&g_deques[idx], fn, arg)) {
         /* that deque is full; try every worker before giving up */
         int done = 0;
@@ -4785,3 +5193,297 @@ void sn_go_spawn(void (*fn)(void *), void *arg) {
     sn_spawn(fn, arg);
 #endif
 }
+
+/* --------------------------------------------------------------------- */
+/*  SN-Strata Elastic Lanes, Generational Slot Vaults & Multi-Frame RF   */
+/* --------------------------------------------------------------------- */
+
+#ifdef _WIN32
+#define SN_TLS __declspec(thread)
+#else
+#define SN_TLS __thread
+#endif
+
+#define SN_LANE_COUNT 8
+#define SN_LANE_RESERVE_BYTES (256ULL * 1024ULL * 1024ULL) /* 256 MB virtual reservation per lane */
+#define SN_LANE_COMMIT_STEP   (64ULL * 1024ULL)
+
+typedef struct SnLane {
+    uint8_t *base;
+    uint8_t *top;
+    uint8_t *committed;
+    uint8_t *limit;
+    uint32_t initialized;
+    uint32_t frozen_depth;
+} SnLane;
+
+static SN_TLS SnLane g_tls_lanes[SN_LANE_COUNT];
+
+static SnLane *sn_lane_ensure(int64_t lane_id) {
+    if (lane_id < 0 || lane_id >= SN_LANE_COUNT) lane_id = 0;
+    SnLane *l = &g_tls_lanes[lane_id];
+    if (!l->initialized) {
+        size_t page_sz = 65536;
+        size_t total = (size_t)SN_LANE_RESERVE_BYTES + page_sz;
+#ifdef _WIN32
+        uint8_t *mem = (uint8_t *)VirtualAlloc(NULL, total, MEM_RESERVE, PAGE_NOACCESS);
+        if (!mem) { fprintf(stderr, "fatal: SnLane VirtualAlloc failed\n"); exit(1); }
+        VirtualAlloc(mem, SN_LANE_COMMIT_STEP, MEM_COMMIT, PAGE_READWRITE);
+        l->committed = mem + SN_LANE_COMMIT_STEP;
+#else
+        uint8_t *mem = (uint8_t *)mmap(NULL, total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (mem == MAP_FAILED) { fprintf(stderr, "fatal: SnLane mmap failed\n"); exit(1); }
+        mprotect(mem + SN_LANE_RESERVE_BYTES, page_sz, PROT_NONE);
+        l->committed = mem + SN_LANE_RESERVE_BYTES;
+#endif
+        l->base = mem;
+        l->top = mem;
+        l->limit = mem + SN_LANE_RESERVE_BYTES;
+        l->initialized = 1;
+        l->frozen_depth = 0;
+    }
+    return l;
+}
+
+void *sn_lane_save(int64_t lane_id) {
+    SnLane *l = sn_lane_ensure(lane_id);
+    return (void *)l->top;
+}
+
+void sn_lane_restore(int64_t lane_id, void *watermark) {
+    SnLane *l = sn_lane_ensure(lane_id);
+    if (l->frozen_depth > 0) {
+        fprintf(stderr, "runtime error: cannot rewind frozen Elastic Lane\n");
+        exit(1);
+    }
+    if (watermark && (uint8_t *)watermark >= l->base && (uint8_t *)watermark <= l->limit) {
+        l->top = (uint8_t *)watermark;
+    }
+}
+
+void *sn_lane_alloc(int64_t lane_id, int64_t bytes) {
+    SnLane *l = sn_lane_ensure(lane_id);
+    if (l->frozen_depth > 0) {
+        fprintf(stderr, "runtime error: cannot allocate on frozen Elastic Lane\n");
+        exit(1);
+    }
+    if (bytes < 0) bytes = 0;
+    uintptr_t cur = (uintptr_t)l->top;
+    uintptr_t aligned = (cur + 7u) & ~(uintptr_t)7u;
+    uint8_t *next = (uint8_t *)(aligned + (size_t)bytes);
+#ifdef _WIN32
+    if (next > l->committed) {
+        if (next > l->limit) { fprintf(stderr, "fatal: SnLane overflow\n"); exit(1); }
+        size_t need = ((size_t)(next - l->committed) + SN_LANE_COMMIT_STEP - 1) & ~(SN_LANE_COMMIT_STEP - 1);
+        VirtualAlloc(l->committed, need, MEM_COMMIT, PAGE_READWRITE);
+        l->committed += need;
+    }
+#else
+    if (next > l->limit) {
+        fprintf(stderr, "fatal: SnLane overflow\n");
+        exit(1);
+    }
+#endif
+    memset((void *)aligned, 0, (size_t)bytes);
+    l->top = next;
+    return (void *)aligned;
+}
+
+int64_t sn_lane_used(int64_t lane_id) {
+    SnLane *l = sn_lane_ensure(lane_id);
+    return (int64_t)(l->top - l->base);
+}
+
+void sn_lane_freeze(int64_t lane_id) {
+    SnLane *l = sn_lane_ensure(lane_id);
+    l->frozen_depth++;
+}
+
+void sn_lane_unfreeze(int64_t lane_id) {
+    SnLane *l = sn_lane_ensure(lane_id);
+    if (l->frozen_depth > 0) l->frozen_depth--;
+}
+
+/* Generational Slot Vault (SnPool) */
+void *sn_pool_new(int64_t elem_kind, int64_t elem_size) {
+    if (elem_size < 8) elem_size = 8;
+    SnPool *pl = (SnPool *)xmalloc(sizeof(SnPool));
+    pl->rc = 1;
+    pl->kind = KIND_POOL;
+    gc_track(pl, (int64_t)sizeof(SnPool));
+    pl->elem_kind = elem_kind;
+    pl->elem_size = elem_size;
+    pl->len = 0;
+    pl->cap = 16;
+    pl->active_count = 0;
+    pl->free_head = 0xFFFFFFFFu;
+    pl->slots = (uint8_t *)calloc(16, (size_t)elem_size);
+    pl->generations = (uint32_t *)calloc(16, sizeof(uint32_t));
+    pl->free_next = (uint32_t *)calloc(16, sizeof(uint32_t));
+    return pl;
+}
+
+static void sn_pool_grow(SnPool *pl) {
+    uint32_t old_cap = pl->cap;
+    uint32_t new_cap = old_cap * 2;
+    pl->slots = (uint8_t *)realloc(pl->slots, (size_t)new_cap * (size_t)pl->elem_size);
+    memset(pl->slots + (size_t)old_cap * (size_t)pl->elem_size, 0, (size_t)old_cap * (size_t)pl->elem_size);
+    pl->generations = (uint32_t *)realloc(pl->generations, (size_t)new_cap * sizeof(uint32_t));
+    memset(pl->generations + old_cap, 0, (size_t)old_cap * sizeof(uint32_t));
+    pl->free_next = (uint32_t *)realloc(pl->free_next, (size_t)new_cap * sizeof(uint32_t));
+    memset(pl->free_next + old_cap, 0, (size_t)old_cap * sizeof(uint32_t));
+    pl->cap = new_cap;
+}
+
+static uint32_t sn_pool_alloc_slot(SnPool *pl, uint32_t *out_gen) {
+    uint32_t idx;
+    if (pl->free_head != 0xFFFFFFFFu) {
+        idx = pl->free_head;
+        pl->free_head = pl->free_next[idx];
+        /* Bump even (free) generation to odd (live) generation */
+        pl->generations[idx] += 1u;
+    } else {
+        if (pl->len == pl->cap) sn_pool_grow(pl);
+        idx = pl->len++;
+        pl->generations[idx] = 1u; /* First live generation is 1 */
+    }
+    pl->active_count++;
+    *out_gen = pl->generations[idx];
+    return idx;
+}
+
+int64_t sn_pool_insert_i64(void *p, int64_t val) {
+    if (!p) return 0;
+    SnPool *pl = (SnPool *)p;
+    uint32_t gen = 0;
+    uint32_t idx = sn_pool_alloc_slot(pl, &gen);
+    if (pl->elem_kind == 1) sn_retain((void *)(intptr_t)val);
+    *(int64_t *)(pl->slots + (size_t)idx * (size_t)pl->elem_size) = val;
+    uint64_t h = ((uint64_t)gen << 32) | (uint64_t)idx;
+    return (int64_t)h;
+}
+
+int64_t sn_pool_insert_rec(void *p, void *src, int64_t sz) {
+    if (!p) return 0;
+    SnPool *pl = (SnPool *)p;
+    uint32_t gen = 0;
+    uint32_t idx = sn_pool_alloc_slot(pl, &gen);
+    size_t copy_sz = (size_t)(sz <= pl->elem_size ? sz : pl->elem_size);
+    if (src && copy_sz > 0) {
+        memcpy(pl->slots + (size_t)idx * (size_t)pl->elem_size, src, copy_sz);
+    }
+    uint64_t h = ((uint64_t)gen << 32) | (uint64_t)idx;
+    return (int64_t)h;
+}
+
+int64_t sn_pool_is_valid(void *p, int64_t handle) {
+    if (!p || handle == 0) return 0;
+    SnPool *pl = (SnPool *)p;
+    uint64_t u = (uint64_t)handle;
+    uint32_t idx = (uint32_t)(u & 0xFFFFFFFFu);
+    uint32_t gen = (uint32_t)(u >> 32);
+    if ((gen & 1u) == 0 || idx >= pl->len) return 0;
+    return pl->generations[idx] == gen ? 1 : 0;
+}
+
+static uint8_t *sn_pool_checked_ptr(SnPool *pl, int64_t handle, const char *op) {
+    if (!pl) {
+        fprintf(stderr, "runtime error: null pool in %s\n", op);
+        exit(1);
+    }
+    uint64_t u = (uint64_t)handle;
+    uint32_t idx = (uint32_t)(u & 0xFFFFFFFFu);
+    uint32_t gen = (uint32_t)(u >> 32);
+    if ((gen & 1u) == 0 || idx >= pl->len || pl->generations[idx] != gen) {
+        fprintf(stderr, "runtime error: stale or invalid pool handle in %s (index=%u, expected_gen=%u, actual_gen=%u)\n",
+                op, idx, gen, idx < pl->len ? pl->generations[idx] : 0u);
+        exit(1);
+    }
+    return pl->slots + (size_t)idx * (size_t)pl->elem_size;
+}
+
+int64_t sn_pool_get_i64(void *p, int64_t handle) {
+    SnPool *pl = (SnPool *)p;
+    uint8_t *slot = sn_pool_checked_ptr(pl, handle, "pool.get");
+    return *(int64_t *)slot;
+}
+
+void sn_pool_set_i64(void *p, int64_t handle, int64_t val) {
+    SnPool *pl = (SnPool *)p;
+    uint8_t *slot = sn_pool_checked_ptr(pl, handle, "pool.set");
+    if (pl->elem_kind == 1) {
+        int64_t old = *(int64_t *)slot;
+        sn_release((void *)(intptr_t)old);
+        sn_retain((void *)(intptr_t)val);
+    }
+    *(int64_t *)slot = val;
+}
+
+void *sn_pool_get_ptr(void *p, int64_t handle) {
+    SnPool *pl = (SnPool *)p;
+    return (void *)sn_pool_checked_ptr(pl, handle, "pool.get_ref");
+}
+
+void sn_pool_remove(void *p, int64_t handle) {
+    SnPool *pl = (SnPool *)p;
+    uint8_t *slot = sn_pool_checked_ptr(pl, handle, "pool.remove");
+    uint32_t idx = (uint32_t)((uint64_t)handle & 0xFFFFFFFFu);
+    if (pl->elem_kind == 1) {
+        int64_t old = *(int64_t *)slot;
+        sn_release((void *)(intptr_t)old);
+    }
+    memset(slot, 0, (size_t)pl->elem_size);
+    /* Advance odd live generation to even freed generation */
+    pl->generations[idx] += 1u;
+    pl->free_next[idx] = pl->free_head;
+    pl->free_head = idx;
+    if (pl->active_count > 0) pl->active_count--;
+}
+
+int64_t sn_pool_len(void *p) {
+    if (!p) return 0;
+    return (int64_t)((SnPool *)p)->active_count;
+}
+
+/* Euclidean modulo: result is always in [0, |b|) */
+int64_t sn_euclid_mod_i64(int64_t a, int64_t b) {
+    if (b == 0) {
+        fprintf(stderr, "runtime error: modulo by zero\n");
+        exit(1);
+    }
+    if (a == INT64_MIN && b == -1) return 0;
+    int64_t r = a % b;
+    if (r < 0) {
+        r += (b < 0) ? -b : b;
+    }
+    return r;
+}
+
+/* Multi-frame structured return (`return expr from targetFn`) */
+static SN_TLS int64_t g_rf_target_id = 0;
+static SN_TLS int64_t g_rf_val0 = 0;
+static SN_TLS int64_t g_rf_val1 = 0;
+
+void sn_rf_trigger(int64_t target_id, int64_t v0, int64_t v1) {
+    g_rf_target_id = target_id;
+    g_rf_val0 = v0;
+    g_rf_val1 = v1;
+}
+
+int64_t sn_rf_active(void) {
+    return g_rf_target_id;
+}
+
+int64_t sn_rf_consume_val0(void) {
+    int64_t v = g_rf_val0;
+    g_rf_target_id = 0;
+    g_rf_val0 = 0;
+    return v;
+}
+
+int64_t sn_rf_consume_val1(void) {
+    int64_t v = g_rf_val1;
+    g_rf_val1 = 0;
+    return v;
+}
+

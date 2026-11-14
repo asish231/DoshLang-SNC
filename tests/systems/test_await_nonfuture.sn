@@ -1,0 +1,8 @@
+// Systems Test: Reject Await on Non-Future Expression
+//
+// Verifies compile-time rejection of await on a non-future type (e.g. await 42).
+
+fn main() {
+    let x = await 42
+    print(x)
+}

@@ -1,0 +1,58 @@
+// Structured Concurrency: Nursery Execution Guarantee
+//
+// Verifies that a `nursery { spawn ... }` block guarantees all child tasks
+// run to completion before control leaves the nursery block.
+
+blueprint Counter {
+    int value = 0
+}
+
+fn main() {
+    print("=== Concurrency Test: Structured Concurrency Nursery ===")
+    new Counter c()
+    lock mu
+
+    // Spawning 5 tasks with varied sleep durations inside the nursery.
+    // Nursery must block and wait until all 5 tasks have finished.
+    nursery {
+        spawn {
+            time_sleep_ms(30)
+            lock(mu) {
+                c.value += 1
+            }
+        }
+        spawn {
+            time_sleep_ms(20)
+            lock(mu) {
+                c.value += 1
+            }
+        }
+        spawn {
+            time_sleep_ms(10)
+            lock(mu) {
+                c.value += 1
+            }
+        }
+        spawn {
+            time_sleep_ms(40)
+            lock(mu) {
+                c.value += 1
+            }
+        }
+        spawn {
+            time_sleep_ms(15)
+            lock(mu) {
+                c.value += 1
+            }
+        }
+    }
+
+    print("Tasks completed:")
+    print(c.value)
+
+    if (c.value == 5) {
+        print("PASS: nursery guaranteed completion of all child tasks before exit")
+    } else {
+        print("FAIL: nursery exited prematurely before child tasks completed")
+    }
+}

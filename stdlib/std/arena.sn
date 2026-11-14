@@ -1,0 +1,56 @@
+// Elastic Lane arena allocator.
+//
+//   use std.arena
+//   let a = Arena.new(0)
+//   ptr mark = a.save()
+//   ptr buf = a.alloc(1024)
+//   int bytes_used = a.used()
+//   a.freeze()
+//   a.unfreeze()
+//   a.restore(mark)
+
+blueprint Arena {
+    int lane_id
+
+    fn create(int lane_id = 0) {
+        self.lane_id = lane_id
+    }
+
+    static fn new(int lane_id = 0) -> Arena {
+        new Arena a()
+        a.lane_id = lane_id
+        return a
+    }
+
+    fn save() -> ptr {
+        return lane_save(self.lane_id)
+    }
+
+    fn restore(ptr wm) {
+        lane_restore(self.lane_id, wm)
+    }
+
+    fn alloc(int bytes) -> ptr {
+        return lane_alloc(self.lane_id, bytes)
+    }
+
+    fn used() -> int {
+        return lane_used(self.lane_id)
+    }
+
+    fn freeze() {
+        lane_freeze(self.lane_id)
+    }
+
+    fn unfreeze() {
+        lane_unfreeze(self.lane_id)
+    }
+}
+
+fn arena(int lane_id = 0) -> Arena {
+    return Arena.new(lane_id)
+}
+
+fn new_arena() -> Arena {
+    return Arena.new(0)
+}

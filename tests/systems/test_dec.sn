@@ -1,0 +1,30 @@
+// Systems Test: Fixed-Point Arithmetic (dec(2) and dec(4))
+//
+// Verifies fixed-point multiplication and division rescaling:
+// e.g. 1.50 * 2.00 = 3.00, 1.50 / 2.00 = 0.75
+
+fn main() {
+    print("=== Systems Test: Fixed-Point dec(2) and dec(4) ===")
+
+    dec(2) a = 1.50
+    dec(2) b = 2.00
+    dec(2) m2 = a * b
+    dec(2) d2 = a / b
+
+    print("dec(2) 1.50 * 2.00 = " + cast(m2, str))
+    print("dec(2) 1.50 / 2.00 = " + cast(d2, str))
+
+    dec(4) x = 1.5000
+    dec(4) y = 2.0000
+    dec(4) m4 = x * y
+    dec(4) d4 = x / y
+
+    print("dec(4) 1.5000 * 2.0000 = " + cast(m4, str))
+    print("dec(4) 1.5000 / 2.0000 = " + cast(d4, str))
+
+    if (cast(m2, str) == "3.00" and cast(d2, str) == "0.75" and cast(m4, str) == "3.0000" and cast(d4, str) == "0.7500") {
+        print("PASS: test_dec")
+    } else {
+        print("FAIL: test_dec")
+    }
+}

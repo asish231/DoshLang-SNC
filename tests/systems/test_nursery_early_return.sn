@@ -1,0 +1,33 @@
+blueprint Counter {
+    int value = 0
+}
+
+fn do_early_return(Counter c) -> int {
+    lock mu
+    nursery {
+        spawn {
+            time_sleep_ms(30)
+            lock(mu) {
+                c.value += 1
+            }
+        }
+        spawn {
+            time_sleep_ms(30)
+            lock(mu) {
+                c.value += 1
+            }
+        }
+        return 42
+    }
+    return 0
+}
+
+fn main() {
+    new Counter c()
+    int res = do_early_return(c)
+    if (res == 42 and c.value == 2) {
+        print("PASS: test_nursery_early_return")
+    } else {
+        print("FAIL: nursery tasks did not join on early return")
+    }
+}

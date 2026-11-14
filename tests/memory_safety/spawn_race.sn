@@ -1,0 +1,38 @@
+// SNlang Memory Safety Test 4: Concurrency Data Races in Thread Spawn
+//
+// Demonstrates passing unsynchronized mutable data across threads via spawn.
+// In baseline SNlang, passing mutable references (ref<int>) or blueprints across
+// threads without locking or synchronization compiles without error, exposing the program
+// to data races, corrupt state, and race conditions.
+
+blueprint Counter {
+    int value = 0
+}
+
+fn mutate_blueprint(Counter c) {
+    c.value = 42
+}
+
+fn mutate_ref(ref<int> p) {
+    set(p, 99)
+}
+
+fn main() {
+    print("=== SNlang Spawn Data Race Baseline Test ===")
+    new Counter c()
+
+    // 1. Spawning thread with unsynchronized mutable blueprint:
+    spawn mutate_blueprint(c)
+
+    int val = 10
+    ref<int> p = address(val)
+
+    // 2. Spawning thread with unsynchronized mutable stack pointer:
+    spawn mutate_ref(p)
+
+    time_sleep_ms(50)
+    print("Concurrent blueprint value:")
+    print(c.value)
+    print("Concurrent ref value:")
+    print(value(p))
+}

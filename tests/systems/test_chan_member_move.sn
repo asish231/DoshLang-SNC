@@ -1,0 +1,11 @@
+blueprint Packet {
+    str payload = "secret"
+}
+
+fn main() {
+    chan<str> ch
+    new Packet p()
+    ch.send(p.payload)
+    // Accessing p.payload after sending must be rejected at compile time
+    print(p.payload)
+}

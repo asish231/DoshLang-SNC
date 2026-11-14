@@ -1,0 +1,52 @@
+// Systems Test: Region Block & Elastic Lane Allocator Rollback
+//
+// Verifies region { } block automatic rollback of lane watermark,
+// and elastic lane allocation tracking via std.arena and lane builtins.
+
+use std.arena
+
+fn main() {
+    print("=== Systems Test: Region Block & Elastic Lane Rollback ===")
+
+    int baseline_used = lane_used(0)
+    print("baseline lane_used: " + cast(baseline_used, str))
+
+    int used_inside = 0
+
+    region {
+        ptr p1 = lane_alloc(0, 1024)
+        ptr p2 = lane_alloc(0, 2048)
+        used_inside = lane_used(0)
+        print("lane_used inside region: " + cast(used_inside, str))
+    }
+
+    int after_region_used = lane_used(0)
+    print("lane_used after region exit: " + cast(after_region_used, str))
+
+    // Also verify Arena blueprint interface from std.arena
+    let ar = Arena.new(0)
+    ptr mark = ar.save()
+    ptr p3 = ar.alloc(4096)
+    int arena_used = ar.used()
+    print("arena used after alloc: " + cast(arena_used, str))
+    ar.restore(mark)
+    int arena_restored = ar.used()
+    print("arena used after manual restore: " + cast(arena_restored, str))
+
+    bool ok = true
+    if (used_inside < baseline_used + 3072) {
+        ok = false
+    }
+    if (after_region_used != baseline_used) {
+        ok = false
+    }
+    if (arena_restored != baseline_used) {
+        ok = false
+    }
+
+    if (ok) {
+        print("PASS: test_region")
+    } else {
+        print("FAIL: test_region")
+    }
+}

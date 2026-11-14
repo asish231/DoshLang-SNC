@@ -1,0 +1,65 @@
+// Systems Test: Generational Slot Pool (std.pool)
+//
+// Verifies generational handles, insert, get, set, remove, len,
+// and stale handle detection across slot reuse.
+
+use std.pool
+
+fn main() {
+    print("=== Systems Test: Generational Slot Pool ===")
+
+    let p = Pool.new(8)
+    print("initial len: " + cast(p.len(), str))
+
+    int h1 = p.insert(111)
+    int h2 = p.insert(222)
+    int h3 = p.insert(333)
+
+    print("len after 3 inserts: " + cast(p.len(), str))
+    print("h1 is_valid: " + cast(p.is_valid(h1), str))
+    print("h2 is_valid: " + cast(p.is_valid(h2), str))
+    print("h3 is_valid: " + cast(p.is_valid(h3), str))
+
+    int v1 = p.get(h1)
+    int v2 = p.get(h2)
+    int v3 = p.get(h3)
+    print("v1: " + cast(v1, str))
+    print("v2: " + cast(v2, str))
+    print("v3: " + cast(v3, str))
+
+    p.set(h2, 2220)
+    int v2_updated = p.get(h2)
+    print("v2 after set: " + cast(v2_updated, str))
+
+    // Remove handle 2
+    p.remove(h2)
+    print("len after remove h2: " + cast(p.len(), str))
+    print("h2 is_valid (should be false): " + cast(p.is_valid(h2), str))
+
+    // Insert 4th element - this reuses h2's slot with an incremented generation
+    int h4 = p.insert(444)
+    print("len after insert h4: " + cast(p.len(), str))
+    print("h4 is_valid: " + cast(p.is_valid(h4), str))
+    print("h2 stale handle is_valid (must still be false): " + cast(p.is_valid(h2), str))
+    print("v4: " + cast(p.get(h4), str))
+
+    bool ok = true
+    if (v1 != 111 or v2 != 222 or v3 != 333 or v2_updated != 2220 or p.get(h4) != 444) {
+        ok = false
+    }
+    if (p.is_valid(h1) != true or p.is_valid(h3) != true or p.is_valid(h4) != true) {
+        ok = false
+    }
+    if (p.is_valid(h2) != false or h4 == h2) {
+        ok = false
+    }
+    if (p.len() != 3) {
+        ok = false
+    }
+
+    if (ok) {
+        print("PASS: test_pool")
+    } else {
+        print("FAIL: test_pool")
+    }
+}
