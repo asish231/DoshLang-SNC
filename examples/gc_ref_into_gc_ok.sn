@@ -1,0 +1,23 @@
+// SWARM RABBIT HOLE — Wave 8 (Impl-L): GC scoping — the GC→GC
+// discharge. A ref to a GC-managed binding ('p', the `new` constructor
+// path) stored into a GC-managed destination ('cells', a list literal —
+// sn_list_new → gc_track): the normal case. Both sides live in the GC
+// heap's memory category (W2A §1.4) — the collector owns the whole
+// reference chain, so E-GC-IN-LANE must NOT fire, and the program runs:
+// the pushed ref makes the list's length 1.
+//
+// The lane stays untouched (lane 2 never opened), which the second
+// print proves.
+
+blueprint Point {
+    int x
+    int y
+}
+
+fn main() {
+    new Point p(x: 1, y: 2)
+    list<ptr> cells = []
+    cells.push(address(p))
+    print(cells.length())
+    print(lane_used(2) > 0)
+}

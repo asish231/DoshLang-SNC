@@ -1,0 +1,26 @@
+// SWARM RABBIT HOLE — Wave 8 (Impl-L): GC scoping — the E-GC-IN-LANE
+// fail case, lane→GC direction (the inverse confusion). D0 gap #6 /
+// W2A §1.4: a lane-backed binding's bytes die at the lane rewind — the
+// lane is reset without consulting anything else — while the GC-managed
+// holder (sn_obj_new → gc_track) persists. A lane reference stored into
+// the surviving GC object dangles the moment the lane rewinds: same
+// category-confusion hazard, opposite direction.
+//
+// 'lane_cell' is lane-backed (explicit `lane_alloc`, lane_of); 'h' is
+// GC-managed (the `new` constructor path). Storing a ref to 'lane_cell'
+// into 'h's field must fire E-GC-IN-LANE at the T-STORE site (dst root
+// 'h'). The store is also a stack escape (the existing dangling-stack
+// rule fires alongside) — both diagnostics are honest: the store is
+// BOTH a scope escape AND a collector-category confusion.
+//
+// Compile-FAIL golden case (tests/golden.rs): [E-GC-IN-LANE].
+
+blueprint Holder {
+    ptr cell
+}
+
+fn main() {
+    ptr lane_cell = lane_alloc(2, 64)
+    new Holder h()
+    h.cell = address(lane_cell)
+}

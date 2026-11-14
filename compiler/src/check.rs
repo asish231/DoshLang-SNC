@@ -226,6 +226,17 @@ struct Checker<'a> {
     /// pre-coloring (CheckDb.lane_assignment), recorded after the
     /// fixpoint.
     lane_of: HashMap<String, LaneAssignment>,
+    /// SWARM RABBIT HOLE — Wave 8 (Impl-L): the GC-heap half of the W2A
+    /// §1.4 memory-category classification (D0 gap #6: lane bytes / pool
+    /// slots / GC heap). A binding here is GC-managed: its declaration
+    /// routed through the malloc'd GC-heap path — `new` → sn_obj_new,
+    /// list/map literals → sn_list_new/sn_map_new, all gc_track'd
+    /// (runtime.c). `lane_of` is the lane-backed half (explicit
+    /// `lane_alloc`: untracked bytes, never gc_track'd). The collectors
+    /// ignore each other's space — GC roots are globals+stacks+compiler-
+    /// pushed values only, and lane rewinds never consult the GC heap —
+    /// so a cross-category reference is a checked error (E-GC-IN-LANE).
+    gc_managed: HashSet<String>,
     /// The checked function's summary key; None outside a function body
     /// (module-level statements, extension-method walks) so nothing is
     /// misattributed to a stale caller.
@@ -357,6 +368,7 @@ pub fn check_programs(programs: &[Program], diag: &mut Diagnostics) -> CheckDb {
             region_parent: HashMap::new(),
             region_instance: HashMap::new(),
             lane_of: HashMap::new(),
+            gc_managed: HashSet::new(),
             current_fn_key: None,
             current_inout_params: Vec::new(),
         };
@@ -454,6 +466,7 @@ pub fn check_programs(programs: &[Program], diag: &mut Diagnostics) -> CheckDb {
             region_parent: HashMap::new(),
             region_instance: HashMap::new(),
             lane_of: HashMap::new(),
+            gc_managed: HashSet::new(),
             current_fn_key: None,
             current_inout_params: Vec::new(),
         };
@@ -2013,6 +2026,7 @@ impl Checker<'_> {
         self.region_parent.clear();
         self.region_instance.clear();
         self.lane_of.clear();
+        self.gc_managed.clear();
         // DIFF-1: summaries are keyed module-wide; the fixpoint runs
         // after all functions are checked. Save/restore so a nested or
         // monomorphized check never leaks its key into the caller.
@@ -2116,6 +2130,17 @@ impl Checker<'_> {
                     }
                     let decl_ty_clone = decl_ty.clone();
                     self.declare(name, decl_ty, *is_const, *span);
+                    // SWARM RABBIT HOLE — Wave 8 (Impl-L): D0 gap #6 /
+                    // W2A §1.4 — list/map literals are the GC-managed
+                    // holders (sn_list_new/sn_map_new → gc_track): the
+                    // literal half of the GC-heap classification, next
+                    // to the lane_alloc stamping below.
+                    if matches!(
+                        value.as_ref().map(|v| &v.kind),
+                        Some(ExprKind::List(_)) | Some(ExprKind::Map(_))
+                    ) {
+                        self.gc_managed.insert(name.clone());
+                    }
                     // SWARM RABBIT HOLE — Wave 6 (Impl-E, DIFF-1
                     // insertion point 6): allocation-site lane recording.
                     // Wave 8 (Impl-I): the class follows the STRATA lane
@@ -2334,6 +2359,10 @@ impl Checker<'_> {
                     // element (`xs[i] = r`), or a record field
                     // (`rec.f = r`) must have its target region ⊑ₗ the
                     // destination's region (§4.1 P-I's RI invariant).
+                    // Wave 8 (Impl-L): the GC-scoping companion check
+                    // runs alongside — the memory-CATEGORY rule
+                    // (E-GC-IN-LANE), which the single-region ⊑ₗ poset
+                    // cannot express (D0 gap #6).
                     if let Some(dst_root) = match &target.kind {
                         ExprKind::Ident(n) => Some(n.clone()),
                         ExprKind::Member { base, .. } | ExprKind::Index { base, .. } => {
@@ -2342,6 +2371,7 @@ impl Checker<'_> {
                         _ => None,
                     } {
                         self.escape_check_store(value, &dst_root, *span);
+                        self.gc_scoping_check_store(value, &dst_root, *span);
                     }
                     if let Some(root) = Self::root_var_of_expr(target) {
                         let borrower = self.borrowed.get(&root).map(|(b, _)| b.clone()).or_else(|| {
@@ -2801,6 +2831,11 @@ impl Checker<'_> {
                 }
                 self.check_ctor_args(&bp, args, *span);
                 self.declare(name, Type::Blueprint(resolved.clone()), false, *span);
+                // SWARM RABBIT HOLE — Wave 8 (Impl-L): D0 gap #6 / W2A
+                // §1.4 — `new` is the GC-heap constructor path
+                // (sn_obj_new → gc_track, runtime.c): the binding is
+                // GC-managed, the category the lane store rule guards.
+                self.gc_managed.insert(name.clone());
             }
             Stmt::Defer { body, .. }
             | Stmt::ErrDefer { body, .. }
@@ -3616,9 +3651,13 @@ impl Checker<'_> {
                             // elem type — escape_check_store's type
                             // gate skips it; pool insert is
                             // handle/slot_gen tier, not ⊑ₗ.)
+                            // Wave 8 (Impl-L): the GC-scoping companion
+                            // (E-GC-IN-LANE, D0 gap #6) runs alongside —
+                            // same container sites, category rule.
                             for a in args {
                                 if let Arg::Pos(e) = a {
                                     self.escape_check_store(e, &root, e.span);
+                                    self.gc_scoping_check_store(e, &root, e.span);
                                 }
                             }
                         }
@@ -4025,6 +4064,10 @@ impl Checker<'_> {
             // scope's bindings, exactly like the borrow epochs.
             self.region_instance.remove(n);
             self.lane_of.remove(n);
+            // Wave 8 (Impl-L): the GC-heap classification is as
+            // scope-local as the lane stamp — a binding leaving scope
+            // takes its memory category with it.
+            self.gc_managed.remove(n);
             // A moved binding becomes valid again in the enclosing scope only if
             // it was declared here; otherwise the move still stands.
             self.moved.remove(n);
@@ -4121,6 +4164,73 @@ impl Checker<'_> {
                 ),
             );
         }
+    }
+
+    /// SWARM RABBIT HOLE — Wave 8 (Impl-L): the W2A §1.4 memory-category
+    /// classification predicates (D0 gap #6). A binding is lane-backed
+    /// iff it was created by an explicit `lane_alloc` (the `lane_of`
+    /// stamp, Impl-E/Impl-I); GC-managed iff its declaration routed
+    /// through the GC-heap constructor path (`new` → sn_obj_new,
+    /// list/map literals → sn_list_new/sn_map_new — all gc_track'd).
+    /// Everything else (plain locals, params, globals) belongs to no
+    /// collector-tracked category and stays under the lexical E-ESCAPE
+    /// rule's sole jurisdiction.
+    fn is_lane_backed(&self, name: &str) -> bool {
+        self.lane_of.contains_key(name)
+    }
+
+    fn is_gc_managed(&self, name: &str) -> bool {
+        self.gc_managed.contains(name)
+    }
+
+    /// SWARM RABBIT HOLE — Wave 8 (Impl-L): GC scoping — D0 gap #6's
+    /// checked-error discharge ("a GC-managed pointer stored into lane
+    /// memory is invisible and can be swept while live") over W2A
+    /// §1.4's memory categories. The single-region ⊑ₗ poset cannot see
+    /// this hazard: a lane_alloc'd binding and a `new`'d object sit in
+    /// the SAME lexical region (region 0 here), yet they live in memory
+    /// spaces with different lifetimes and collectors — lane bytes are
+    /// untracked mmap the GC never scans (its roots are globals+stacks+
+    /// compiler-pushed values only), and the GC heap survives lane
+    /// rewinds. So the category confusion is a checked error in BOTH
+    /// directions (E-GC-IN-LANE):
+    ///   1. GC-managed ref → lane-backed dst: the GC cannot trace into
+    ///      lanes, so the object can be swept while the lane cell still
+    ///      references it.
+    ///   2. lane-backed ref → GC-managed dst: the lane rewinds at its
+    ///      extent, but the GC holder persists with a dangling lane
+    ///      reference.
+    /// Neither collector knows about the other — the checker is the
+    /// only layer that can enforce the boundary, at the same T-STORE /
+    /// T-PUSH sites the E-ESCAPE rule guards.
+    fn gc_scoping_check_store(&mut self, value: &Expr, dst: &str, span: Span) {
+        let Some(target) = self.value_ref_target(value) else {
+            return;
+        };
+        // Borrow indirection: the borrow binding carries its root's
+        // category (register_borrow pairs borrower and owner, the same
+        // pairing the region stamping uses) — classify the ROOT.
+        let root = self
+            .borrow_owner
+            .get(&target)
+            .cloned()
+            .unwrap_or(target);
+        let (src_cat, dst_cat) = if self.is_gc_managed(&root) && self.is_lane_backed(dst) {
+            ("GC-managed", "lane-backed")
+        } else if self.is_lane_backed(&root) && self.is_gc_managed(dst) {
+            ("lane-backed", "GC-managed")
+        } else {
+            return;
+        };
+        self.diag.error(
+            span,
+            format!(
+                "reference to '{root}' ({src_cat}) stored into '{dst}' ({dst_cat}) — \
+                 GC-managed and lane-backed memory cannot reference each other: \
+                 the GC cannot trace into lanes and lane rewinds don't \
+                 respect the GC heap [E-GC-IN-LANE]"
+            ),
+        );
     }
 
     /// The provenance root of a ref-valued expression (W2A §1.2): the

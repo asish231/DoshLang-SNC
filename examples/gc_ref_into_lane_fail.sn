@@ -1,0 +1,29 @@
+// SWARM RABBIT HOLE — Wave 8 (Impl-L): GC scoping — the E-GC-IN-LANE
+// fail case, GC→lane direction. D0 gap #6: GC roots are globals+stacks+
+// compiler-pushed values only (runtime.c) — a GC-managed pointer stored
+// into lane memory is invisible to the collector and can be swept while
+// live. W2A §1.4's memory categories: lane bytes (sn_lane_alloc —
+// untracked mmap, never gc_track'd) and the GC heap (sn_obj_new →
+// gc_track) have different lifetimes and neither collector knows about
+// the other, so the category confusion is a checked error, not a
+// runtime hazard.
+//
+// 'p' is GC-managed (the `new` constructor path); 'lane_box' is
+// lane-backed (the explicit `lane_alloc` pin, lane_of). Storing a ref
+// to 'p' into 'lane_box' must fire E-GC-IN-LANE at the T-STORE site.
+// The single-region ⊑ₗ poset cannot see this: both bindings sit in the
+// same lexical region (region 0), so E-ESCAPE stays silent — only the
+// category rule rejects it.
+//
+// Compile-FAIL golden case (tests/golden.rs): [E-GC-IN-LANE].
+
+blueprint Point {
+    int x
+    int y
+}
+
+fn main() {
+    new Point p(x: 1, y: 2)
+    ptr lane_box = lane_alloc(2, 64)
+    lane_box = address(p)
+}

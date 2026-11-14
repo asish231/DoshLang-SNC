@@ -1,0 +1,16 @@
+// SWARM RABBIT HOLE — Wave 8 (Impl-L): GC scoping — the lane→lane
+// discharge. A ref to a lane-backed binding ('lane_a', the explicit
+// `lane_alloc` pin) stored into a lane-backed destination ('lane_b'):
+// both sides live in the lane-bytes memory category (W2A §1.4) — the
+// lane owns its own references and rewinds them together at its extent,
+// so E-GC-IN-LANE must NOT fire, and the program runs.
+//
+// The second print proves the stores really landed on lane 2 (its
+// watermark is non-zero) — the lane knows about its own.
+
+fn main() {
+    ptr lane_a = lane_alloc(2, 64)
+    ptr lane_b = lane_alloc(2, 64)
+    lane_b = address(lane_a)
+    print(lane_used(2) > 0)
+}

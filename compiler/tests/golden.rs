@@ -422,6 +422,73 @@ fn scc_accum_pinned_lane_ok() {
     assert!(err.is_empty(), "expected a clean compile, got: {err}");
 }
 
+/// SWARM RABBIT HOLE — Wave 8 (Impl-L): GC scoping — D0 gap #6 + W2A
+/// §1.4's memory categories — the E-GC-IN-LANE rule. GC roots are
+/// globals+stacks+compiler-pushed values only: a GC-managed pointer
+/// stored into lane memory (untracked, never gc_track'd) is invisible
+/// to the collector and can be swept while live. A ref to a GC-managed
+/// binding ('p', the `new` → sn_obj_new → gc_track path) stored into a
+/// lane-backed destination ('lane_box', the explicit `lane_alloc` pin)
+/// must fire E-GC-IN-LANE at the T-STORE site. The single-region ⊑ₗ
+/// poset cannot see the hazard — both bindings share region 0 — so only
+/// the category rule rejects it.
+#[test]
+fn gc_ref_into_lane_fail() {
+    let err = compile_err("examples/gc_ref_into_lane_fail.sn");
+    assert!(
+        err.contains("[E-GC-IN-LANE]"),
+        "expected the E-GC-IN-LANE diagnostic, got: {err}"
+    );
+    assert!(
+        err.contains("reference to 'p' (GC-managed) stored into 'lane_box' (lane-backed)"),
+        "expected the category-confusion explanation naming both sides, got: {err}"
+    );
+    assert!(
+        err.contains("the GC cannot trace into lanes"),
+        "expected the sweep-hazard explanation, got: {err}"
+    );
+}
+
+/// SWARM RABBIT HOLE — Wave 8 (Impl-L): the inverse direction — a
+/// lane-backed binding's ref stored into a GC-managed destination. The
+/// lane rewinds at its extent while the GC holder persists, so the
+/// stored lane reference dangles: same category confusion, opposite
+/// direction (D0 gap #6; W2A §1.4). Must fire at the T-STORE site with
+/// the destination's provenance root ('h').
+#[test]
+fn lane_ref_into_gc_fail() {
+    let err = compile_err("examples/lane_ref_into_gc_fail.sn");
+    assert!(
+        err.contains("[E-GC-IN-LANE]"),
+        "expected the E-GC-IN-LANE diagnostic, got: {err}"
+    );
+    assert!(
+        err.contains("reference to 'lane_cell' (lane-backed) stored into 'h' (GC-managed)"),
+        "expected the category-confusion explanation naming both sides, got: {err}"
+    );
+}
+
+/// SWARM RABBIT HOLE — Wave 8 (Impl-L) discharge: GC ref into a
+/// GC-managed destination — the normal case. Both sides are the GC
+/// heap's category ('p' via `new`, 'cells' via the list literal →
+/// sn_list_new → gc_track), the collector owns the whole chain, the
+/// rule must stay silent and the program runs (list holds the pushed
+/// ref; lane 2 untouched).
+#[test]
+fn gc_ref_into_gc_ok() {
+    assert_out("examples/gc_ref_into_gc_ok.sn", "1\nfalse\n");
+}
+
+/// SWARM RABBIT HOLE — Wave 8 (Impl-L) discharge: lane ref into a
+/// lane-backed destination. Both sides are the lane-bytes category —
+/// the lane owns its own references and rewinds them together, so the
+/// rule must stay silent and the program runs (the lane-2 watermark
+/// proves the allocations landed).
+#[test]
+fn lane_ref_into_lane_ok() {
+    assert_out("examples/lane_ref_into_lane_ok.sn", "true\n");
+}
+
 /// DIFF-1 Rule 1d (the budget lemma, W2A §1.7): the sixth distinct
 /// simultaneously-live accumulator in one recursion SCC exhausts the
 /// L2..L6 pinned pool — never silent reuse, the coloring leaves it
