@@ -1,0 +1,33 @@
+// SWARM RABBIT HOLE — Wave 8 (Impl-J): W2A §1.5 T-PUSH/T-STORE — the
+// escape rule's E-ESCAPE fail case.
+//
+// The reference's TARGET ('victim') is declared inside the inner
+// `region {}` — the shorter region: it exits first. The holders
+// ('keeper', the binding created in the outer region before the region
+// opens, and 'box', the outer-region list) live in region 0. Storing a
+// ref-to-'victim' into either holder violates the safety law
+// ∀ρᵢ ∈ refs(v): ρᵢ ⊑ₗ reg(dst) (W2A §1.1; §4.1 P-I, the RI invariant:
+// every live cell holding a ref to `a` has reg(a) ⊑ₗ reg(cell)) — the
+// target's region is nested INSIDE the holder's region, so when the
+// region exits the target dies before the holder: a dangling reference.
+//
+// The ref INTO a shorter region escapes; both store sites must reject
+// it — the T-STORE binding assignment AND the T-PUSH list push.
+// Compile-FAIL golden case (tests/golden.rs): [E-ESCAPE].
+//
+// The dual direction — a ref to OUTER data stored into an inner-region
+// holder — is legal (the target outlives the holder) and is discharged
+// by escape_ref_outer_ok.sn.
+
+fn main() {
+    int anchor = 1
+    list<ref<int>> box = []
+    ref<int> keeper = address(anchor)
+    region {
+        int victim = 42
+        ref<int> inner = address(victim)
+        keeper = inner
+        box.push(address(victim))
+    }
+    print(value(keeper))
+}

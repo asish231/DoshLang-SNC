@@ -1,0 +1,24 @@
+// SWARM RABBIT HOLE — Wave 8 (Impl-J): W2A §1.5 T-PUSH/T-STORE —
+// same-region discharge.
+//
+// Refs created and stored entirely within ONE region: reg(target) ==
+// reg(holder) for every store, so ⊑ₗ holds by reflexivity (W2A §1.1).
+// Both store sites discharge without firing E-ESCAPE: the T-PUSH list
+// push (box.push(p): reg('w') == reg('box')) and the T-STORE binding
+// assignment (b = a: reg('y') == reg('b')). Compiles and runs green.
+
+fn main() {
+    region {
+        int y = 7
+        int z = 8
+        int w = 9
+        ref<int> a = address(y)
+        ref<int> b = address(z)
+        ref<int> p = address(w)
+        list<ref<int>> box = []
+        box.push(p)
+        b = a
+        print(value(b))
+        print(box.length())
+    }
+}

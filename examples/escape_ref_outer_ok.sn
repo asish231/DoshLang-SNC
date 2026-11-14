@@ -1,0 +1,28 @@
+// SWARM RABBIT HOLE — Wave 8 (Impl-J): W2A §1.5 T-PUSH/T-STORE —
+// outer-direction discharge.
+//
+// Refs CREATED inside the inner region ('pushed', 'inner_made') whose
+// TARGETS live in the outer region (region 0), stored into outer-region
+// holders ('box' the container, 'holder' the binding). reg(target) =
+// region 0 ⊑ₗ reg(holder) = region 0 — equal, and in general an outer
+// target outlives every inner region (W2A §1.1: ⊑ₗ = phase superset), so
+// these stores can never dangle their holders: legal, E-ESCAPE must NOT
+// fire. 'holder' stays valid after the region exits — the target
+// outlives the whole region tree. The pushed target 'y' is never read
+// after the push (the runtime's list retain is not this slice's tier).
+
+fn main() {
+    int x = 5
+    int y = 6
+    int z = 9
+    list<ref<int>> box = []
+    ref<int> holder = address(z)
+    region {
+        ref<int> pushed = address(y)
+        box.push(pushed)
+        ref<int> inner_made = address(x)
+        holder = inner_made
+    }
+    print(value(holder))
+    print(box.length())
+}

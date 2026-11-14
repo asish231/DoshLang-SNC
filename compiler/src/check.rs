@@ -1885,6 +1885,30 @@ impl Checker<'_> {
             }
         }
     }
+
+    /// SWARM RABBIT HOLE — Wave 8 (Impl-J): W2A §1.5 T-PUSH/T-STORE —
+    /// the ⊑ₗ test of the safety law. W2A §1.1 (Def 1.2 formulation):
+    /// ∀ stored ref component with target ρ_t: ρ_t ⊑ₗ reg(holder), the
+    /// RI invariant of §4.1 P-I (every live cell holding a ref to `a`
+    /// has reg(a) ⊑ₗ reg(cell)). `target ⊑ₗ holder` — the target's region
+    /// OUTLIVES the holder's region (⊑ₗ = phase superset, Rust's
+    /// `'long:'short`). On the RgnId stack (ids grow ⊑ₙ-downward with
+    /// nesting; Prop 0.2 duality: ⊑ₗ = (⊑ₙ)ᵒᵖ) this is exactly "target
+    /// is holder or an ancestor of holder" on the region_parent chain —
+    /// the target was entered before the holder, so the holder's
+    /// region exits first and the holder can never dangle.
+    fn rgn_outlives(&self, target: RgnId, holder: RgnId) -> bool {
+        let mut cur = holder;
+        loop {
+            if cur == target {
+                return true;
+            }
+            match self.region_parent.get(&cur) {
+                Some(&parent) => cur = parent,
+                None => return false,
+            }
+        }
+    }
     fn declare(&mut self, name: &str, ty: Type, is_const: bool, span: Span) {
         if let Some(frame) = self.local_scopes.last_mut() {
             frame.push(name.to_string());
@@ -2302,6 +2326,22 @@ impl Checker<'_> {
                                 Self::check_int_literal_range(v_ty, Some(v_el), v_el.span, self.diag);
                             }
                         }
+                    }
+                    // SWARM RABBIT HOLE — Wave 8 (Impl-J): W2A §1.5
+                    // T-STORE — the escape rule, after the type check
+                    // and before the borrow check. A ref-valued value
+                    // stored into a binding (`x = r`), a container
+                    // element (`xs[i] = r`), or a record field
+                    // (`rec.f = r`) must have its target region ⊑ₗ the
+                    // destination's region (§4.1 P-I's RI invariant).
+                    if let Some(dst_root) = match &target.kind {
+                        ExprKind::Ident(n) => Some(n.clone()),
+                        ExprKind::Member { base, .. } | ExprKind::Index { base, .. } => {
+                            Self::root_var_of_expr(base)
+                        }
+                        _ => None,
+                    } {
+                        self.escape_check_store(value, &dst_root, *span);
                     }
                     if let Some(root) = Self::root_var_of_expr(target) {
                         let borrower = self.borrowed.get(&root).map(|(b, _)| b.clone()).or_else(|| {
@@ -3565,6 +3605,22 @@ impl Checker<'_> {
                             ) {
                                 self.db.fn_growth_seeds.entry(key).or_default().insert(*idx);
                             }
+                            // SWARM RABBIT HOLE — Wave 8 (Impl-J): W2A
+                            // §1.5 T-PUSH — the escape rule at the
+                            // container store sites. push/insert store
+                            // the argument into a cell of `root`'s
+                            // container, so a ref-valued argument's
+                            // target region must ⊑ₗ root's region
+                            // (§4.1 P-I's RI invariant); a violation is
+                            // E-ESCAPE. (push_ref's argument is the
+                            // elem type — escape_check_store's type
+                            // gate skips it; pool insert is
+                            // handle/slot_gen tier, not ⊑ₗ.)
+                            for a in args {
+                                if let Arg::Pos(e) = a {
+                                    self.escape_check_store(e, &root, e.span);
+                                }
+                            }
                         }
                     }
                 }
@@ -4027,6 +4083,80 @@ impl Checker<'_> {
 
     fn is_borrow_type(t: &Type) -> bool {
         matches!(t, Type::Ref(_) | Type::Mut(_))
+    }
+
+    /// SWARM RABBIT HOLE — Wave 8 (Impl-J): W2A §1.5 T-PUSH/T-STORE —
+    /// the escape rule (the E-ESCAPE diagnostic). A value containing
+    /// references stored into a destination must have every
+    /// reference's target region ⊑ₗ the destination's region:
+    /// ∀ρᵢ ∈ refs(v): ρᵢ ⊑ₗ reg(dst) (§1.1 safety law; §4.1 P-I's RI
+    /// invariant). Violation = the target's region is nested INSIDE the
+    /// holder's region (dies first): when the target region exits, the
+    /// holder would keep a dangling reference — the class the region
+    /// poset was built to kill. `dst` is the destination's provenance
+    /// root: the assigned binding for T-STORE, the container root for
+    /// T-PUSH (`xs.push(v)` stores into a cell of `xs`), the record
+    /// root for a field store. Bindings with no region_instance are
+    /// exempt: function params live in region 0 (the caller's region —
+    /// the existing return-escape machinery owns the interprocedural
+    /// side), globals live in γ, which outlives everything (W2A §1.1).
+    fn escape_check_store(&mut self, value: &Expr, dst: &str, span: Span) {
+        let Some(target) = self.value_ref_target(value) else {
+            return;
+        };
+        let (Some(&target_rgn), Some(&holder_rgn)) = (
+            self.region_instance.get(&target),
+            self.region_instance.get(dst),
+        ) else {
+            return;
+        };
+        if !self.rgn_outlives(target_rgn, holder_rgn) {
+            self.diag.error(
+                span,
+                format!(
+                    "reference to '{target}' (declared in region {target_rgn}) escapes into \
+                     region {holder_rgn} which does not outlive it — the target dies before \
+                     the holder; move the declaration of '{target}' to an enclosing scope, \
+                     or copy the value instead of taking a reference [E-ESCAPE]"
+                ),
+            );
+        }
+    }
+
+    /// The provenance root of a ref-valued expression (W2A §1.2): the
+    /// binding whose region_instance is the reference's target region.
+    /// Borrow bindings carry the ROOT's region (register_borrow's and
+    /// the reborrow path's DIFF-2 stamping); address()/as_ptr() name the
+    /// root directly. Only ref/mut values are gated — the types whose
+    /// target region Impl-E's stamping records. handle<T>/pool refs are
+    /// Theorem-B (slot_gen) tier (T-POOLDEREF, W2A §1.5), not the
+    /// lexical ⊑ₗ law's jurisdiction; call results are the callee's
+    /// return-escape check's jurisdiction (no provenance here ⇒ exempt).
+    fn value_ref_target(&self, value: &Expr) -> Option<String> {
+        match &value.kind {
+            ExprKind::Ident(n) => {
+                let is_ref = self
+                    .lookup(n)
+                    .map(|(t, _)| Self::is_borrow_type(&t))
+                    .unwrap_or(false);
+                if is_ref {
+                    Some(n.clone())
+                } else {
+                    None
+                }
+            }
+            ExprKind::Call { callee, args, .. } => {
+                if let ExprKind::Ident(f) = &callee.kind {
+                    if f == "address" || f == "as_ptr" {
+                        if let Some(Arg::Pos(a)) = args.first() {
+                            return Self::root_var_of_expr(a);
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
     }
 
     fn check_arity(&mut self, sig: &FuncSig, args: &[Arg], span: Span) {
