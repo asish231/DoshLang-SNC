@@ -1530,11 +1530,50 @@ static int64_t zset_find_index(SnZSet *z, int64_t key, uint64_t h, uint64_t *out
 
 /* Swap-with-last removal: exactly one bucket holds the last entry's
    index; repoint it at the moved slot. Counts as freed never enter this
-   path (the caller prunes only zero coefficients). */
+   path (the caller prunes only zero coefficients).
+
+   SWARM RABBIT HOLE (Impl-H, Wave 7 — fix to the concurrently landed
+   SnZSet, required by the view engine): the original removal left the
+   freed entry's bucket pointing at the dead slot, whose stale key/hash
+   bytes still matched — zset_find_index could then "find" a zombie
+   entry (writes landed in a dead slot, len desynced from the entry
+   array, total corrupted, and a follow-up removal could index
+   hashes[-1]). The view engine's pending changelog hits this whenever
+   one batch touches the same output key repeatedly across a
+   zero-crossing. Repair: clear the freed entry's bucket, then run
+   linear-probing backward-shift (Algorithm R) over the bucket
+   pointers — pull back every entry whose probe chain ran through the
+   hole so no chain crosses a 0 slot. No tombstones, no stale
+   pointers; every dead array slot is unreferenced. */
 static void zset_remove_at(SnZSet *z, int64_t idx) {
+    uint64_t mask = (uint64_t)z->hcap - 1;
+    /* the freed entry's own bucket slot */
+    uint64_t s = z->hashes[idx] & mask;
+    while (z->buckets[s] != idx + 1) {
+        s = (s + 1) & mask;
+    }
+    z->buckets[s] = 0;
+    /* backward-shift repair (Algorithm R, on the bucket pointers): an
+       entry at j may fill the hole at i iff its probe chain home→j ran
+       through i, i.e. (j−home) mod m > (i−home) mod m; the scan j
+       always advances, the hole i advances only when filled. */
+    {
+        uint64_t i = s; /* the hole */
+        uint64_t j = s; /* the scan  */
+        for (;;) {
+            j = (j + 1) & mask;
+            if (z->buckets[j] == 0) break;
+            int64_t e = z->buckets[j] - 1;
+            uint64_t home = z->hashes[e] & mask;
+            if (((j - home) & mask) > ((i - home) & mask)) {
+                z->buckets[i] = e + 1; /* pulled back into the hole */
+                z->buckets[j] = 0;
+                i = j; /* the vacated slot is the new hole */
+            }
+        }
+    }
     int64_t last = z->len - 1;
     if (idx != last) {
-        uint64_t mask = (uint64_t)z->hcap - 1;
         uint64_t slot = z->hashes[last] & mask;
         while (z->buckets[slot] != last + 1) {
             slot = (slot + 1) & mask;
@@ -1681,6 +1720,271 @@ void *sn_zset_keys(void *p) {
         else sn_list_push_i64(l, z->keys[i]);
     }
     return l;
+}
+
+/* --------------------------------------------------------------------- */
+/*  SnView — the incremental view engine (Problem-5 second slice).        */
+/*  Impl-H, Cohort Delta, Wave 7. Built on Impl-G's SnZSet (Tier G).     */
+/*                                                                       */
+/*  A view is a dataflow node wrapping an input Z-set (the source), a    */
+/*  transformation kind, and a maintained output Z-set with the          */
+/*  invariant output = F(input). The first cut covers the honest         */
+/*  non-amplifying fragment 𝒞₀ (W2C §2.2): FILTER by a constant         */
+/*  predicate on the element key, MAP by a key function, AGGREGATE-SUM   */
+/*  per key, AGGREGATE-COUNT (the fixed-key presence aggregate). NOT in  */
+/*  this slice, by construction and without an O(|dA|) claim for any of  */
+/*  them: joins (⊗ fanout ρ), guarded μ — the Salt ζ fixpoint bracket,  */
+/*  W2C §3, is future work — predicates-as-views, and every Tier-L and  */
+/*  Tier-O operator (the verified barrier list, W2C §2.4).               */
+/*                                                                       */
+/*  Delta path — the probe-linear bound made runtime (W2C §2.1):       */
+/*  sn_view_apply_delta probes maintained state ONLY at the changed     */
+/*  keys, never scanning. Work is counted in hash-map operations        */
+/*  (g_sn_view_probes), not wall time: each zs_apply is exactly one     */
+/*  find-or-insert (rehash growth is amortized into it), so the linear  */
+/*  kinds cost exactly 3 ops per changed key — input fold, output       */
+/*  update, pending changelog — independent of |input|. A key a        */
+/*  FILTER drops costs 1 op (only the input fold). AGGREGATE-COUNT      */
+/*  costs 1 + 2·[presence flip] per changed key (the flip is            */
+/*  determined from the old count the single input probe returns).      */
+/*                                                                       */
+/*  Integrator ownership (DBSP's DB node, made explicit): apply_delta   */
+/*  folds dA into the view's OWN input Z-set (the ∫ of its input        */
+/*  stream). A downstream view therefore wraps its OWN COPY of the      */
+/*  upstream output (sn_zset_copy at wiring time): sharing one object   */
+/*  between an upstream output and a downstream input would             */
+/*  double-integrate every delta — the upstream apply and the          */
+/*  downstream fold would both write it.                                */
+/*  sn_view_commit is O(1) and probe-free: a pending swap.               */
+/*                                                                       */
+/*  Batch/changelog API: sn_view_commit returns 𝒟 of the output stream  */
+/*  since the last commit — the runtime form of the chain rule (W2C     */
+/*  Thm 2): view₁ → view₂ → view₃, each consuming the previous commit;  */
+/*  the downstream batch sizes are the general law's |Δv| terms         */
+/*  (W ≤ c_F·(|dA| + Σ_v |Δv|), W2C §2.1 — the 𝒞₀ specialization        */
+/*  collapses it to Σ 3·|Δ_in| for this fragment).                     */
+/*                                                                       */
+/*  Quiescence (W4C v2.1 repair 3): the tier-G test is 𝒟(∫α) = 0 —     */
+/*  an empty commit result; an empty batch performs zero probes. The    */
+/*  tier-L test F(s) ⊑ s is future work: no L carriers exist here.     */
+/* --------------------------------------------------------------------- */
+
+static int64_t g_sn_view_probes = 0;
+
+void sn_view_probe_reset(void) { g_sn_view_probes = 0; }
+int64_t sn_view_probe_count(void) { return g_sn_view_probes; }
+
+/* defined further down (the euclidean-mod helper lives with the math
+ * utilities; the fn-taking constructor below sn_view_new) */
+int64_t sn_euclid_mod_i64(int64_t a, int64_t b);
+void *sn_view_new_fn(int64_t kind, void *input, int64_t p1, int64_t p2,
+                     int64_t (*pred)(int64_t), int64_t (*mapfn)(int64_t));
+
+enum {
+    SN_VIEW_FILTER    = 1, /* p1: predicate family; p2: family argument   */
+    SN_VIEW_MAP       = 2, /* y = p1·k + p2 — a group homomorphism iff    */
+                          /* p2 == 0; the delta law holds for any total  */
+                          /* key function (ℤ[X]-linear either way)        */
+    SN_VIEW_AGG_SUM   = 3, /* group g(k) = k mod p1; sums the weights     */
+    SN_VIEW_AGG_COUNT = 4  /* group g(k) = k mod p1; counts present keys */
+};
+
+typedef struct SnView {
+    int64_t kind;
+    SnZSet *input;   /* source (retained ref; mutated only via deltas)  */
+    SnZSet *output;  /* maintained output (owned ref): output = F(input) */
+    SnZSet *pending; /* output delta since the last commit (owned ref)  */
+    int64_t p1;
+    int64_t p2;
+    int64_t (*pred)(int64_t k);   /* optional C predicate override (FILTER) */
+    int64_t (*mapfn)(int64_t k);  /* optional C key-function override (MAP) */
+} SnView;
+
+/* One counted hash-map operation: sn_zset_add's find-or-insert, but it
+ * returns the OLD count (absent = 0) — AGGREGATE-COUNT needs the
+ * presence flip, and every probe the engine makes is routed through
+ * here so the work bound is an exact operation count. */
+static int64_t zs_apply_counted(SnZSet *z, int64_t key, int64_t delta) {
+    g_sn_view_probes++;
+    int64_t old = 0;
+    if ((z->len + 1) * 4 >= z->hcap * 3) {
+        zset_rehash(z, z->hcap * 2);
+    }
+    uint64_t h = key_hash(z->key_kind, key);
+    uint64_t bucket = 0;
+    int64_t idx = zset_find_index(z, key, h, &bucket);
+    if (idx >= 0) {
+        old = z->counts[idx];
+        z->counts[idx] += delta;
+        z->total += delta;
+        if (z->counts[idx] == 0 && z->prune) {
+            if (z->key_kind == 1) sn_release((void *)(intptr_t)z->keys[idx]);
+            zset_remove_at(z, idx);
+        }
+        return old;
+    }
+    if (z->len == z->cap) {
+        z->cap *= 2;
+        z->keys = (int64_t *)realloc(z->keys, sizeof(int64_t) * (size_t)z->cap);
+        z->counts = (int64_t *)realloc(z->counts, sizeof(int64_t) * (size_t)z->cap);
+        z->hashes = (uint64_t *)realloc(z->hashes, sizeof(uint64_t) * (size_t)z->cap);
+    }
+    if (z->key_kind == 1) sn_retain((void *)(intptr_t)key);
+    z->keys[z->len] = key;
+    z->counts[z->len] = delta;
+    z->hashes[z->len] = h;
+    z->buckets[bucket] = z->len + 1;
+    z->len++;
+    z->total += delta;
+    return old;
+}
+
+/* ----------------------------- the view rules -------------------------- */
+
+static int view_pred(SnView *v, int64_t k) {
+    if (v->pred) return v->pred(k) != 0;
+    switch (v->p1) {
+    case 0: return (k % 2) == 0;                  /* keep even keys      */
+    case 1: return (k % 2) != 0;                  /* keep odd keys       */
+    case 2: return k >= v->p2;                    /* keep keys ≥ p2      */
+    case 3: return k < v->p2;                     /* keep keys < p2      */
+    case 4: return (v->p2 > 0) && (sn_euclid_mod_i64(k, v->p2) == 0);
+    default: return 0;
+    }
+}
+
+static int64_t view_keyfn(SnView *v, int64_t k) {
+    if (v->mapfn) return v->mapfn(k);
+    return v->p1 * k + v->p2; /* group homomorphism iff p2 == 0 */
+}
+
+static int64_t view_group(SnView *v, int64_t k) {
+    return sn_euclid_mod_i64(k, v->p1); /* ℤ → ℤ/m, the quotient homomorphism */
+}
+
+/* ------------------------------ SnView API ----------------------------- */
+
+/* Initial materialization (the ℐ step): ONE full scan of the input at
+ * construction — O(|input|), once, outside the per-delta claim. */
+void *sn_view_new(int64_t kind, void *input, int64_t p1, int64_t p2) {
+    return sn_view_new_fn(kind, input, p1, p2, NULL, NULL);
+}
+
+void *sn_view_new_fn(int64_t kind, void *input, int64_t p1, int64_t p2,
+                     int64_t (*pred)(int64_t), int64_t (*mapfn)(int64_t)) {
+    SnView *v = (SnView *)xmalloc(sizeof(SnView));
+    int64_t kk = input ? ((SnZSet *)input)->key_kind : 0;
+    v->kind = kind;
+    if (input) {
+        v->input = (SnZSet *)input;
+        sn_retain(v->input); /* the borrowed source ref */
+    } else {
+        v->input = (SnZSet *)sn_zset_new(kk); /* owned empty source */
+    }
+    v->output = (SnZSet *)sn_zset_new(kk);
+    v->pending = (SnZSet *)sn_zset_new(kk);
+    v->p1 = p1;
+    v->p2 = p2;
+    v->pred = pred;
+    v->mapfn = mapfn;
+
+    SnZSet *in = v->input;
+    for (int64_t i = 0; i < in->len; i++) {
+        int64_t k = in->keys[i];
+        int64_t w = in->counts[i];
+        switch (kind) {
+        case SN_VIEW_FILTER:
+            if (view_pred(v, k)) sn_zset_add(v->output, k, w);
+            break;
+        case SN_VIEW_MAP:
+            sn_zset_add(v->output, view_keyfn(v, k), w);
+            break;
+        case SN_VIEW_AGG_SUM:
+            sn_zset_add(v->output, view_group(v, k), w);
+            break;
+        case SN_VIEW_AGG_COUNT:
+            if (w != 0) sn_zset_add(v->output, view_group(v, k), 1);
+            break;
+        default:
+            break;
+        }
+    }
+    return v;
+}
+
+/* The delta-application path — the O(|dA|) claim's implementation.
+ * dA is a Z-set of changes; each entry (k, d) means count(k) += d.
+ * Probes: exactly 3 per entry for the linear kinds (input, output,
+ * pending), 1 + 2·[presence flip] for AGGREGATE-COUNT. */
+void sn_view_apply_delta(void *view, void *delta) {
+    SnView *v = (SnView *)view;
+    if (!v || !delta) return;
+    SnZSet *dA = (SnZSet *)delta;
+    for (int64_t i = 0; i < dA->len; i++) {
+        int64_t k = dA->keys[i];
+        int64_t d = dA->counts[i];
+        switch (v->kind) {
+        case SN_VIEW_FILTER:
+            zs_apply_counted(v->input, k, d); /* the ∫ fold into the source */
+            if (view_pred(v, k)) {
+                zs_apply_counted(v->output, k, d);
+                zs_apply_counted(v->pending, k, d);
+            }
+            break;
+        case SN_VIEW_MAP: {
+            zs_apply_counted(v->input, k, d);
+            int64_t y = view_keyfn(v, k);
+            zs_apply_counted(v->output, y, d);
+            zs_apply_counted(v->pending, y, d);
+            break;
+        }
+        case SN_VIEW_AGG_SUM: {
+            zs_apply_counted(v->input, k, d);
+            int64_t g = view_group(v, k);
+            zs_apply_counted(v->output, g, d);
+            zs_apply_counted(v->pending, g, d);
+            break;
+        }
+        case SN_VIEW_AGG_COUNT: {
+            int64_t old = zs_apply_counted(v->input, k, d);
+            int64_t now = old + d;
+            if ((old != 0) != (now != 0)) {
+                int64_t c = (now != 0) ? 1 : -1;
+                int64_t g = view_group(v, k);
+                zs_apply_counted(v->output, g, c);
+                zs_apply_counted(v->pending, g, c);
+            }
+            break;
+        }
+        default:
+            break;
+        }
+    }
+}
+
+/* The batch/changelog API: returns 𝒟(output stream) since the last
+ * commit — the runtime chain-rule form; downstream views consume this
+ * as their dA. O(1) and probe-free: a pending swap; the caller owns the
+ * returned Z-set (release with sn_release). */
+void *sn_view_commit(void *view) {
+    SnView *v = (SnView *)view;
+    if (!v) return sn_zset_new(0);
+    SnZSet *d = v->pending;
+    v->pending = (SnZSet *)sn_zset_new(v->input->key_kind);
+    return d;
+}
+
+void *sn_view_input(void *view) { return view ? (void *)((SnView *)view)->input : NULL; }
+void *sn_view_output(void *view) { return view ? (void *)((SnView *)view)->output : NULL; }
+int64_t sn_view_kind(void *view) { return view ? ((SnView *)view)->kind : 0; }
+
+void sn_view_release(void *view) {
+    SnView *v = (SnView *)view;
+    if (!v) return;
+    sn_release(v->input);
+    sn_release(v->output);
+    sn_release(v->pending);
+    free(v);
 }
 
 void *sn_input(void *prompt) {

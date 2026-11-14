@@ -296,9 +296,56 @@ fi
 
 echo ""
 
-# 12. Tier-G Z-set delta collections — the stdlib surface (P5 slice 1).
+# 12. The incremental view engine — DBSP-style delta propagation
+#     (Problem-5 second slice: the O(|dA|) maintained-view circuit;
+#     chain test with exact probe counts, scratch-recompute deltas,
+#     retraction, |A|-independence, quiescence).
 echo "-----------------------------------------------------------------"
-echo "12. TIER-G Z-SET DELTA COLLECTIONS, STDLIB (test_zset_delta.sn)"
+echo "12. INCREMENTAL VIEW ENGINE (test_view_engine.c)"
+echo "-----------------------------------------------------------------"
+OUT_VIEW="/tmp/snc_test_view_engine"
+rm -f "$OUT_VIEW"
+if clang -O1 -g -o "$OUT_VIEW" "$DIR/test_view_engine.c" "$ROOT/compiler/runtime.c" -lpthread 2>/dev/null; then
+    OUTPUT=$("$OUT_VIEW")
+    echo "$OUTPUT"
+    if echo "$OUTPUT" | grep -q "PASS:"; then
+        echo ">>> test_view_engine: PASSED"
+    else
+        echo ">>> test_view_engine: FAILED"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> test_view_engine: BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+echo ""
+
+# 12b. The ASan stress pass of the same view-engine test
+echo "-----------------------------------------------------------------"
+echo "12b. INCREMENTAL VIEW ENGINE, ASAN STRESS (test_view_engine.c)"
+echo "-----------------------------------------------------------------"
+OUT_VIEW_ASAN="/tmp/snc_test_view_engine_asan"
+rm -f "$OUT_VIEW_ASAN"
+if clang -O1 -g -fsanitize=address -o "$OUT_VIEW_ASAN" "$DIR/test_view_engine.c" "$ROOT/compiler/runtime.c" -lpthread 2>/dev/null; then
+    OUTPUT=$(ASAN_OPTIONS=detect_leaks=0 "$OUT_VIEW_ASAN" 2>&1)
+    echo "$OUTPUT"
+    if echo "$OUTPUT" | grep -q "PASS:"; then
+        echo ">>> test_view_engine(ASan): PASSED (no ASan reports under delta propagation)"
+    else
+        echo ">>> test_view_engine(ASan): FAILED"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> test_view_engine(ASan): BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+echo ""
+
+# 13. Tier-G Z-set delta collections — the stdlib surface (P5 slice 1).
+echo "-----------------------------------------------------------------"
+echo "13. TIER-G Z-SET DELTA COLLECTIONS, STDLIB (test_zset_delta.sn)"
 echo "-----------------------------------------------------------------"
 OUT_ZSET_SN="/tmp/snc_test_zset_delta_sn"
 rm -f "$OUT_ZSET_SN"
@@ -318,12 +365,12 @@ fi
 
 echo ""
 
-# 13. Tier-G Z-set engine — the runtime mechanics (P5 slice 1; W2C §1.1).
+# 14. Tier-G Z-set engine — the runtime mechanics (P5 slice 1; W2C §1.1).
 #     Built twice: plain, then ASan (the UAF/no-heap-error stress pass
 #     over the swap-with-last removal and the prune/retain paths). LSan is
 #     not supported on arm64 darwin; leak-freedom is checked with `leaks`.
 echo "-----------------------------------------------------------------"
-echo "13. TIER-G Z-SET DELTA, RUNTIME MECHANICS (test_zset_delta.c)"
+echo "14. TIER-G Z-SET DELTA, RUNTIME MECHANICS (test_zset_delta.c)"
 echo "-----------------------------------------------------------------"
 OUT_ZSET_C="/tmp/snc_test_zset_delta_c"
 rm -f "$OUT_ZSET_C"
@@ -343,9 +390,9 @@ fi
 
 echo ""
 
-# 13b. The ASan stress pass of the same runtime z-set test
+# 14b. The ASan stress pass of the same runtime z-set test
 echo "-----------------------------------------------------------------"
-echo "13b. TIER-G Z-SET DELTA, ASAN STRESS (test_zset_delta.c)"
+echo "14b. TIER-G Z-SET DELTA, ASAN STRESS (test_zset_delta.c)"
 echo "-----------------------------------------------------------------"
 OUT_ZSET_ASAN="/tmp/snc_test_zset_delta_c_asan"
 rm -f "$OUT_ZSET_ASAN"
@@ -365,10 +412,10 @@ fi
 
 echo ""
 
-# 13c. Leak check of the runtime z-set test via macOS `leaks`. The test
+# 14c. Leak check of the runtime z-set test via macOS `leaks`. The test
 #      pauses on SN_ZSET_LEAK_PAUSE so `leaks` can attach.
 echo "-----------------------------------------------------------------"
-echo "13c. TIER-G Z-SET DELTA, LEAK CHECK (macOS leaks(1))"
+echo "14c. TIER-G Z-SET DELTA, LEAK CHECK (macOS leaks(1))"
 echo "-----------------------------------------------------------------"
 if command -v leaks >/dev/null 2>&1; then
     ZSET_PID=""
@@ -391,7 +438,7 @@ fi
 echo ""
 echo "================================================================="
 if [ $FAILURES -eq 0 ]; then
-    echo "  ALL SYSTEMS & SECURITY TESTS PASSED (17 checks)"
+    echo "  ALL SYSTEMS & SECURITY TESTS PASSED (19 checks)"
     exit 0
 else
     echo "  $FAILURES SYSTEMS TESTS FAILED"
