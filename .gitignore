@@ -60,3 +60,7 @@ bench/results/cg_*.out
 bench/rust_bumpalo_bench/target/
 bench/rust_bumpalo_bench/Cargo.lock
 bench/results/sn_lane_bench_inline
+# Wave-8 pinned-lane bench: same policy — binaries out, raw .txt evidence in.
+bench/results/sn_pinned_lane_bench
+bench/results/c_pinned_lane_bench
+bench/results/sn_lane_bench_poison
