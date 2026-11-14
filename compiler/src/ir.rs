@@ -170,6 +170,10 @@ struct Cx<'a> {
     active_locks: Vec<String>,
     active_nurseries: Vec<String>,
     active_regions: Vec<String>,
+    /// Lexically open `frozen` blocks (SWARM RABBIT HOLE, D0 gap #2,
+    /// Impl-B): while non-zero, the inline lane bump/reset lowering keeps
+    /// the checked runtime calls, preserving the loud frozen-lane errors.
+    frozen_depth: usize,
 }
 
 /// Coverage instrumentation state for the current lowering pass.
@@ -222,6 +226,23 @@ pub fn cov_collect(on: bool) -> Vec<(u32, u32)> {
         }
         Vec::new()
     })
+}
+
+thread_local! {
+    /// Inline lane bump/reset gate (SWARM RABBIT HOLE, D0 gap #2,
+    /// Impl-B): the driver clears it for debug builds (-O0) so every lane
+    /// operation keeps the checked, poisoning runtime calls there; -O1+
+    /// lowers the inline load/gep/store fast path instead.
+    static LANE_INLINE: std::cell::Cell<bool> = std::cell::Cell::new(true);
+}
+
+/// Enable or disable the inline lane fast path for the next `lower` pass.
+pub fn lane_inline(on: bool) {
+    LANE_INLINE.with(|c| c.set(on));
+}
+
+fn lane_inline_on() -> bool {
+    LANE_INLINE.with(|c| c.get())
 }
 
 pub fn lower(programs: &[Program], db: &CheckDb, files: &[SourceFile]) -> IrModule {
@@ -505,6 +526,7 @@ fn lower_fn(
         active_locks: Vec::new(),
         active_nurseries: Vec::new(),
         active_regions: Vec::new(),
+        frozen_depth: 0,
     };
     let mut params_ll = Vec::new();
     if bp.is_some() && !f.is_static {
@@ -708,6 +730,20 @@ impl Cx<'_> {
     fn l(&mut self, p: &str) -> String {
         self.lbl += 1;
         format!("{p}{}", self.lbl)
+    }
+
+    /// Address of a field inside the thread-local lane array
+    /// (`@g_tls_lanes[lane].field`) for the inline bump/reset fast path
+    /// (SWARM RABBIT HOLE, D0 gap #2, Impl-B; W2F §1(b): TLS-reloaded, no
+    /// hidden-arg ABI). Field indices mirror runtime.c's SnLane via the
+    /// %sn_lane_t type in llvm.rs: 1 = top, 3 = limit, 4 = initialized,
+    /// 5 = frozen_depth (offsets pinned by _Static_asserts in runtime.c).
+    fn lane_field_addr(&mut self, lane: &str, field: u32) -> String {
+        let g = self.t();
+        self.line(&format!(
+            "{g} = getelementptr [8 x %sn_lane_t], ptr @g_tls_lanes, i64 0, i64 {lane}, i32 {field}"
+        ));
+        g
     }
 
     fn stmt(&mut self, s: &Stmt) {
@@ -1363,22 +1399,70 @@ impl Cx<'_> {
                 self.defers.push(body.clone());
             }
             Stmt::Region { body, .. } => {
-                let wm = self.t();
-                self.line(&format!("{wm} = call ptr @sn_lane_save(i64 0)"));
+                // SWARM RABBIT HOLE — D0 gap #2/#3 (Impl-B, Wave 5): the
+                // region pair becomes two memory ops on the fast path
+                // (W2F §2: load `top` at entry, one store at exit) instead
+                // of two checked runtime calls. Lane 0 is the only lane the
+                // region lowering uses (D0: ir.rs region arm). The 1-store
+                // restore skips @sn_lane_restore's frozen/bounds checks —
+                // licensed by Theorem A / W2A §4.3(iii): the watermark is
+                // this region's own entry save and no frozen block is
+                // lexically open at the exit. Debug builds (-O0) keep the
+                // runtime calls.
+                let wm = if lane_inline_on() {
+                    let top_addr = self.lane_field_addr("0", 1);
+                    // The old @sn_lane_save call lazily initialized the
+                    // lane; the inline load needs that too — one predicted
+                    // branch at region entry, with the initialization left
+                    // to the old call on the cold path.
+                    let init_addr = self.lane_field_addr("0", 4);
+                    let init = self.t();
+                    self.line(&format!("{init} = load i32, ptr {init_addr}"));
+                    let uninit = self.t();
+                    self.line(&format!("{uninit} = icmp eq i32 {init}, 0"));
+                    let l_init = self.l("laneinit");
+                    let l_go = self.l("lanego");
+                    self.line(&format!("br i1 {uninit}, label %{l_init}, label %{l_go}"));
+                    self.raw(&format!("{l_init}:"));
+                    let cold = self.t();
+                    self.line(&format!("{cold} = call ptr @sn_lane_save(i64 0)"));
+                    self.line(&format!("br label %{l_go}"));
+                    self.raw(&format!("{l_go}:"));
+                    let wm = self.t();
+                    self.line(&format!("{wm} = load ptr, ptr {top_addr}"));
+                    wm
+                } else {
+                    let wm = self.t();
+                    self.line(&format!("{wm} = call ptr @sn_lane_save(i64 0)"));
+                    wm
+                };
                 self.active_regions.push(wm.clone());
                 for s in body {
                     self.stmt(s);
                 }
                 if !self.terminated {
-                    self.line(&format!("call void @sn_lane_restore(i64 0, ptr {wm})"));
+                    if lane_inline_on() && self.frozen_depth == 0 {
+                        // 1-store reset (W2F §2: "1 store per lane").
+                        let top_addr = self.lane_field_addr("0", 1);
+                        self.line(&format!("store ptr {wm}, ptr {top_addr}"));
+                    } else {
+                        self.line(&format!("call void @sn_lane_restore(i64 0, ptr {wm})"));
+                    }
                 }
                 self.active_regions.pop();
             }
             Stmt::Frozen { body, .. } => {
                 self.line("call void @sn_lane_freeze(i64 0)");
+                // SWARM RABBIT HOLE — D0 gap #2 (Impl-B, Wave 5): track the
+                // lexically open frozen depth so the inline bump/reset
+                // lowering keeps the checked runtime calls wherever a
+                // frozen block is open, preserving the loud runtime errors
+                // for alloc/rewind on a frozen lane.
+                self.frozen_depth += 1;
                 for s in body {
                     self.stmt(s);
                 }
+                self.frozen_depth -= 1;
                 if !self.terminated {
                     self.line("call void @sn_lane_unfreeze(i64 0)");
                 }
@@ -1554,6 +1638,7 @@ impl Cx<'_> {
                 active_locks: Vec::new(),
                 active_nurseries: Vec::new(),
                 active_regions: Vec::new(),
+                frozen_depth: 0,
             };
             for (i, (n, t)) in cap_tys.iter().enumerate() {
                 let slot = child.t();
@@ -3310,16 +3395,84 @@ impl Cx<'_> {
                 (r, Type::Any)
             }
             "lane_alloc" => {
-                let (lane_id, bytes) = if vs.len() >= 2 {
-                    (vs[0].0.clone(), vs[1].0.clone())
-                } else if vs.len() == 1 {
-                    ("0".into(), vs[0].0.clone())
-                } else {
-                    ("0".into(), "0".into())
+                // SWARM RABBIT HOLE — D0 gap #2 (Impl-B, Wave 5): inline
+                // constant-size bump on lane 0 — W2F §1(b)'s TLS-reloaded
+                // load/gep/store core. `top` is 8-aligned by construction
+                // (page-aligned base, every bump rounded to 8), so the
+                // constant size is pre-rounded and no alignment math is
+                // emitted (W2F §6: alignment by construction). The
+                // limit+frozen guard routes overflow, an uninitialized
+                // lane (top == limit == null ⇒ ugt) and a frozen lane to
+                // @sn_lane_alloc, which errors loudly (W2F §3: check-based
+                // POSIX design, no trap handlers). Dynamic sizes, other
+                // lanes, lexically frozen bodies and debug builds keep the
+                // runtime call.
+                let lane0_const = matches!(
+                    args.get(0),
+                    Some(Arg::Pos(e)) if matches!(e.kind, ExprKind::Int(0))
+                );
+                let size_const: Option<i64> = match args.get(1) {
+                    Some(Arg::Pos(e)) => match &e.kind {
+                        ExprKind::Int(n) if *n > 0 => Some(*n),
+                        _ => None,
+                    },
+                    _ => None,
                 };
-                let r = self.t();
-                self.line(&format!("{r} = call ptr @sn_lane_alloc(i64 {lane_id}, i64 {bytes})"));
-                (r, Type::Ptr)
+                let inline_ok = lane_inline_on()
+                    && self.frozen_depth == 0
+                    && lane0_const
+                    && size_const.is_some();
+                if inline_ok {
+                    let sz = size_const.unwrap();
+                    let sz8 = (sz + 7) & !7;
+                    let top_addr = self.lane_field_addr("0", 1);
+                    let old = self.t();
+                    self.line(&format!("{old} = load ptr, ptr {top_addr}"));
+                    let new_top = self.t();
+                    self.line(&format!("{new_top} = getelementptr i8, ptr {old}, i64 {sz8}"));
+                    let lim_addr = self.lane_field_addr("0", 3);
+                    let lim = self.t();
+                    self.line(&format!("{lim} = load ptr, ptr {lim_addr}"));
+                    let frz_addr = self.lane_field_addr("0", 5);
+                    let frz = self.t();
+                    self.line(&format!("{frz} = load i32, ptr {frz_addr}"));
+                    let oob = self.t();
+                    self.line(&format!("{oob} = icmp ugt ptr {new_top}, {lim}"));
+                    let frozen_bad = self.t();
+                    self.line(&format!("{frozen_bad} = icmp ne i32 {frz}, 0"));
+                    let bad = self.t();
+                    self.line(&format!("{bad} = or i1 {oob}, {frozen_bad}"));
+                    let l_fast = self.l("lanefast");
+                    let l_slow = self.l("laneslow");
+                    let l_join = self.l("lanejoin");
+                    self.line(&format!("br i1 {bad}, label %{l_slow}, label %{l_fast}"));
+                    self.raw(&format!("{l_fast}:"));
+                    self.line(&format!("store ptr {new_top}, ptr {top_addr}"));
+                    self.line(&format!("br label %{l_join}"));
+                    self.raw(&format!("{l_slow}:"));
+                    let slow_r = self.t();
+                    self.line(&format!(
+                        "{slow_r} = call ptr @sn_lane_alloc(i64 0, i64 {sz})"
+                    ));
+                    self.line(&format!("br label %{l_join}"));
+                    self.raw(&format!("{l_join}:"));
+                    let r = self.t();
+                    self.line(&format!(
+                        "{r} = phi ptr [ {old}, %{l_fast} ], [ {slow_r}, %{l_slow} ]"
+                    ));
+                    (r, Type::Ptr)
+                } else {
+                    let (lane_id, bytes) = if vs.len() >= 2 {
+                        (vs[0].0.clone(), vs[1].0.clone())
+                    } else if vs.len() == 1 {
+                        ("0".into(), vs[0].0.clone())
+                    } else {
+                        ("0".into(), "0".into())
+                    };
+                    let r = self.t();
+                    self.line(&format!("{r} = call ptr @sn_lane_alloc(i64 {lane_id}, i64 {bytes})"));
+                    (r, Type::Ptr)
+                }
             }
             "lane_save" => {
                 let lane_id = vs.first().map(|x| x.0.clone()).unwrap_or("0".into());
@@ -4821,6 +4974,7 @@ impl Cx<'_> {
                 active_locks: Vec::new(),
                 active_nurseries: Vec::new(),
                 active_regions: Vec::new(),
+                frozen_depth: 0,
             };
             let mut pll = vec!["ptr %env".to_string()];
             for p in params {
@@ -4931,6 +5085,7 @@ fn lower_ext_fn(
         active_locks: Vec::new(),
         active_nurseries: Vec::new(),
         active_regions: Vec::new(),
+        frozen_depth: 0,
     };
     let mut params_ll = vec!["ptr %p_self".to_string()];
     for p in &f.params {

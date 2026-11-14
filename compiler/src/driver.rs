@@ -157,6 +157,10 @@ pub fn compile(opts: &CompileOptions) -> Result<CompileResult, String> {
     }
     let cov_files: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
     let _ = crate::ir::cov_collect(opts.coverage);
+    // SWARM RABBIT HOLE — D0 gap #2 (Impl-B): -O1+ lowers the inline lane
+    // bump/reset fast path; debug builds (-O0) keep the checked, poisoning
+    // runtime calls on every lane operation.
+    crate::ir::lane_inline(opts.opt != "0");
     let ir = lower(&programs, &db, &files);
     let triple = match &opts.target {
         Some(t) => resolve_target(t)?,
@@ -479,6 +483,8 @@ pub fn compile_debug(input: &Path, output: &Path, clang: &str) -> Result<(), Str
         return Err(diag.render(&files));
     }
     let _ = crate::ir::cov_collect(false);
+    // Debug builds keep the checked runtime lane calls (D0 gap #2, Impl-B).
+    crate::ir::lane_inline(false);
     let ir = lower(&programs, &db, &files);
     if !ir.has_main {
         return Err("no fn main() found\n".into());

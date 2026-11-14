@@ -350,6 +350,14 @@ declare ptr @sn_lane_alloc(i64, i64)
 declare i64 @sn_lane_used(i64)
 declare void @sn_lane_freeze(i64)
 declare void @sn_lane_unfreeze(i64)
+; SWARM RABBIT HOLE — D0 gap #2 (Impl-B, Wave 5): the TLS lane array exposed
+; to IR for the inline bump/reset fast path (W2F §1(b): the TLS-reloaded
+; model — no hidden-arg ABI). %sn_lane_t mirrors runtime.c's SnLane; the gep
+; field indices used by ir.rs are 1 = top, 3 = limit, 4 = initialized,
+; 5 = frozen_depth, and runtime.c's _Static_asserts pin the offsets this
+; mirror depends on.
+%sn_lane_t = type { ptr, ptr, ptr, ptr, i32, i32, ptr }
+@g_tls_lanes = external thread_local global [8 x %sn_lane_t]
 declare ptr @sn_pool_new(i64, i64)
 declare i64 @sn_pool_insert_i64(ptr, i64)
 declare i64 @sn_pool_insert_rec(ptr, ptr, i64)

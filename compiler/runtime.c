@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <stdint.h>
+#include <stddef.h> /* SWARM RABBIT HOLE, D0 gap #2: offsetof for the SnLane layout asserts */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -5577,7 +5578,19 @@ typedef struct SnLane {
     struct SnLane *parent;
 } SnLane;
 
-static SN_TLS SnLane g_tls_lanes[SN_LANE_COUNT];
+/* SWARM RABBIT HOLE, D0 gap #2 (Impl-B, Wave 5): the lane array is exported
+   (no longer `static`) so the compiler's inline bump/reset fast path can
+   gep/load/store `top` directly from LLVM IR (llvm.rs declares @g_tls_lanes
+   as `[8 x %sn_lane_t]`, mirroring SnLane). The IR hardcodes the gep field
+   indices; these asserts turn any future SnLane layout change into a C
+   compile error instead of silent IR corruption. */
+SN_TLS SnLane g_tls_lanes[SN_LANE_COUNT];
+_Static_assert(SN_LANE_COUNT == 8, "llvm.rs mirror: @g_tls_lanes is [8 x %sn_lane_t]");
+_Static_assert(offsetof(SnLane, top) == 8, "llvm.rs gep field 1 (top) must stay at offset 8");
+_Static_assert(offsetof(SnLane, limit) == 24, "llvm.rs gep field 3 (limit) must stay at offset 24");
+_Static_assert(offsetof(SnLane, initialized) == 32, "llvm.rs gep field 4 (initialized) must stay at offset 32");
+_Static_assert(offsetof(SnLane, frozen_depth) == 36, "llvm.rs gep field 5 (frozen_depth) must stay at offset 36");
+_Static_assert(sizeof(SnLane) == 48, "llvm.rs lane stride (sizeof %sn_lane_t) must stay 48");
 
 static SnLane *sn_lane_ensure(int64_t lane_id) {
     if (lane_id < 0 || lane_id >= SN_LANE_COUNT) lane_id = 0;
