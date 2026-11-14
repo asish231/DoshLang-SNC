@@ -15,6 +15,8 @@ This directory contains end-to-end verification tests covering Phase 4 systems i
 | `test_nursery_early_return.sn` | Structured Concurrency Unwind | Verifies early `return` inside `nursery { }` waits for all child tasks before returning. | PASSED |
 | `test_region_early_return.sn` | Elastic Lane Unwind | Verifies early `return` inside `region { }` rewinds lane watermark back to 0 without leaking memory. | PASSED |
 | `test_chan_member_move.sn` | Move-On-Send Deep Tracking | Verifies sending a blueprint field (`ch.send(p.x)`) or list element marks the container moved, preventing data races. | PASSED |
+| `test_nursery_carve.sn` | Nursery Child-Lane Carve (language level) | Verifies nursery spawn/join round-trips with the ν loan registry in place: children's region-scoped lane-0 allocations keep working (the loaned-lane backstop never bites lane 0), and every child's result survives the join across two rounds. | PASSED |
+| `test_nursery_carve.c` | Nursery Child-Lane Carve (runtime O(1) join, D0 gap #5) | Drives the runtime carve API the compiler wiring will emit: `sn_nursery_loan_lane` reserves a ν lane per child, children allocate into it, `sn_nursery_wait` reclaims every child allocation with one store per lane. Verifies exact join-reset/byte stats, the free-set return, nested nurseries, parent-lane-0 untouched, the loaned-lane fail-fast — plain, under ASan, and leak-checked with macOS `leaks(1)`. | PASSED |
 
 ## Running the Suite
 

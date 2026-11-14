@@ -2083,6 +2083,19 @@ void sn_lock_rel(void *p) {
 /* --------------------------------------------------------------------- */
 /*  Structured Concurrency Nursery Runtime                               */
 /* --------------------------------------------------------------------- */
+/* SWARM RABBIT HOLE, D0 gap #5 (Impl-F, Wave 6): the nursery child-lane
+   carve. A nursery child's scratch is a ν lane — one of the child's own
+   thread's TLS lanes, reserved by pointing SnLane.parent (Impl-A's field)
+   at the nursery's parent_lane and registered on the intrusive list below.
+   sn_lane is defined in the lane section at the bottom of this file; loan
+   bookkeeping only ever holds pointers to it, so the incomplete type is
+   enough here. The loan/reserve/drain implementations live with the lane
+   machinery (they touch g_tls_lanes), forward-declared below. */
+struct SnLane;
+typedef struct SnLoan {
+    struct SnLane *lane;   /* the loaned ν lane (in the child's TLS array) */
+    struct SnLoan *next;   /* intrusive LIFO registry link */
+} SnLoan;
 #ifdef _WIN32
 typedef struct SnNursery {
     CRITICAL_SECTION mu;
@@ -2093,6 +2106,13 @@ typedef struct SnNursery {
        adopted yet sits on this intrusive list; sn_nursery_wait drains it
        (queue-drain rule) so a join frees exactly the un-adopted slabs. */
     SnMsgEnvelope *env_head;
+    /* SWARM RABBIT HOLE, D0 gap #5 (Impl-F, Wave 6): the child-lane carve.
+       parent_lane = the spawning thread's lane 0, the ⊑ₗ anchor every
+       loaned ν lane's SnLane.parent points at (W2A §1.1: parent ⊑ₗ ν_child);
+       loan_head = the intrusive registry of ν lanes loaned to this group's
+       children — sn_nursery_wait drains it with the 1-store reset. */
+    struct SnLane *parent_lane;
+    SnLoan *loan_head;
 } SnNursery;
 #else
 typedef struct SnNursery {
@@ -2104,13 +2124,28 @@ typedef struct SnNursery {
        adopted yet sits on this intrusive list; sn_nursery_wait drains it
        (queue-drain rule) so a join frees exactly the un-adopted slabs. */
     SnMsgEnvelope *env_head;
+    /* SWARM RABBIT HOLE, D0 gap #5 (Impl-F, Wave 6): the child-lane carve.
+       parent_lane = the spawning thread's lane 0, the ⊑ₗ anchor every
+       loaned ν lane's SnLane.parent points at (W2A §1.1: parent ⊑ₗ ν_child);
+       loan_head = the intrusive registry of ν lanes loaned to this group's
+       children — sn_nursery_wait drains it with the 1-store reset. */
+    struct SnLane *parent_lane;
+    SnLoan *loan_head;
 } SnNursery;
 #endif
+static void sn_nursery_loan_drain(SnNursery *n); /* lane section below */
+void sn_lane_loan_task_end(void);                /* lane section below */
+static struct SnLane *sn_lane_ensure(int64_t lane_id); /* lane section below */
 
 void *sn_nursery_new(void) {
     SnNursery *n = (SnNursery *)xmalloc(sizeof(SnNursery));
     n->active_tasks = 0;
     n->env_head = NULL; /* DIFF-3: registry starts empty */
+    n->loan_head = NULL; /* D0 gap #5: ν registry starts empty */
+    /* D0 gap #5: the spawning thread's lane 0 is the ⊑ₗ anchor. Ensuring it
+       here (on the parent thread) materializes this thread's TLS lane and
+       pins the pointer the children's loans will point at. */
+    n->parent_lane = sn_lane_ensure(0);
 #ifdef _WIN32
     InitializeCriticalSection(&n->mu);
     InitializeConditionVariable(&n->cv);
@@ -2136,6 +2171,12 @@ void sn_nursery_enter_task(void *nursery) {
 }
 
 void sn_nursery_leave_task(void *nursery) {
+    /* D0 gap #5 (Impl-F): a nursery child ends with this call (the compiled
+       child emits it at task end). Its ν loan permission dies with the task —
+       a later task scheduled on this worker thread must not be able to
+       allocate on the still-loaned lane; the join owns it until the reset.
+       The loan itself stays registered until sn_nursery_wait drains it. */
+    sn_lane_loan_task_end();
     if (!nursery) return;
     SnNursery *n = (SnNursery *)nursery;
 #ifdef _WIN32
@@ -2413,6 +2454,16 @@ void sn_nursery_wait(void *nursery) {
        the CAS header under the queue lock. All of this group's tasks have
        left above, so there are no concurrent registrants. */
     sn_env_drain_group(n);
+    /* SWARM RABBIT HOLE, D0 gap #5 (Impl-F, Wave 6) / W2A §1.1, §2.2 A.1
+       (C-JOIN, SR3): the join resets every ν lane this group's children
+       loaned — one store per lane (top = base), LIFO over the registry,
+       then each lane returns to its thread's free set. All of the group's
+       tasks have left above, so no child can still be allocating; the
+       child's ENTIRE lane allocation reclaims in O(1) (W2A Theorem 1(iii):
+       the single-store pop license). Panic-safe by the same argument as
+       the envelope drain: the walk runs on every path that reaches the
+       join, after the last leave_task. */
+    sn_nursery_loan_drain(n);
 #ifdef _WIN32
     DeleteCriticalSection(&n->mu);
     free(n);
@@ -5591,6 +5642,11 @@ _Static_assert(offsetof(SnLane, limit) == 24, "llvm.rs gep field 3 (limit) must 
 _Static_assert(offsetof(SnLane, initialized) == 32, "llvm.rs gep field 4 (initialized) must stay at offset 32");
 _Static_assert(offsetof(SnLane, frozen_depth) == 36, "llvm.rs gep field 5 (frozen_depth) must stay at offset 36");
 _Static_assert(sizeof(SnLane) == 48, "llvm.rs lane stride (sizeof %sn_lane_t) must stay 48");
+/* D0 gap #5 (Impl-F, Wave 6): the ν lane the CURRENT task of this thread
+   loaned from its nursery (-1 = none). sn_lane_alloc's loaned-lane backstop
+   and sn_nursery_loan_lane both consult it; it lives here (not in the carve
+   section) because sn_lane_alloc below needs it. */
+static SN_TLS int64_t g_tls_loan_lane = -1;
 
 static SnLane *sn_lane_ensure(int64_t lane_id) {
     if (lane_id < 0 || lane_id >= SN_LANE_COUNT) lane_id = 0;
@@ -5675,6 +5731,22 @@ void *sn_lane_alloc(int64_t lane_id, int64_t bytes) {
         fprintf(stderr, "runtime error: cannot allocate on frozen Elastic Lane\n");
         exit(1);
     }
+    /* D0 gap #5 (Impl-F): a lane loaned to a nursery (parent != NULL) is
+       exclusively the loaning child's until the join resets it. Allocating
+       on a foreign loaned lane would put live bytes on a lane the join
+       wipes with its 1-store reset (UAF). The compile-time rule (the
+       spawn-safety walk rejecting raw lane_alloc on foreign lanes — later
+       slice) is the primary gate; this fail-fast is the runtime backstop.
+       Lane 0 is never loaned (sn_nursery_loan_lane skips it), so the
+       compiler's region/frozen lowering and the inline IR fast path
+       (hardcoded lane 0) never hit this. Out-of-range ids clamp to lane 0
+       before this check and are likewise unaffected. */
+    if (__atomic_load_n(&l->parent, __ATOMIC_ACQUIRE) != NULL &&
+        lane_id != g_tls_loan_lane) {
+        fprintf(stderr, "runtime error: lane %lld is loaned to a nursery task group; cannot allocate on a foreign loaned lane\n",
+                (long long)lane_id);
+        exit(1);
+    }
     if (bytes < 0) bytes = 0;
     uintptr_t cur = (uintptr_t)l->top;
     uintptr_t aligned = (cur + 7u) & ~(uintptr_t)7u;
@@ -5720,6 +5792,14 @@ void *sn_lane_alloc_zeroed(int64_t lane_id, int64_t bytes, int64_t align) {
         fprintf(stderr, "runtime error: cannot allocate on frozen Elastic Lane\n");
         exit(1);
     }
+    /* D0 gap #5 (Impl-F): same loaned-ν exclusivity backstop as
+       sn_lane_alloc — see the comment there. */
+    if (__atomic_load_n(&l->parent, __ATOMIC_ACQUIRE) != NULL &&
+        lane_id != g_tls_loan_lane) {
+        fprintf(stderr, "runtime error: lane %lld is loaned to a nursery task group; cannot allocate on a foreign loaned lane\n",
+                (long long)lane_id);
+        exit(1);
+    }
     if (bytes < 0) bytes = 0;
     int64_t a = 8;
     if (align > 8 && align <= 65536) {
@@ -5759,6 +5839,135 @@ void sn_lane_freeze(int64_t lane_id) {
 void sn_lane_unfreeze(int64_t lane_id) {
     SnLane *l = sn_lane_ensure(lane_id);
     if (l->frozen_depth > 0) l->frozen_depth--;
+}
+
+/* --------------------------------------------------------------------- */
+/*  SWARM RABBIT HOLE, D0 gap #5 (Impl-F, Wave 6): the nursery            */
+/*  child-lane carve — ν loan lanes reclaimed O(1) at join.               */
+/*                                                                        */
+/*  DESIGN DECISION (loaned-lane first cut vs. the full sub-lane):        */
+/*  The full design (W2A §1.1's ν generator; D0 gap-table row 5) carves a  */
+/*  per-task sub-lane out of the PARENT's lane memory and makes           */
+/*  nursery_wait a single store of the parent's watermark. That needs a   */
+/*  per-task lane set outside the fixed 8-slot TLS array (the v3 lane-set  */
+/*  extension) plus a child-side allocation API the compiler can target —  */
+/*  compiler wiring this slice deliberately excludes. The honest first    */
+/*  cut on the existing array: the child's ν is one of ITS OWN thread's    */
+/*  TLS lanes (1..7; lane 0 stays the compiler's region/frozen lane),     */
+/*  reserved by pointing SnLane.parent (Impl-A's field) at the nursery's   */
+/*  parent_lane — the loaned mark IS the parent link — and registered in   */
+/*  the nursery's intrusive registry. The child allocates through the      */
+/*  existing sn_lane_alloc(ν, ·); the join resets each loaned lane with    */
+/*  ONE store (top = base) and returns it to the thread's free set        */
+/*  (parent = NULL). Per-lane O(1), zero per-allocation work — W2A §1.1   */
+/*  "spawn parent ⊑ₗ ν_child; join resets ν O(1)", §1.4 "fresh lane,      */
+/*  empty stack" (the loan's top = base), §2.2 A.1 C-SPAWN/C-JOIN + SR3   */
+/*  (LIFO residual closes, panic-safe join), Theorem 1(iii) (1 store).    */
+/*                                                                        */
+/*  Limitation (documented): 7 loanable lanes per worker thread; the      */
+/*  8th concurrent child on one worker gets ν = -1 and falls back to the  */
+/*  existing behavior (its allocations go to its own thread's stack       */
+/*  region/heap and are not join-reclaimed). The pinned/DPS lane classes  */
+/*  (L2..L7, STRATA §2) share these lanes with loans in the full design — */
+/*  resolved by the v3 lane-set extension this slice defers.              */
+/* --------------------------------------------------------------------- */
+static int64_t g_join_lanes_reset = 0;      /* stats: ν lanes reset at joins */
+static int64_t g_join_bytes_reclaimed = 0; /* stats: ν bytes reclaimed at joins */
+static int64_t g_loan_fallbacks = 0;       /* stats: loans refused (all busy) */
+
+/* Child-thread entry (a nursery child calls this when it starts; the
+   compiler wiring — an ir.rs spawn-prologue call — is a later slice; the
+   systems C test drives it directly, mimicking the compiled shape).
+   Reserves one ν lane on the CALLING thread: marks it loaned by pointing
+   parent at the nursery's anchor, registers it with the nursery
+   (mutex-protected push), returns the lane id. Returns -1 when every
+   loanable lane is busy. */
+int64_t sn_nursery_loan_lane(void *nursery) {
+    SnNursery *n = (SnNursery *)nursery;
+    if (g_tls_loan_lane >= 0) return g_tls_loan_lane; /* idempotent per task */
+    if (!n || !n->parent_lane) {
+        __atomic_add_fetch(&g_loan_fallbacks, 1, __ATOMIC_RELAXED);
+        return -1;
+    }
+    for (int64_t k = 1; k < (int64_t)SN_LANE_COUNT; k++) {
+        /* Lane 0 is excluded: the compiler's region/frozen lowering and the
+           inline IR fast path are hardcoded to it; a loaned lane 0 would be
+           wiped by a join while a later task's region blocks allocate on it. */
+        SnLane *l = sn_lane_ensure(k);
+        if (__atomic_load_n(&l->parent, __ATOMIC_ACQUIRE) != NULL) continue;
+        /* W2A §1.4: fresh lane, empty stack — reset the watermark. Any bytes
+           above base are un-reclaimed garbage from finished tasks (the leak
+           this slice closes); no live task can hold them: one task runs at a
+           time per worker thread, and lane pointers cannot cross threads. */
+        l->top = l->base;
+        /* The loaned mark IS the parent link (Impl-A's field): ν_child's ⊑ₗ
+           anchor is the nursery's parent_lane. Release-store: publishes the
+           top = base reset to the next loan of this same lane. */
+        __atomic_store_n(&l->parent, n->parent_lane, __ATOMIC_RELEASE);
+        SnLoan *node = (SnLoan *)xmalloc(sizeof(SnLoan));
+        node->lane = l;
+#ifdef _WIN32
+        EnterCriticalSection(&n->mu);
+        node->next = n->loan_head;
+        n->loan_head = node;
+        LeaveCriticalSection(&n->mu);
+#else
+        pthread_mutex_lock(&n->mu);
+        node->next = n->loan_head;
+        n->loan_head = node;
+        pthread_mutex_unlock(&n->mu);
+#endif
+        g_tls_loan_lane = k;
+        return k;
+    }
+    __atomic_add_fetch(&g_loan_fallbacks, 1, __ATOMIC_RELAXED);
+    return -1; /* all loanable lanes busy: fall back to existing behavior */
+}
+
+/* Task end (called from sn_nursery_leave_task): the ν permission dies with
+   the task. The loan itself stays registered until the join resets it. */
+void sn_lane_loan_task_end(void) {
+    g_tls_loan_lane = -1;
+}
+
+/* The join's O(1) reset (called from sn_nursery_wait after the envelope
+   drain; every task of the group has left, so no concurrent loaner or
+   allocator exists — the same argument that makes the envelope drain
+   safe). SR3 (W2A §1.6/§2.2 A.1 C-JOIN): residual closes LIFO — the
+   registry is a push-down, so popping it closes ν lanes innermost-first.
+   Per lane: 1 store (top = base, Theorem 1(iii)), then the release-store
+   returning it to its thread's free set. */
+static void sn_nursery_loan_drain(SnNursery *n) {
+    int64_t lanes = 0;
+    int64_t bytes = 0;
+    SnLoan *node = n->loan_head;
+    n->loan_head = NULL;
+    while (node) {
+        SnLoan *next = node->next;
+        SnLane *l = node->lane;
+        bytes += (int64_t)(l->top - l->base);
+        l->top = l->base; /* THE 1-STORE RESET: the child's whole allocation reclaims */
+        __atomic_store_n(&l->parent, (struct SnLane *)NULL, __ATOMIC_RELEASE);
+        free(node);
+        lanes++;
+        node = next;
+    }
+    if (lanes > 0) {
+        __atomic_add_fetch(&g_join_lanes_reset, lanes, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_join_bytes_reclaimed, bytes, __ATOMIC_RELAXED);
+    }
+}
+
+/* Test/diagnostic surface for the carve (systems tests; later slices may
+   keep or retire it): 0 = ν lanes reset at joins, 1 = ν bytes reclaimed at
+   joins, 2 = loans refused (all loanable lanes busy). */
+int64_t sn_nursery_join_stats(int64_t what) {
+    switch (what) {
+    case 0: return __atomic_load_n(&g_join_lanes_reset, __ATOMIC_RELAXED);
+    case 1: return __atomic_load_n(&g_join_bytes_reclaimed, __ATOMIC_RELAXED);
+    case 2: return __atomic_load_n(&g_loan_fallbacks, __ATOMIC_RELAXED);
+    default: return 0;
+    }
 }
 
 /* Generational Slot Vault (SnPool) */

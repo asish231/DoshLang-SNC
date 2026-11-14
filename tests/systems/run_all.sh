@@ -201,13 +201,105 @@ else
 fi
 
 echo ""
+echo "-----------------------------------------------------------------"
+echo "10. NURSERY CHILD-LANE CARVE INTEGRATION (test_nursery_carve.sn)"
+echo "-----------------------------------------------------------------"
+OUT_NCARVE="/tmp/snc_test_nursery_carve"
+rm -f "$OUT_NCARVE"
+if "$SNC" "$DIR/test_nursery_carve.sn" -o "$OUT_NCARVE"; then
+    OUTPUT=$("$OUT_NCARVE")
+    echo "$OUTPUT"
+    if echo "$OUTPUT" | grep -q "PASS:"; then
+        echo ">>> test_nursery_carve(.sn): PASSED"
+    else
+        echo ">>> test_nursery_carve(.sn): FAILED (output did not contain PASS)"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> test_nursery_carve(.sn): COMPILATION FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+echo ""
+
+# 11. Nursery Child-Lane Carve — the O(1) join at the runtime level
+#     (D0 gap #5: sn_nursery_loan_lane -> sn_lane_alloc(nu) -> the join's
+#     1-store reset). Built twice: plain, then ASan (the UAF/no-heap-error
+#     stress pass with concurrent + nested spawns). LSan is not supported
+#     on arm64 darwin; leak-freedom is checked with macOS `leaks` below.
+echo "-----------------------------------------------------------------"
+echo "11. NURSERY CHILD-LANE CARVE, RUNTIME O(1) JOIN (test_nursery_carve.c)"
+echo "-----------------------------------------------------------------"
+OUT_CCARVE="/tmp/snc_test_nursery_carve_c"
+rm -f "$OUT_CCARVE"
+if clang -O1 -g -o "$OUT_CCARVE" "$DIR/test_nursery_carve.c" "$ROOT/compiler/runtime.c" -lpthread 2>/dev/null; then
+    OUTPUT=$("$OUT_CCARVE")
+    echo "$OUTPUT"
+    if echo "$OUTPUT" | grep -q "PASS:"; then
+        echo ">>> test_nursery_carve(.c): PASSED"
+    else
+        echo ">>> test_nursery_carve(.c): FAILED (output did not contain PASS)"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> test_nursery_carve(.c): BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+echo ""
+
+# 11b. The ASan stress pass of the same runtime carve test
+echo "-----------------------------------------------------------------"
+echo "11b. NURSERY CHILD-LANE CARVE, ASAN STRESS (test_nursery_carve.c)"
+echo "-----------------------------------------------------------------"
+OUT_CCARVE_ASAN="/tmp/snc_test_nursery_carve_c_asan"
+rm -f "$OUT_CCARVE_ASAN"
+if clang -O1 -g -fsanitize=address -o "$OUT_CCARVE_ASAN" "$DIR/test_nursery_carve.c" "$ROOT/compiler/runtime.c" -lpthread 2>/dev/null; then
+    OUTPUT=$(ASAN_OPTIONS=detect_leaks=0 "$OUT_CCARVE_ASAN" 2>&1)
+    echo "$OUTPUT"
+    if echo "$OUTPUT" | grep -q "PASS:"; then
+        echo ">>> test_nursery_carve(.c ASan): PASSED (no ASan reports under concurrent/nested spawns)"
+    else
+        echo ">>> test_nursery_carve(.c ASan): FAILED"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> test_nursery_carve(.c ASan): BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+echo ""
+
+# 11c. Leak check of the runtime carve test via macOS `leaks` (LSan is
+#      unsupported on arm64 darwin). The test pauses on
+#      SN_CARVE_LEAK_PAUSE so `leaks` can attach to the live process.
+echo "-----------------------------------------------------------------"
+echo "11c. NURSERY CHILD-LANE CARVE, LEAK CHECK (macOS leaks(1))"
+echo "-----------------------------------------------------------------"
+if command -v leaks >/dev/null 2>&1; then
+    CARVE_PID=""
+    MallocStackLogging=1 SN_CARVE_LEAK_PAUSE=15 "$OUT_CCARVE" > /tmp/snc_carve_leaks_out.txt 2>&1 &
+    CARVE_PID=$!
+    sleep 7
+    LEAK_LINE=$(leaks "$CARVE_PID" 2>/dev/null | grep -E "[0-9]+ leaks? for [0-9]+ total leaked bytes" | head -1)
+    wait "$CARVE_PID" 2>/dev/null
+    echo "$LEAK_LINE"
+    if echo "$LEAK_LINE" | grep -q "0 leaks for 0 total leaked bytes"; then
+        echo ">>> test_nursery_carve(leaks): PASSED (0 leaked bytes)"
+    else
+        echo ">>> test_nursery_carve(leaks): FAILED (leaks reported)"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> test_nursery_carve(leaks): SKIPPED (leaks(1) unavailable)"
+fi
+
+echo ""
 echo "================================================================="
 if [ $FAILURES -eq 0 ]; then
-    echo "  ALL SYSTEMS & SECURITY TESTS PASSED (9/9)"
-    echo "================================================================="
+    echo "  ALL SYSTEMS & SECURITY TESTS PASSED (13 checks)"
     exit 0
 else
     echo "  $FAILURES SYSTEMS TESTS FAILED"
-    echo "================================================================="
     exit 1
 fi

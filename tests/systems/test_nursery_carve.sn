@@ -1,0 +1,329 @@
+// Systems Test: Nursery Child-Lane Carve Integration (D0 gap #5, runtime side)
+//
+// The runtime slice of D0's gap #5 reserves a ν (nursery) lane for spawned
+// nursery children and reclaims every child allocation O(1) at the join
+// (sn_nursery_wait's 1-store reset per loaned lane). The compiler wiring
+// that routes spawn-body allocations onto ν is a later slice, so this
+// language-level test verifies the integration surface that exists today:
+//
+//   - nursery spawn/join round-trips with the ν registry in place (an empty
+//     registry walk at join is a no-op; compiled programs are unaffected),
+//   - children still use their own thread's lane 0 inside `region {}` -
+//     the loaned-lane backstop in sn_lane_alloc must never bite lane 0,
+//     which the loan path reserves for the compiler's region/frozen
+//     lowering,
+//   - every child's result survives the join intact.
+//
+// The O(1) reset mechanics themselves (loan -> allocate -> 1-store join
+// reset -> free-set return -> nested nurseries) are proven at the runtime
+// level by tests/systems/test_nursery_carve.c, which drives the same API
+// the compiler wiring will emit.
+//
+// Each spawned child computes i * (1+2+...+50) = i * 1275, writes i
+// through a region-scoped lane-0 allocation and reads it back, and adds
+// the sum to the shared counter under the lock. Eight children per round
+// add 1275*36 + 36 = 45936.
+
+blueprint Counter {
+    int value = 0
+}
+
+fn main() {
+    print("=== Systems Test: Nursery Child-Lane Carve (runtime side) ===")
+    new Counter c()
+    lock mu
+
+    int parent_used = lane_used(0)
+
+    // Round 1: eight children (locals are function-scoped, so every
+    // child's scratch gets its own name).
+    nursery {
+        spawn {
+            int s1 = 0
+            int k1 = 1
+            while (k1 <= 50) {
+                s1 += 1 * k1
+                k1 += 1
+            }
+            region {
+                ptr p1 = lane_alloc(0, 512)
+                set(p1, 1)
+                s1 += value(p1)
+            }
+            lock(mu) {
+                c.value += s1
+            }
+        }
+        spawn {
+            int s2 = 0
+            int k2 = 1
+            while (k2 <= 50) {
+                s2 += 2 * k2
+                k2 += 1
+            }
+            region {
+                ptr p2 = lane_alloc(0, 512)
+                set(p2, 2)
+                s2 += value(p2)
+            }
+            lock(mu) {
+                c.value += s2
+            }
+        }
+        spawn {
+            int s3 = 0
+            int k3 = 1
+            while (k3 <= 50) {
+                s3 += 3 * k3
+                k3 += 1
+            }
+            region {
+                ptr p3 = lane_alloc(0, 512)
+                set(p3, 3)
+                s3 += value(p3)
+            }
+            lock(mu) {
+                c.value += s3
+            }
+        }
+        spawn {
+            int s4 = 0
+            int k4 = 1
+            while (k4 <= 50) {
+                s4 += 4 * k4
+                k4 += 1
+            }
+            region {
+                ptr p4 = lane_alloc(0, 512)
+                set(p4, 4)
+                s4 += value(p4)
+            }
+            lock(mu) {
+                c.value += s4
+            }
+        }
+        spawn {
+            int s5 = 0
+            int k5 = 1
+            while (k5 <= 50) {
+                s5 += 5 * k5
+                k5 += 1
+            }
+            region {
+                ptr p5 = lane_alloc(0, 512)
+                set(p5, 5)
+                s5 += value(p5)
+            }
+            lock(mu) {
+                c.value += s5
+            }
+        }
+        spawn {
+            int s6 = 0
+            int k6 = 1
+            while (k6 <= 50) {
+                s6 += 6 * k6
+                k6 += 1
+            }
+            region {
+                ptr p6 = lane_alloc(0, 512)
+                set(p6, 6)
+                s6 += value(p6)
+            }
+            lock(mu) {
+                c.value += s6
+            }
+        }
+        spawn {
+            int s7 = 0
+            int k7 = 1
+            while (k7 <= 50) {
+                s7 += 7 * k7
+                k7 += 1
+            }
+            region {
+                ptr p7 = lane_alloc(0, 512)
+                set(p7, 7)
+                s7 += value(p7)
+            }
+            lock(mu) {
+                c.value += s7
+            }
+        }
+        spawn {
+            int s8 = 0
+            int k8 = 1
+            while (k8 <= 50) {
+                s8 += 8 * k8
+                k8 += 1
+            }
+            region {
+                ptr p8 = lane_alloc(0, 512)
+                set(p8, 8)
+                s8 += value(p8)
+            }
+            lock(mu) {
+                c.value += s8
+            }
+        }
+    }
+
+    int round1 = c.value
+    print("round 1 joined total: " + cast(round1, str))
+
+    // Round 2: the same shape again - the join's ν registry walk must be a
+    // transparent no-op for compiled programs, and the pool workers are
+    // reusable across nurseries.
+    nursery {
+        spawn {
+            int t1 = 0
+            int n1 = 1
+            while (n1 <= 50) {
+                t1 += 1 * n1
+                n1 += 1
+            }
+            region {
+                ptr q1 = lane_alloc(0, 512)
+                set(q1, 1)
+                t1 += value(q1)
+            }
+            lock(mu) {
+                c.value += t1
+            }
+        }
+        spawn {
+            int t2 = 0
+            int n2 = 1
+            while (n2 <= 50) {
+                t2 += 2 * n2
+                n2 += 1
+            }
+            region {
+                ptr q2 = lane_alloc(0, 512)
+                set(q2, 2)
+                t2 += value(q2)
+            }
+            lock(mu) {
+                c.value += t2
+            }
+        }
+        spawn {
+            int t3 = 0
+            int n3 = 1
+            while (n3 <= 50) {
+                t3 += 3 * n3
+                n3 += 1
+            }
+            region {
+                ptr q3 = lane_alloc(0, 512)
+                set(q3, 3)
+                t3 += value(q3)
+            }
+            lock(mu) {
+                c.value += t3
+            }
+        }
+        spawn {
+            int t4 = 0
+            int n4 = 1
+            while (n4 <= 50) {
+                t4 += 4 * n4
+                n4 += 1
+            }
+            region {
+                ptr q4 = lane_alloc(0, 512)
+                set(q4, 4)
+                t4 += value(q4)
+            }
+            lock(mu) {
+                c.value += t4
+            }
+        }
+        spawn {
+            int t5 = 0
+            int n5 = 1
+            while (n5 <= 50) {
+                t5 += 5 * n5
+                n5 += 1
+            }
+            region {
+                ptr q5 = lane_alloc(0, 512)
+                set(q5, 5)
+                t5 += value(q5)
+            }
+            lock(mu) {
+                c.value += t5
+            }
+        }
+        spawn {
+            int t6 = 0
+            int n6 = 1
+            while (n6 <= 50) {
+                t6 += 6 * n6
+                n6 += 1
+            }
+            region {
+                ptr q6 = lane_alloc(0, 512)
+                set(q6, 6)
+                t6 += value(q6)
+            }
+            lock(mu) {
+                c.value += t6
+            }
+        }
+        spawn {
+            int t7 = 0
+            int n7 = 1
+            while (n7 <= 50) {
+                t7 += 7 * n7
+                n7 += 1
+            }
+            region {
+                ptr q7 = lane_alloc(0, 512)
+                set(q7, 7)
+                t7 += value(q7)
+            }
+            lock(mu) {
+                c.value += t7
+            }
+        }
+        spawn {
+            int t8 = 0
+            int n8 = 1
+            while (n8 <= 50) {
+                t8 += 8 * n8
+                n8 += 1
+            }
+            region {
+                ptr q8 = lane_alloc(0, 512)
+                set(q8, 8)
+                t8 += value(q8)
+            }
+            lock(mu) {
+                c.value += t8
+            }
+        }
+    }
+
+    int round2 = c.value - round1
+    int after_used = lane_used(0)
+    print("round 2 joined total: " + cast(round2, str))
+    print("parent lane_used(0): before=" + cast(parent_used, str) + " after=" + cast(after_used, str))
+
+    bool ok = true
+    if (round1 != 45936) {
+        ok = false
+    }
+    if (round2 != 45936) {
+        ok = false
+    }
+    if (after_used != parent_used) {
+        ok = false
+    }
+
+    if (ok) {
+        print("PASS: nursery carve integration - children intact across joins, parent lane untouched")
+    } else {
+        print("FAIL: nursery carve integration")
+    }
+}
