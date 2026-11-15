@@ -1,0 +1,32 @@
+// SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): THE A2 KILL. The
+// spec-as-written NoRelLinkCopy discipline (STRATA §2.4.6) covered
+// assignment and pass-by-value but was SILENT on push/insert: the rule-2
+// copy discipline could be bypassed by pushing an lvalue-load of a
+// HasSelfLink element into another list — the pushed bytes carry deltas
+// encoded against the SOURCE field addresses, which would decode against
+// the destination's address. `dst.push(src[0])` → E0801 (push), the
+// verbatim diagnostic.
+//
+// The legal discharges (rule 1, unchanged): the RHS may MATERIALIZED
+// fresh — `src.push(make())` below compiles and runs (a freshly
+// constructed value is built in place at its final address, sret, so
+// its deltas encode correctly); or pass `ref<Node>` (push_ref); or
+// relocate_node(src, dst).
+
+record Node {
+    int val
+    link<Node> next
+}
+
+fn make() -> Node {
+    Node n
+    n.val = 7
+    return n
+}
+
+fn main() {
+    list<Node> src = []
+    list<Node> dst = []
+    src.push(make())
+    dst.push(src[0])
+}

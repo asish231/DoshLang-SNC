@@ -1,0 +1,238 @@
+// SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P, Cohort Delta): the
+// self-relative link system's benchmark, in-language — the per-op
+// price of the E0801 copy discipline and its bulk exemption (kills
+// G1 §1 A2 → S4). N = 100_000 nodes per round.
+//
+// Shape (the gpool_bench / lcell_bench W2F discipline, verbatim):
+// SNlang's only clock is the ms-resolution time_now_ms, so every timed
+// phase below totals >= 100x that (R rounds of N = 100_000 ops each);
+// the driver (bench/run_bench.sh, LINK_ONLY=1) runs one warmup at R/10
+// then RUNS timed runs and takes the median; every row prints its own
+// deterministic checksum, and the checksums must match across all runs
+// (decode-equality booleans and fixed payload words only — never raw
+// addresses, which vary per run).
+//
+// Rows (per timed run; R = rounds, N = 100_000 node ops per round):
+//   timer       — 100_000 time_now_ms() call pairs: the clock row.
+//   scan_bytes  — R x { link_to_bytes(ring, 0, N) }: the O(N)
+//                 SENDER-SIDE self-containedness scan + the pack —
+//                 the precondition that makes "100% legal bulk copy"
+//                 TRUE instead of false by omission. Checksum: the
+//                 packed buffer's first and last payload words
+//                 (1 + 299_998 per round, asserted).
+//   raw_bytes   — R x { link_to_bytes_raw(ring, 0, N) }: the pack
+//                 WITHOUT the scan — the bench-only comparator that
+//                 prices the discipline's precondition (NEVER sound
+//                 on link-bearing data; the block happens to be
+//                 self-contained). scan_bytes − raw_bytes = the scan.
+//   reloc_range — R x { relocate_range(ring, rng_dst, N) }: the
+//                 CONSTANT-SHIFT EXEMPTION — the O(N) scan + one
+//                 memcpy + the boundary re-encodes, never per-link
+//                 re-encode of the interior. Checksum: dst[0]'s ring
+//                 link decodes to dst[1] (1 per round, asserted).
+//   reloc_node  — R x { N x relocate_node(nb, i, nb2, i) }: the
+//                 per-node re-encode path — decode every link at the
+//                 source, copy, re-encode at the destination, |δ'| ≤
+//                 32767 checked per link. reloc_range's payoff is
+//                 reloc_node − reloc_range. (The nodes carry SELF-
+//                 links, δ = 0: position-free under relocation, so the
+//                 re-encode never depends on the two blocks' malloc
+//                 distance — the phase measures the checked path's
+//                 cost, not the allocator's luck.)
+//   raw_copy    — R x { N x 2-word ptr copy nb -> nb2 }: the
+//                 UNCHECKED by-value byte-copy the E0801 checker
+//                 REJECTS on HasSelfLink values — the copy the
+//                 discipline replaces with relocate_node.
+//                 reloc_node − raw_copy = the honest price of the
+//                 discipline (what a legal move costs over the
+//                 illegal shortcut it forbids).
+//
+// THE HONEST CLAIM: the to_bytes scan is a fixed O(N) sender-side pass
+// (one decode + two comparisons per link) — the price of making the
+// bulk-copy claim true by precondition; relocate_range amortizes the
+// re-encode discipline to one scan + one memcpy for the whole range
+// (the constant-shift identity: intra-range deltas are provably
+// unchanged), while per-node relocate_node pays the decode/copy/
+// re-encode/round-check sequence per node; raw_copy is what the
+// checker forbids, priced as the floor.
+
+use std.os
+
+record Node {
+    int val
+    link<Node> next
+}
+
+fn report(str row, int ns_per_op, int phase_ms, int ops, int ck) {
+    print("BENCH row=" + row + " ns_per_op=" + cast(ns_per_op, str)
+        + " phase_ms=" + cast(phase_ms, str)
+        + " ops=" + cast(ops, str)
+        + " checksum=" + cast(ck, str))
+}
+
+fn main() {
+    int n = 100000
+    int rounds = 50
+    list<str> a = args()
+    if (a.length() > 1) {
+        int v = cast(a[1], int)
+        if (v > 0) {
+            rounds = v
+        }
+    }
+    int r1 = rounds
+    if (r1 < 1) { r1 = 1 }
+    gc_set_threshold(2000000000)
+
+    // ---- timer overhead: 100_000 time_now_ms() call pairs
+    int t0 = time_now_ms()
+    int kt = 0
+    int acct = 0
+    while (kt < 100000) {
+        acct = acct + time_now_ms()
+        kt = kt + 1
+    }
+    int t1 = time_now_ms()
+    report("timer", (t1 - t0) * 1000000 / 100000, t1 - t0, 100000, acct)
+
+    // ---- the carriers (outside every timed phase): a self-contained
+    //      CHAIN block (element i's next -> i+1; the last element's
+    //      link is NULL — at 16 bytes/node the u16 reach is ±2046
+    //      nodes, so a 100K-node ring's wrap-around (δ ≈ −1.6M) is
+    //      UNREPRESENTABLE by construction; the honest N=100K
+    //      geometry is local chains, every |δ| = 8) for the scan/pack
+    //      and bulk-relocate rows, and a SELF-LINK block pair for the
+    //      per-node rows (δ = 0: position-free).
+    // K = 10 passes per round: N=100K nodes x K x R ops per phase
+    //      keeps every phase >= 100ms on the 1-ms clock (the W2F
+    //      discipline) while the BLOCK stays the brief's N=100K.
+    int kpass = 10
+    ptr ring = link_block_new<Node>(n)
+    int i = 0
+    while (i < n) {
+        ptr_store(link_elem<Node>(ring, i), 0, i * 3 + 1)
+        int j = i + 1
+        if (j < n) {
+            link_set<Node>(ring, i, 0, ring, j)
+        }
+        i = i + 1
+    }
+    ptr nb = link_block_new<Node>(n)
+    ptr nb2 = link_block_new<Node>(n)
+    i = 0
+    while (i < n) {
+        ptr_store(link_elem<Node>(nb, i), 0, 42)
+        link_set<Node>(nb, i, 0, nb, i)
+        i = i + 1
+    }
+    ptr rng_dst = link_block_new<Node>(n)
+
+    // ---- scan_bytes: R x { K x link_to_bytes(ring, 0, N) } — the O(N)
+    //      sender-side scan + pack. The chain is self-contained, so
+    //      the scan passes; the checksum reads the packed buffer's
+    //      first and last payload words (fixed: 1 and 299_998).
+    int expect_word = 1 + (n - 1) * 3 + 1
+    int total_ops = r1 * kpass * n
+    int ck = 0
+    int r = 0
+    int u0 = time_now_ms()
+    while (r < r1) {
+        int p = 0
+        while (p < kpass) {
+            ptr buf = link_to_bytes<Node>(ring, 0, n)
+            ck = ck + ptr_load(buf, 0) + ptr_load(buf, (n - 1) * 16)
+            p = p + 1
+        }
+        r = r + 1
+    }
+    int u1 = time_now_ms()
+    report("scan_bytes", (u1 - u0) * 1000000 / total_ops, u1 - u0, total_ops, ck / r1 - kpass * expect_word + kpass)
+
+    // ---- raw_bytes: the same pack WITHOUT the scan (the comparator).
+    ck = 0
+    r = 0
+    int v0 = time_now_ms()
+    while (r < r1) {
+        int p = 0
+        while (p < kpass) {
+            ptr buf = link_to_bytes_raw<Node>(ring, 0, n)
+            ck = ck + ptr_load(buf, 0) + ptr_load(buf, (n - 1) * 16)
+            p = p + 1
+        }
+        r = r + 1
+    }
+    int v1 = time_now_ms()
+    report("raw_bytes", (v1 - v0) * 1000000 / total_ops, v1 - v0, total_ops, ck / r1 - kpass * expect_word + kpass)
+
+    // ---- reloc_range: R x { K x relocate_range(ring, rng_dst, N) } —
+    //      the constant-shift exemption: scan + memcpy + boundary
+    //      re-encodes, never per-link re-encode of the interior.
+    //      Checksum: dst[0]'s chain link decodes to dst[1]'s address.
+    ck = 0
+    r = 0
+    int w0 = time_now_ms()
+    while (r < r1) {
+        int p = 0
+        while (p < kpass) {
+            relocate_range<Node>(ring, rng_dst, n)
+            if (link_get<Node>(rng_dst, 0, 0) == ptr_int(link_elem<Node>(rng_dst, 1))) {
+                ck = ck + 1
+            }
+            p = p + 1
+        }
+        r = r + 1
+    }
+    int w1 = time_now_ms()
+    report("reloc_range", (w1 - w0) * 1000000 / total_ops, w1 - w0, total_ops, ck)
+
+    // ---- reloc_node: R x { K x N x relocate_node(nb, i, nb2, i) } —
+    //      the per-node decode/copy/re-encode/round-check sequence.
+    ck = 0
+    r = 0
+    int x0 = time_now_ms()
+    while (r < r1) {
+        int p = 0
+        while (p < kpass) {
+            int k = 0
+            while (k < n) {
+                relocate_node<Node>(nb, k, nb2, k)
+                k = k + 1
+            }
+            if (link_get<Node>(nb2, 7, 0) == ptr_int(link_elem<Node>(nb2, 7))) {
+                ck = ck + 1
+            }
+            p = p + 1
+        }
+        r = r + 1
+    }
+    int x1 = time_now_ms()
+    report("reloc_node", (x1 - x0) * 1000000 / total_ops, x1 - x0, total_ops, ck)
+
+    // ---- raw_copy: R x { K x N x 2-word ptr copy nb -> nb2 } — the
+    //      unchecked by-value byte-copy the checker REJECTS on
+    //      HasSelfLink values: the floor the discipline prices
+    //      against.
+    ck = 0
+    r = 0
+    int y0 = time_now_ms()
+    while (r < r1) {
+        int p = 0
+        while (p < kpass) {
+            int k = 0
+            while (k < n) {
+                ptr sp = link_elem<Node>(nb, k)
+                ptr dp = link_elem<Node>(nb2, k)
+                ptr_store(dp, 0, ptr_load(sp, 0))
+                ptr_store(dp, 8, ptr_load(sp, 8))
+                k = k + 1
+            }
+            if (ptr_load(link_elem<Node>(nb2, 0), 0) == 42) {
+                ck = ck + 1
+            }
+            p = p + 1
+        }
+        r = r + 1
+    }
+    int y1 = time_now_ms()
+    report("raw_copy", (y1 - y0) * 1000000 / total_ops, y1 - y0, total_ops, ck)
+}

@@ -130,6 +130,12 @@ pub enum TokenKind {
     Region,
     PoolKw,
     HandleKw,
+    /* SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the self-relative
+       link type's keyword — `link<T, u16>` (the 2-byte self-relative
+       delta field; kills G1 §1 A2 → S4). A field of type link<T, u16>
+       at address A stores δ = target − A (decoded: target = A + δ);
+       the u16 range bounds |δ| ≤ 32767. */
+    LinkKw,
     Nursery,
 }
 

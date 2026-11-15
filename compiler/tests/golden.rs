@@ -1523,3 +1523,187 @@ fn gpool_alias_rejected_e0803() {
         "expected the handles-only discharge, got: {err}"
     );
 }
+
+// =====================================================================
+// SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the E0801 seam
+// closure — the self-relative `link<T, u16>` system (kills G1 §1 A2
+// → S4). The spec-as-written NoRelLinkCopy discipline (STRATA §2.4.6)
+// was silent on push/insert/match-binding, never gave relocate_node
+// semantics, and claimed "100% legal bulk copy" without a sender-side
+// self-containedness check. The closure: the link type + the HasSelfLink
+// predicate + the four by-value-copy rejection sites with the verbatim
+// diagnostics; relocate_node/relocate_range with decode/re-encode
+// semantics and the constant-shift exemption; the to_bytes scan.
+// =====================================================================
+
+/// The by-value-copy rejection, assignment form — the spec's rule 2
+/// (both the declaration-initialization `Node d = s` and the plain
+/// `d = s`), on the HasSelfLink predicate: 'Node' contains a
+/// self-relative link field, and the RHS reads stored bytes (an
+/// lvalue-load). → E0801 (assign).
+#[test]
+fn link_assign_lvalue_load_rejected_e0801() {
+    let err = compile_err("examples/link_assign_fail.sn");
+    assert!(err.contains("[E0801]"), "expected E0801, got: {err}");
+    assert!(
+        err.contains("E0801 (assign): cannot assign 's' to 'd' by value"),
+        "expected the E0801 (assign) headline on both sites, got: {err}"
+    );
+    assert!(
+        err.contains("'Node' contains a self-relative 'link<Node, u16>'"),
+        "expected the HasSelfLink verdict naming the type, got: {err}"
+    );
+    assert!(
+        err.contains("(the copied delta would decode against 'd''s address, not the link's target)"),
+        "expected the decode-against-the-wrong-address rationale, got: {err}"
+    );
+    assert!(
+        err.contains("pass 'ref<Node>', or use 'relocate_node(src, dst)'"),
+        "expected both discharges, got: {err}"
+    );
+}
+
+/// The by-value-copy rejection, pass-by-value form — a HasSelfLink
+/// lvalue-load into a by-value parameter copies the delta bytes to the
+/// parameter's address. → E0801 (call).
+#[test]
+fn link_pass_by_value_rejected_e0801() {
+    let err = compile_err("examples/link_passby_fail.sn");
+    assert!(err.contains("[E0801]"), "expected E0801, got: {err}");
+    assert!(
+        err.contains("E0801 (call): cannot pass 's' by value to parameter 'n' of 'take'"),
+        "expected the E0801 (call) headline naming value, parameter and function, got: {err}"
+    );
+    assert!(
+        err.contains("'Node' contains a self-relative 'link<Node, u16>'"),
+        "expected the HasSelfLink verdict, got: {err}"
+    );
+    assert!(
+        err.contains("(the copied delta would decode against the parameter's address, not the link's target)"),
+        "expected the parameter-address rationale, got: {err}"
+    );
+}
+
+/// THE A2 KILL — the push form, verbatim: `dst.push(src[0])` copies a
+/// HasSelfLink value by value (the pushed bytes carry deltas encoded
+/// against the SOURCE field addresses). The spec's exact diagnostic:
+/// E0801 (push), every clause asserted.
+#[test]
+fn link_push_lvalue_load_rejected_e0801_push_verbatim() {
+    let err = compile_err("examples/link_push_fail.sn");
+    assert!(
+        err.contains(
+            "E0801 (push): cannot push 'src[0]' into 'dst' by value because \
+             'Node' contains a self-relative 'link<Node, u16>' (the copied \
+             delta would decode against 'dst''s address, not the link's \
+             target); push a freshly constructed value (built in place via \
+             sret), pass 'ref<Node>', or use 'relocate_node(src, dst)'. [E0801]"
+        ),
+        "expected the verbatim E0801 (push) diagnostic, got: {err}"
+    );
+}
+
+/// The push rejection's discharge (rule 1, unchanged): the RHS that
+/// MATERIALIZES fresh (a call result — sret builds it at its final
+/// address) is not a load of stored bytes, so `xs.push(make())` stays
+/// legal, compiles, and runs; the pushed value carries only null links
+/// (position-independent), so the copy is sound.
+#[test]
+fn link_push_fresh_constructor_ok() {
+    assert_out("examples/link_push_fresh_ok.sn", "1\n7\n");
+}
+
+/// The by-value-copy rejection, match-binding form, verbatim: binding a
+/// HasSelfLink payload to a by-value pattern variable copies the delta
+/// bytes into the binding's address. E0801 (match), every clause
+/// asserted.
+#[test]
+fn link_match_binding_rejected_e0801_match_verbatim() {
+    let err = compile_err("examples/link_match_fail.sn");
+    assert!(
+        err.contains(
+            "E0801 (match): cannot bind 'n' by value from the match arm on \
+             'Tree': 'Tree' contains a self-relative 'link<Tree, u16>'; bind \
+             'ref<Tree>' in the pattern, or 'relocate_node' into a fresh \
+             destination. [E0801]"
+        ),
+        "expected the verbatim E0801 (match) diagnostic, got: {err}"
+    );
+}
+
+/// relocate_node's decode/re-encode semantics (spec (c)), end-to-end: an
+/// out-link keeps its absolute target (decode at the destination ==
+/// addr(a[1])), an in-link is fixed to the new interior (decode ==
+/// addr(b[0])), and the source is untouched — no delta is ever
+/// interpreted against an address it was not encoded for.
+#[test]
+fn link_relocate_node_in_out_links_ok() {
+    assert_out("examples/link_relocate_ok.sn", "true\ntrue\ntrue\ntrue\n");
+}
+
+/// The i16-range rejection: the re-encoded delta for the out-link's
+/// target exceeds [−32767, +32767] — the 2-byte link type cannot
+/// represent the moved geometry, and the relocation fail-fasts with the
+/// verbatim E0801 (relocate) diagnostic instead of silently truncating
+/// the delta (runtime check: the bound depends on the actual addresses).
+#[test]
+fn link_relocate_i16_range_fail_verbatim() {
+    let (code, stdout, stderr) = compile_run("examples/link_relocate_overflow_fail.sn");
+    assert_ne!(code, 0, "expected the relocation to fail fast, got: {stdout}");
+    assert!(
+        stderr.contains("E0801 (relocate): cannot relocate 'next' from 'a[0]' to 'b[0]'"),
+        "expected the verbatim E0801 (relocate) headline naming field, source and destination, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("the re-encoded delta ("),
+        "expected the re-encoded delta value in the diagnostic, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("exceeds the i16 range [−32767, +32767]"),
+        "expected the exact i16 range with the unicode minus, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("move the value and its target closer together, or use 'link<Node in pool, u32>'. [E0801]"),
+        "expected both discharges, got: {stderr}"
+    );
+}
+
+/// relocate_range — the constant-shift exemption: a self-contained
+/// block (every link intra-range) bulk-copies with every intra-range
+/// delta provably unchanged (target and field both shift by k), and
+/// all destination links decode to the correct destination neighbors.
+#[test]
+fn link_relocate_range_self_contained_ok() {
+    assert_out("examples/link_relocate_range_ok.sn", "4\n");
+}
+
+/// The to_bytes sender-side scan, REJECT side, verbatim: serializing a
+/// sub-slice whose link targets lie OUTSIDE the slice (cross-slice
+/// links — legal to hold, illegal to serialize) fail-fasts at pack time
+/// with E0801 (serialize) — the guaranteed load-time failure never
+/// happens.
+#[test]
+fn link_to_bytes_cross_slice_fail_verbatim() {
+    let (code, stdout, stderr) = compile_run("examples/link_to_bytes_fail.sn");
+    assert_ne!(code, 0, "expected the serialization to fail fast, got: {stdout}");
+    assert!(
+        stderr.contains(
+            "E0801 (serialize): cannot serialize 'xs[0..2]' to bytes: \
+             'link<Node, u16>' at element 1 ('next') decodes to an address \
+             outside the serialized slice (cross-slice links cannot survive \
+             relocation). Serialize the enclosing whole list, drop the link, \
+             or use 'link<Node in pool, u32>'. [E0801]"
+        ),
+        "expected the verbatim E0801 (serialize) diagnostic, got: {stderr}"
+    );
+}
+
+/// The to_bytes scan, ACCEPT side: the whole-list serialization of a
+/// self-contained block passes the scan (every target inside the
+/// serialized slice), packs the slice bytes, and the round trip is
+/// sound — the bulk-copy claim true by precondition instead of false by
+/// omission. Buffer readback verifies the packed bytes.
+#[test]
+fn link_to_bytes_whole_list_ok() {
+    assert_out("examples/link_to_bytes_ok.sn", "true\n4242\n");
+}

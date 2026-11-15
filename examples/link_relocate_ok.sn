@@ -1,0 +1,33 @@
+// SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): `relocate_node`'s
+// decode/re-encode semantics (spec (c)) — the runtime half of the E0801
+// seam closure. relocate_node(src, dst) decodes every link field AT THE
+// SOURCE (t = addr(f_src) + δ), re-encodes AT THE DESTINATION
+// (δ' = t − addr(f_dst)), and requires |δ'| ≤ 32767 — no 2-byte delta
+// is ever interpreted against an address it was not encoded for.
+//
+//   out-link  a[0].next → a[1]   (target OUTSIDE the moved value):
+//             keeps its ABSOLUTE target — decode(b,0,next) == addr(a[1]).
+//   in-link   a[0].self → a[0]   (target INSIDE the moved value):
+//             FIXED TO THE NEW INTERIOR — decode(b,0,self) == addr(b[0]).
+//
+// Both verified by readout below; the source stays untouched.
+
+record Node {
+    int val
+    link<Node> next
+    link<Node> selfl
+}
+
+fn main() {
+    ptr a = link_block_new<Node>(3)
+    ptr c = link_block_new<Node>(1)
+    ptr b = link_block_new<Node>(1)
+    link_set<Node>(a, 0, 0, a, 1)
+    link_set<Node>(a, 0, 1, a, 0)
+    link_set<Node>(a, 1, 0, c, 0)
+    relocate_node<Node>(a, 0, b, 0)
+    print(link_get<Node>(b, 0, 0) == ptr_int(link_elem<Node>(a, 1)))
+    print(link_get<Node>(b, 0, 1) == ptr_int(link_elem<Node>(b, 0)))
+    print(link_get<Node>(a, 0, 0) == ptr_int(link_elem<Node>(a, 1)))
+    print(link_get<Node>(b, 0, 0) != 0)
+}

@@ -1,0 +1,27 @@
+// SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the push rejection's
+// DISCHARGE side (rule 1, unchanged). The discriminating predicate is
+// rhs_is_lvalue_load: a freshly MATERIALIZED value (a call result —
+// sret builds it at its final address) is NOT a load of stored bytes,
+// so `xs.push(make())` stays legal and runs, while the lvalue-load
+// twin (`dst.push(src[0])`) fires E0801 (push) — see link_push_fail.sn.
+// The pushed value carries only NULL links (0 = null), which are
+// position-independent: the copy is sound.
+
+record Node {
+    int val
+    link<Node> next
+}
+
+fn make() -> Node {
+    Node n
+    n.val = 7
+    return n
+}
+
+fn main() {
+    list<Node> xs = []
+    xs.push(make())
+    print(xs.length())
+    Node m = make()
+    print(m.val)
+}

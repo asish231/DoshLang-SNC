@@ -217,6 +217,21 @@ declare i64 @sn_div_i64(i64, i64)
 declare i64 @sn_mod_i64(i64, i64)
 declare ptr @sn_obj_new(i64, i64, ptr)
 declare i64 @sn_enum_eq(ptr, ptr)
+; SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the self-relative link
+; system's runtime surface (kills G1 §1 A2 → S4). sn_relocate_node /
+; sn_relocate_range re-encode every link delta against the new field
+; address (|δ'| ≤ 32767 else the E0801 (relocate) fail-fast);
+; sn_link_to_bytes runs the O(N) sender-side self-containedness scan
+; before packing (raw=1 is the bench-only comparator that prices the
+; scan); the block/encode/decode helpers carry the contiguous link
+; carriers the discipline's tests and benchmarks drive.
+declare ptr @sn_link_block_new(i64, i64)
+declare void @sn_link_set(ptr, i64, i64, ptr, i64, i64, ptr, ptr)
+declare i64 @sn_link_get(ptr, i64, i64, i64)
+declare ptr @sn_link_elem(ptr, i64, i64)
+declare void @sn_relocate_node(ptr, i64, ptr, i64, i64, i64, i64, i64, i64, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr)
+declare void @sn_relocate_range(ptr, ptr, i64, i64, i64, i64, i64, i64, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr)
+declare ptr @sn_link_to_bytes(ptr, i64, i64, i64, i64, i64, i64, i64, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64)
 declare ptr @sn_chan_new()
 declare void @sn_chan_send(ptr, i64)
 declare i64 @sn_chan_recv(ptr)

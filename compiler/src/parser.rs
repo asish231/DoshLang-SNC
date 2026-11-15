@@ -636,6 +636,22 @@ impl Parser {
                 self.eat_gt()?;
                 Ok(TypeAst::Handle(Box::new(inner)))
             }
+            /* SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the
+               self-relative link type — `link<T, u16>` (the 2-byte
+               delta field). The explicit width must be u16 (the only
+               implemented form — the pool-relative `link<T in pool,
+               u32>` form is documented out of scope for this slice);
+               the one-arg shorthand `link<T>` means the same u16 form. */
+            TokenKind::LinkKw => {
+                self.bump();
+                self.eat(TokenKind::Lt)?;
+                let inner = self.parse_type()?;
+                if self.eat_if(TokenKind::Comma) {
+                    self.eat(TokenKind::U16Kw)?;
+                }
+                self.eat_gt()?;
+                Ok(TypeAst::Link(Box::new(inner)))
+            }
             TokenKind::Ident => {
                 let name = self.expect_ident()?;
                 if self.at(TokenKind::Lt) {
@@ -894,12 +910,54 @@ impl Parser {
             // arm the decl fell through to the expression path and
             // failed on the `<`.
             TokenKind::PoolKw | TokenKind::HandleKw => true,
+            // SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the
+            // self-relative link declaration (`link<Node> x = ...`)
+            // parses through the typed-decl path like pool/handle.
+            TokenKind::LinkKw => true,
             TokenKind::Ident => {
                 matches!(self.peek_n(1), TokenKind::Ident | TokenKind::Question)
-                    // `Foo<Bar> x = ...` — generic type application in a decl
-                    || (self.peek_n(1) == TokenKind::Lt && self.looks_like_type_args_at(1))
+                    // `Foo<Bar> x = ...` — generic type application in a
+                    // decl. SWARM RABBIT HOLE — Wave 11 / DIFF-5
+                    // (Impl-P): the close must be followed by the
+                    // DECLARED NAME — `link_set<Node>(...)` (a typed
+                    // intrinsic call in statement position: after the
+                    // `>` comes `(`) is an expression, not a decl, and
+                    // previously misparsed here.
+                    || (self.peek_n(1) == TokenKind::Lt
+                        && self
+                            .type_args_close_at(1)
+                            .map(|c| matches!(self.peek_n(c + 1), TokenKind::Ident))
+                            .unwrap_or(false))
             }
             _ => false,
+        }
+    }
+
+    /// The relative index of the `>` closing a type-argument list that
+    /// starts with `<` at `at`, or None (unbalanced / too long).
+    fn type_args_close_at(&self, at: usize) -> Option<usize> {
+        let mut i = at + 1; // first token after `<`
+        let mut depth = 1i32;
+        let mut steps = 0usize;
+        loop {
+            steps += 1;
+            if steps > 64 {
+                return None;
+            }
+            match self.peek_n(i) {
+                TokenKind::Lt => depth += 1,
+                TokenKind::Gt => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                TokenKind::GtEq | TokenKind::PlusEq | TokenKind::MinusEq
+                | TokenKind::StarEq | TokenKind::SlashEq
+                | TokenKind::LBrace | TokenKind::RBrace | TokenKind::Eof => return None,
+                _ => {}
+            }
+            i += 1;
         }
     }
 

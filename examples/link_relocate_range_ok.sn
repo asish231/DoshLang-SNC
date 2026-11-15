@@ -1,0 +1,38 @@
+// SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): relocate_range — the
+// CONSTANT-SHIFT EXEMPTION, the one bulk path where memcpy is sound
+// without per-link re-encode. With uniform k = dst_base − src_base,
+// every INTRA-RANGE link is delta-preserving (target and field both
+// shift by k ⇒ δ unchanged), so the per-link re-encode is provably the
+// identity for them; the range is bulk-copied after the O(N)
+// self-containedness scan, and range-boundary-crossing links are
+// re-encoded once with δ' = δ − k. Here the block is a self-contained
+// ring: every link is intra-range, so after relocate_range every
+// destination link decodes to the correct destination neighbor.
+
+record Node {
+    int val
+    link<Node> next
+}
+
+fn main() {
+    ptr a = link_block_new<Node>(4)
+    ptr b = link_block_new<Node>(4)
+    link_set<Node>(a, 0, 0, a, 1)
+    link_set<Node>(a, 1, 0, a, 2)
+    link_set<Node>(a, 2, 0, a, 3)
+    link_set<Node>(a, 3, 0, a, 0)
+    relocate_range<Node>(a, b, 4)
+    int ok = 0
+    int i = 0
+    while (i < 4) {
+        int j = i + 1
+        if (j == 4) {
+            j = 0
+        }
+        if (link_get<Node>(b, i, 0) == ptr_int(link_elem<Node>(b, j))) {
+            ok = ok + 1
+        }
+        i = i + 1
+    }
+    print(ok)
+}

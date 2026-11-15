@@ -911,6 +911,9 @@ pub fn type_name(t: &crate::types::Type) -> String {
         Named(n) => n.clone(),
         Pool(i) => format!("pool<{}>", type_name(i)),
         Handle(i) => format!("handle<{}>", type_name(i)),
+        // SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the
+        // self-relative link type, with its implemented width.
+        Link(i) => format!("link<{}, u16>", type_name(i)),
     }
 }
 
@@ -957,6 +960,9 @@ fn type_ast_name(t: &crate::ast::TypeAst) -> String {
         U64 => "u64".into(),
         Pool(i) => format!("pool<{}>", type_ast_name(i)),
         Handle(i) => format!("handle<{}>", type_ast_name(i)),
+        // SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the
+        // self-relative link type, with its implemented width.
+        Link(i) => format!("link<{}, u16>", type_ast_name(i)),
     }
 }
 

@@ -1,0 +1,24 @@
+// SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the E0801 seam
+// closure's MATCH-BINDING rejection (kills G1 §1 A2 → S4). Binding a
+// HasSelfLink payload to a by-value pattern variable copies the payload
+// bytes into the binding's address — the copied delta would decode
+// against the binding's address, not the link's target. The spec-as-
+// written rule 2 was silent on match arms; the closure adds them:
+// `Tree.node(n)` binds the `link<Tree, u16>` payload by value →
+// E0801 (match), the verbatim diagnostic.
+//
+// The legal discharges: bind a ref in the pattern, or relocate_node
+// into a fresh destination.
+
+enum Tree {
+    leaf
+    node(link<Tree>)
+}
+
+fn main() {
+    Tree t = Tree.node(0)
+    match (t) {
+        Tree.leaf { print("leaf") }
+        Tree.node(n) { print("node") }
+    }
+}

@@ -1,0 +1,27 @@
+// SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the to_bytes
+// sender-side self-containedness scan — E0801 (serialize), the verbatim
+// runtime diagnostic. "100% legal bulk copy" was false by omission: a
+// sub-slice can hold links whose |δ| < 32767 targets lie OUTSIDE the
+// slice (legal to HOLD — cross-slice links — but illegal to SERIALIZE:
+// the bytes cannot survive relocation). For every non-null link field
+// at element offset e inside the serialized range the scan decodes
+// t = field_addr + δ and requires slice_base ≤ t < slice_end; a
+// violation fail-fasts at pack time — the load-time verifier's
+// guaranteed-failure round trip never happens.
+//
+// Here xs[1].next targets ys[0] (another block — the cross-slice case),
+// and serializing xs[0..2] catches it at element 1.
+
+record Node {
+    int val
+    link<Node> next
+}
+
+fn main() {
+    ptr xs = link_block_new<Node>(3)
+    ptr ys = link_block_new<Node>(1)
+    link_set<Node>(xs, 0, 0, xs, 1)
+    link_set<Node>(xs, 1, 0, ys, 0)
+    ptr buf = link_to_bytes<Node>(xs, 0, 2)
+    print("unreachable")
+}

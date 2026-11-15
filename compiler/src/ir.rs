@@ -4114,6 +4114,202 @@ impl Cx<'_> {
                 self.line(&format!("{r} = call ptr @sn_zfix_state(ptr {p})"));
                 (r, Type::Ptr)
             }
+            /* SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the
+               self-relative link intrinsics (kills G1 §1 A2 → S4) — the
+               runtime half of the E0801 seam closure. The lowering
+               resolves the record's layout (size + the link fields'
+               offsets/names/target labels) from the explicit type
+               argument and emits the runtime calls the verbatim
+               diagnostics name; the source/destination labels come from
+               the call's argument expressions. relocate_node /
+               relocate_range re-encode every delta against the new
+               field address (|δ'| ≤ 32767 else the E0801 (relocate)
+               fail-fast); link_to_bytes runs the O(N) sender-side
+               self-containedness scan before packing (a cross-slice
+               link → the E0801 (serialize) fail-fast); the _raw twin is
+               the bench-only comparator that prices the scan. */
+            "link_block_new" | "link_set" | "link_get" | "link_elem" | "relocate_node"
+            | "relocate_range" | "link_to_bytes" | "link_to_bytes_raw" => {
+                // The record layout from the explicit type argument.
+                let Some(ta) = type_args.first() else {
+                    return ("0".into(), Type::Ptr);
+                };
+                let t = resolve_type_ast(ta, self.db);
+                let Type::Record(rn) = &t else {
+                    return ("0".into(), Type::Ptr);
+                };
+                let (sz, links) = match self.db.records.get(rn) {
+                    Some(r) => (
+                        r.size,
+                        r.fields
+                            .iter()
+                            .filter(|f| matches!(f.ty, Type::Link(_)))
+                            .map(|f| {
+                                let target = match &f.ty {
+                                    Type::Link(inner) => inner.to_string(),
+                                    _ => String::new(),
+                                };
+                                (f.offset, f.name.clone(), target)
+                            })
+                            .collect::<Vec<_>>(),
+                    ),
+                    None => return ("0".into(), Type::Ptr),
+                };
+                let offs: Vec<i64> = (0..4)
+                    .map(|j| links.get(j).map(|x| x.0).unwrap_or(-1))
+                    .collect();
+                // The fixed 4-slot name/target windows the runtime
+                // diagnostics read (empty slots are padded with "").
+                let mut names = Vec::new();
+                for j in 0..4 {
+                    let s = links.get(j).map(|x| x.1.clone()).unwrap_or_default();
+                    let (id, _) = self.intern(&s);
+                    names.push(format!("@.str.{id}"));
+                }
+                let mut targets = Vec::new();
+                for j in 0..4 {
+                    let s = links.get(j).map(|x| x.2.clone()).unwrap_or_default();
+                    let (id, _) = self.intern(&s);
+                    targets.push(format!("@.str.{id}"));
+                }
+                // The labels of an argument expression, for the
+                // diagnostics' {src}/{dst}/{xs} fills.
+                let lbl = |k: usize| link_arg_label(args, k);
+                match n {
+                    "link_block_new" => {
+                        let cnt = vs.first().map(|x| x.0.clone()).unwrap_or("0".into());
+                        let r = self.t();
+                        self.line(&format!(
+                            "{r} = call ptr @sn_link_block_new(i64 {cnt}, i64 {sz})"
+                        ));
+                        (r, Type::Ptr)
+                    }
+                    "link_elem" => {
+                        let b = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                        let bt = vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr);
+                        let p = self.as_ptr(b, bt);
+                        let i = vs.get(1).map(|x| x.0.clone()).unwrap_or("0".into());
+                        let r = self.t();
+                        self.line(&format!(
+                            "{r} = call ptr @sn_link_elem(ptr {p}, i64 {i}, i64 {sz})"
+                        ));
+                        (r, Type::Ptr)
+                    }
+                    "link_set" | "link_get" => {
+                        // The link-field ordinal is a checker-validated
+                        // integer literal: the offset is an immediate.
+                        let ord = match args.get(2) {
+                            Some(Arg::Pos(e)) => match &e.kind {
+                                ExprKind::Int(v) => (*v).clamp(0, 3),
+                                _ => 0,
+                            },
+                            _ => 0,
+                        };
+                        let off = offs[ord as usize];
+                        let fname = names[ord as usize].clone();
+                        let tname = targets[ord as usize].clone();
+                        let b0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                        let bt0 = vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr);
+                        let p0 = self.as_ptr(b0, bt0);
+                        let i0 = vs.get(1).map(|x| x.0.clone()).unwrap_or("0".into());
+                        if n == "link_set" {
+                            let b1 = vs.get(3).map(|x| x.0.clone()).unwrap_or("null".into());
+                            let bt1 = vs.get(3).map(|x| x.1.clone()).unwrap_or(Type::Ptr);
+                            let p1 = self.as_ptr(b1, bt1);
+                            let i1 = vs.get(4).map(|x| x.0.clone()).unwrap_or("0".into());
+                            self.line(&format!(
+                                "call void @sn_link_set(ptr {p0}, i64 {i0}, i64 {off}, \
+                                 ptr {p1}, i64 {i1}, i64 {sz}, ptr {fname}, ptr {tname})"
+                            ));
+                            ("0".into(), Type::Void)
+                        } else {
+                            let r = self.t();
+                            self.line(&format!(
+                                "{r} = call i64 @sn_link_get(ptr {p0}, i64 {i0}, i64 {off}, i64 {sz})"
+                            ));
+                            (r, Type::Int)
+                        }
+                    }
+                    "relocate_node" => {
+                        let nl = links.len() as i64;
+                        let src_label = format!("{}[{}]", lbl(0), lbl(1));
+                        let dst_label = format!("{}[{}]", lbl(2), lbl(3));
+                        let (sid, _) = self.intern(&src_label);
+                        let (did, _) = self.intern(&dst_label);
+                        let b0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                        let bt0 = vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr);
+                        let p0 = self.as_ptr(b0, bt0);
+                        let i0 = vs.get(1).map(|x| x.0.clone()).unwrap_or("0".into());
+                        let b1 = vs.get(2).map(|x| x.0.clone()).unwrap_or("null".into());
+                        let bt1 = vs.get(2).map(|x| x.1.clone()).unwrap_or(Type::Ptr);
+                        let p1 = self.as_ptr(b1, bt1);
+                        let i1 = vs.get(3).map(|x| x.0.clone()).unwrap_or("0".into());
+                        self.line(&format!(
+                            "call void @sn_relocate_node(ptr {p0}, i64 {i0}, ptr {p1}, i64 {i1}, \
+                             i64 {sz}, i64 {nl}, i64 {}, i64 {}, i64 {}, i64 {}, \
+                             ptr {}, ptr {}, ptr {}, ptr {}, \
+                             ptr {}, ptr {}, ptr {}, ptr {}, \
+                             ptr @.str.{sid}, ptr @.str.{did})",
+                            offs[0], offs[1], offs[2], offs[3],
+                            names[0], names[1], names[2], names[3],
+                            targets[0], targets[1], targets[2], targets[3],
+                        ));
+                        ("0".into(), Type::Void)
+                    }
+                    "relocate_range" => {
+                        let nl = links.len() as i64;
+                        let src_label = lbl(0);
+                        let dst_label = lbl(1);
+                        let (sid, _) = self.intern(&src_label);
+                        let (did, _) = self.intern(&dst_label);
+                        let b0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                        let bt0 = vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr);
+                        let p0 = self.as_ptr(b0, bt0);
+                        let b1 = vs.get(1).map(|x| x.0.clone()).unwrap_or("null".into());
+                        let bt1 = vs.get(1).map(|x| x.1.clone()).unwrap_or(Type::Ptr);
+                        let p1 = self.as_ptr(b1, bt1);
+                        let cnt = vs.get(2).map(|x| x.0.clone()).unwrap_or("0".into());
+                        self.line(&format!(
+                            "call void @sn_relocate_range(ptr {p0}, ptr {p1}, i64 {cnt}, \
+                             i64 {sz}, i64 {nl}, i64 {}, i64 {}, i64 {}, i64 {}, \
+                             ptr {}, ptr {}, ptr {}, ptr {}, \
+                             ptr {}, ptr {}, ptr {}, ptr {}, \
+                             ptr @.str.{sid}, ptr @.str.{did})",
+                            offs[0], offs[1], offs[2], offs[3],
+                            names[0], names[1], names[2], names[3],
+                            targets[0], targets[1], targets[2], targets[3],
+                        ));
+                        ("0".into(), Type::Void)
+                    }
+                    _ => {
+                        // link_to_bytes / link_to_bytes_raw: the raw twin
+                        // is the bench-only comparator that prices the
+                        // sender-side scan (raw=1 skips the scan).
+                        let nl = links.len() as i64;
+                        let xs_label = lbl(0);
+                        let (xid, _) = self.intern(&xs_label);
+                        let b0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                        let bt0 = vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr);
+                        let p0 = self.as_ptr(b0, bt0);
+                        let a = vs.get(1).map(|x| x.0.clone()).unwrap_or("0".into());
+                        let b = vs.get(2).map(|x| x.0.clone()).unwrap_or("0".into());
+                        let raw = if n == "link_to_bytes_raw" { 1 } else { 0 };
+                        let r = self.t();
+                        self.line(&format!(
+                            "{r} = call ptr @sn_link_to_bytes(ptr {p0}, i64 {a}, i64 {b}, \
+                             i64 {sz}, i64 {nl}, i64 {}, i64 {}, i64 {}, i64 {}, \
+                             ptr @.str.{xid}, \
+                             ptr {}, ptr {}, ptr {}, ptr {}, \
+                             ptr {}, ptr {}, ptr {}, ptr {}, \
+                             i64 {raw})",
+                            offs[0], offs[1], offs[2], offs[3],
+                            names[0], names[1], names[2], names[3],
+                            targets[0], targets[1], targets[2], targets[3],
+                        ));
+                        (r, Type::Ptr)
+                    }
+                }
+            }
             "alloc" => {
                 let r = self.t();
                 self.line(&format!("{r} = call ptr @sn_alloc(i64 {})", vs[0].0));
@@ -5671,12 +5867,35 @@ fn ll_field_ty(t: &Type) -> (&'static str, bool) {
     }
 }
 
+/// SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the label of a link
+/// intrinsic's argument expression — the {src}/{dst}/{xs} fills of the
+/// verbatim E0801 diagnostics carry the call site's own names
+/// (`a[0]`, `b[0]`, `xs`).
+fn link_arg_label(args: &[Arg], k: usize) -> String {
+    fn go(e: &Expr) -> String {
+        match &e.kind {
+            ExprKind::Int(v) => v.to_string(),
+            ExprKind::Ident(s) => s.clone(),
+            ExprKind::Index { base, index } => format!("{}[{}]", go(base), go(index)),
+            ExprKind::Member { base, name } => format!("{}.{}", go(base), name),
+            _ => "expr".to_string(),
+        }
+    }
+    match args.get(k) {
+        Some(Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. }) => go(e),
+        None => "expr".to_string(),
+    }
+}
+
 fn llty(t: &Type) -> &'static str {
     match t {
         Type::Record(_) => "ptr",
         Type::Named(n) if n == "future" => "ptr",
         Type::Float => "double",
         Type::Enum(en) if is_algebraic_enum_type(en) => "ptr",
+        // SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): link<T, u16> is
+        // the 2-byte delta field itself.
+        Type::Link(_) => "i16",
         _ if t.is_ptr() || matches!(t, Type::Optional(_) | Type::None | Type::Any) => "ptr",
         _ => "i64",
     }

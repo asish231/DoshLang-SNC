@@ -211,6 +211,15 @@ pub enum TypeAst {
     Ref(Box<TypeAst>),
     Pool(Box<TypeAst>),
     Handle(Box<TypeAst>),
+    /// SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the self-relative
+    /// link — `link<T, u16>` (shorthand `link<T>`). A field of this type
+    /// at address A stores δ = target − A (decoded: target = A + δ); the
+    /// u16 width bounds |δ| ≤ 32767. Makes the containing struct
+    /// HasSelfLink: its values may only be constructed in place (sret),
+    /// relocated via re-encode, or copied by reference — a by-value copy
+    /// of the stored bytes would decode every delta against the wrong
+    /// address (E0801, kills G1 §1 A2 → S4).
+    Link(Box<TypeAst>),
     Optional(Box<TypeAst>),
     Tuple(Vec<TypeAst>),
     Fn {

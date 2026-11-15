@@ -465,6 +465,11 @@ fn keyword(text: &str) -> TokenKind {
         "nursery" => TokenKind::Nursery,
         "pool" => TokenKind::PoolKw,
         "handle" => TokenKind::HandleKw,
+        // SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the self-relative
+        // link type — `link<T, u16>` (also accepted: the one-arg shorthand
+        // `link<T>`; u16 is the only implemented width — the pool-relative
+        // `link<T in pool, u32>` form is documented out of scope).
+        "link" => TokenKind::LinkKw,
         _ => TokenKind::Ident,
     }
 }

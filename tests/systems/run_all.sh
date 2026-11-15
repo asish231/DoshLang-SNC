@@ -641,9 +641,64 @@ else
 fi
 
 echo ""
+
+# 19. The self-relative link system — the DIFF-5 runtime mechanics
+#     (SWARM RABBIT HOLE, Wave 11, Impl-P; kills G1 §1 A2 → S4). The
+#     E0801 seam closure's runtime half: relocate_node's decode/re-
+#     encode (in-links fixed to the new interior, out-links re-based to
+#     their absolute targets), relocate_range (the constant-shift bulk
+#     exemption) BIT-IDENTICAL to the per-link re-encode reference
+#     (memcmp over the whole block), the to_bytes sender-side
+#     self-containedness scan accepting exactly the self-contained
+#     ranges and rejecting exactly the cross-slice ones (the E0801
+#     (serialize) fail-fast, fork'd probe), the round trip (bytes ->
+#     memcpy -> constant-shift relocation), and the i16-bound rejection
+#     (E0801 (relocate), fork'd). Built twice: plain, then ASan (19b).
+echo "-----------------------------------------------------------------"
+echo "19. SELF-RELATIVE LINK SYSTEM, RUNTIME MECHANICS (test_link.c)"
+echo "-----------------------------------------------------------------"
+OUT_LINK_C="/tmp/snc_test_link_c"
+rm -f "$OUT_LINK_C"
+if clang -O1 -g -o "$OUT_LINK_C" "$DIR/test_link.c" "$ROOT/compiler/runtime.c" -lpthread 2>/dev/null; then
+    OUTPUT=$("$OUT_LINK_C")
+    echo "$OUTPUT"
+    if echo "$OUTPUT" | grep -q "PASS:"; then
+        echo ">>> test_link(.c): PASSED"
+    else
+        echo ">>> test_link(.c): FAILED"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> test_link(.c): BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+echo ""
+
+# 19b. The ASan stress pass of the same link-system test
+echo "-----------------------------------------------------------------"
+echo "19b. SELF-RELATIVE LINK SYSTEM, ASAN STRESS (test_link.c)"
+echo "-----------------------------------------------------------------"
+OUT_LINK_ASAN="/tmp/snc_test_link_c_asan"
+rm -f "$OUT_LINK_ASAN"
+if clang -O1 -g -fsanitize=address -o "$OUT_LINK_ASAN" "$DIR/test_link.c" "$ROOT/compiler/runtime.c" -lpthread 2>/dev/null; then
+    OUTPUT=$(ASAN_OPTIONS=detect_leaks=0 "$OUT_LINK_ASAN" 2>&1)
+    echo "$OUTPUT"
+    if echo "$OUTPUT" | grep -q "PASS:"; then
+        echo ">>> test_link(.c ASan): PASSED (no ASan reports over the lane-backed carriers / re-encode paths / scan+pack)"
+    else
+        echo ">>> test_link(.c ASan): FAILED"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> test_link(.c ASan): BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+echo ""
 echo "================================================================="
 if [ $FAILURES -eq 0 ]; then
-    echo "  ALL SYSTEMS & SECURITY TESTS PASSED (27 checks)"
+    echo "  ALL SYSTEMS & SECURITY TESTS PASSED (29 checks)"
     exit 0
 else
     echo "  $FAILURES SYSTEMS TESTS FAILED"

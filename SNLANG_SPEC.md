@@ -346,6 +346,7 @@ SNlang enforces strict compile-time safety checks on references and pointers wit
 2. **Collection Invalidation Protection:** While an element of a `list` or `map` is borrowed (`ref<T>`), mutating operations (`push`, `insert`, `clear`) are rejected at compile time: `cannot mutate '{name}' while borrowed by '{borrower}'`.
 3. **Affine Memory Deallocation:** Calling `free(p)` consumes the pointer. Subsequent reads, writes, or deallocations trigger `use of freed pointer '{name}'` or `double free of '{name}'`.
 4. **Thread Isolation in `spawn`:** Passing unsynchronized mutable references or unlocked blueprints across threads in `spawn` is blocked at compile time to prevent data races. Global pools carry their own mode discipline (frozen by default; E0803.1/.2/.3 — see the pool section above): a handle into a frozen pool is Sendable (no legal write path), a `thread_local` pool's handle never leaves its thread, and a `synchronized` pool's every op takes its lock.
+5. **Self-Relative Links (the E0801 copy discipline):** A `link<T, u16>` field stores δ = target − field_address (decoded: target = field_address + δ; |δ| ≤ 32767). A value of such a type is position-dependent BY CONSTRUCTION — a byte-copy preserves deltas encoded for the SOURCE addresses, which then decode against the copy's address. See **§10.5 Self-Relative Links** below for the full discipline.
 
 See `tests/memory_safety/` for executable exploit test suites and comparison with Rust.
 
@@ -426,6 +427,79 @@ SNlang includes zero-overhead native allocators for high-throughput systems prog
 | Free memory        | `free(p);`              | `free(p)`                |
 
 With this system, a programmer can build **any** data structure (linked lists, stacks, queues, trees, hash maps) from scratch — without fighting cryptic syntax.
+
+---
+
+## 10.5 Self-Relative Links — `link<T, u16>` (the E0801 copy discipline)
+
+**SWARM RABBIT HOLE — Wave 11 / DIFF-5; kills G1 §1 A2 → S4 (STRATA §2.4.6's NoRelLinkCopy closure).**
+
+### The type
+
+`link<T, u16>` is a 2-byte **self-relative delta field**. A value of the type at address `A` stores `δ = target − A` — decoded: `target = A + δ` (the i16 sign extension *is* the decode). The u16 width bounds the reach: `|δ| ≤ 32767` (at 16 bytes/record, ±2046 elements). A raw `0` is the **null link** (position-free — copies of null-linked values are sound anywhere).
+
+```sn
+record Node {
+    int val            // offset 0
+    link<Node> next    // offset 8 — a 2-byte delta to another Node
+}
+```
+
+The value is position-dependent **by construction**: a byte-copy preserves deltas encoded for the *source* field addresses, and those copied deltas then decode against the *copy's* address — every link silently retargets. The discipline below makes that a checked error instead of a silent corruption.
+
+### The HasSelfLink predicate
+
+A type is **HasSelfLink** when a by-value copy of it moves link-bearing bytes: `link<T, u16>` itself; a record/blueprint/tuple with any by-value link-bearing field (nested records recurse; container-header fields — `list`/`map`/`str` — do **not** propagate: copying a header does not move the elements); and `list<E>` propagates `HasSelfLink(E)` — the *element* is what a push/pop/copy moves.
+
+### The rejection set (E0801, compile-time)
+
+**E0801 fires iff `has_self_link(type_of(rhs)) ∧ rhs_is_lvalue_load(rhs)`** — the RHS *reads* a HasSelfLink value from storage that survives the copy (Ident/Index/Member reads), vs. *constructs* one fresh (constructor/literal/call result — the DPS `sret` destination-projection semantics: the value is built in place at its final address, so its deltas encode correctly). Four sites:
+
+| Site | Rejected | Legal discharge |
+|---|---|---|
+| Assignment / decl-init | `d = s`, `Node d = s` | `d = make()` (fresh, sret) |
+| Pass-by-value | `take(s)` | `take_ref(ref<Node> r)` / `inout` |
+| push/insert | `dst.push(src[0])` | `xs.push(make())` (fresh), `push_ref`, `relocate_node` |
+| match-binding | `Tree.node(n)` (by-value pattern) | `ref<Tree>` pattern binding |
+
+```
+E0801 (push): cannot push '{src[i]}' into '{dst}' by value because '{T}' contains a
+       self-relative 'link<{T}, u16>' (the copied delta would decode against '{dst}''s
+       address, not the link's target); push a freshly constructed value (built in place
+       via sret), pass 'ref<{T}>', or use 'relocate_node(src, dst)'. [E0801]
+
+E0801 (match): cannot bind '{b}' by value from the match arm on '{T}': '{T}' contains a
+       self-relative 'link<{T}, u16>'; bind 'ref<{T}>' in the pattern, or 'relocate_node'
+       into a fresh destination. [E0801]
+```
+
+(The assignment flavor is `E0801 (assign): cannot assign '{src}' to '{dst}' by value …`; the pass-by-value flavor is `E0801 (call): cannot pass '{src}' by value to parameter '{p}' of '{f}' …`.)
+
+### The legal movers (runtime)
+
+- **`relocate_node<T>(src, si, dst, di)`** — decode every link at the source (`t = addr(f_src) + δ`), byte-copy, re-encode at the destination (`δ' = t − addr(f_dst)`). Links targeting **inside** the moved value are fixed to the new interior; links targeting **outside** keep their absolute target (re-based: `δ' = δ − (addr(f_dst) − addr(f_src))`). Requires `|δ'| ≤ 32767`:
+  ```
+  E0801 (relocate): cannot relocate '{f}' from '{src}' to '{dst}': the re-encoded delta
+         ({d'}) for its link target exceeds the i16 range [−32767, +32767]; move the value
+         and its target closer together, or use 'link<{T} in pool, u32>'. [E0801]
+  ```
+- **`relocate_range<T>(src, dst, n)`** — the **constant-shift exemption**: with uniform `k = dst_base − src_base`, every *intra-range* link is delta-preserving (target and field both shift by `k` ⇒ δ unchanged), so the per-link re-encode is provably the identity for them and the range bulk-copies **iff self-contained** (the same scan as to_bytes); range-boundary-crossing links re-encode once with `δ' = δ − k`. The only bulk path where memcpy is sound without per-link re-encode.
+- **`link_to_bytes<T>(base, a, b)`** — the O(N) **sender-side self-containedness scan** before packing: for every non-null link inside the serialized range, decode `t = field_addr + δ` and require `slice_base ≤ t < slice_end`. Cross-slice links (targets in other lists on the same lane — legal to *hold*, illegal to *serialize*: the bytes cannot survive relocation) fail fast:
+  ```
+  E0801 (serialize): cannot serialize '{xs}[{a}..{b}]' to bytes: 'link<{U}, u16>' at
+         element {i} ('{field}') decodes to an address outside the serialized slice
+         (cross-slice links cannot survive relocation). Serialize the enclosing whole
+         list, drop the link, or use 'link<{U} in pool, u32>'. [E0801]
+  ```
+  This makes "100% legal bulk copy" **true by precondition** instead of false by omission — §4.5's load-time verifier would otherwise receive a guaranteed failure.
+
+Supporting carriers: `link_block_new<T>(n)` (a zeroed contiguous block — every field starts null), `link_elem<T>(block, i)` (slot address), `link_set<T>(block, i, field, tblock, ti)` (the only checked writer — it encodes against the field's actual address) and `link_get<T>(block, i, field)` (the decode readout).
+
+### The soundness argument
+
+Every copy of a HasSelfLink value now either **constructs it fresh at its final address** (sret — deltas encode correctly by construction), **re-encodes every delta against the new field address** (`relocate_node`/`relocate_range`, with the i16 range checked at every re-encode), or **is rejected** (E0801 at the four by-value sites). No 2-byte delta is ever interpreted against an address it was not encoded for; the `to_bytes` scan extends the same invariant across the serialization boundary.
+
+**Out of scope for this slice (documented):** the pool-relative form `link<T in pool, u32>` (a 4-byte pool-base-relative delta that survives arbitrary copies — named in every diagnostic as the unbounded-range discharge); automatic codegen encode/decode on user-struct field access (the `link_*` intrinsics are the explicit surface — `link_set` encodes against the actual field address, `link_get` decodes — while the checker's rejections hold for ALL copies of link-bearing values regardless of how they were built); and `from_bytes` re-hydration (the pack side and the scan are this slice's kill; the load side remains §4.5's two-pass verifier as spec'd).
 
 ---
 

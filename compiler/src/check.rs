@@ -224,6 +224,77 @@ impl CheckDb {
             vars.iter().any(|v| !v.fields.is_empty())
         })
     }
+
+    /* SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the HasSelfLink
+       predicate (kills G1 §1 A2 → S4) — does a BY-VALUE copy of a value
+       of this type move bytes that encode a self-relative link delta?
+
+       - link<T, u16>: TRUE — the 2-byte value IS the delta; any copy of
+         it decodes against the copy's address.
+       - record/blueprint/tuple: TRUE iff any field is by-value
+         link-bearing — a nested record's bytes move with the outer
+         copy, so the predicate recurses into nested RECORD fields;
+         container-header fields (list/map/chan/pool/str) do NOT
+         propagate: copying the header pointer does not move the
+         elements, so their deltas stay put.
+       - list<E>: propagates has_self_link(E) — the ELEMENT is what a
+         push/pop/copy moves (the spec's "list<HasSelfLink> element
+         types propagate it" clause); a whole-list alias copies only
+         the header, so container copies of the list itself are the
+         conservative-but-sound case the assignment site rejects.
+       - everything else: FALSE. */
+    pub fn has_self_link(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Link(_) => true,
+            Type::List(e) => self.has_self_link(e),
+            Type::Record(n) => self
+                .records
+                .get(n)
+                .map(|r| r.fields.iter().any(|f| self.field_moves_link_bytes(&f.ty)))
+                .unwrap_or(false),
+            Type::Blueprint(n) => self
+                .blueprints
+                .get(n)
+                .map(|b| b.fields.iter().any(|f| self.field_moves_link_bytes(&f.ty)))
+                .unwrap_or(false),
+            Type::Tuple(ts) => ts.iter().any(|t| self.has_self_link(t)),
+            _ => false,
+        }
+    }
+
+    /// The record-field form of the predicate: a field's bytes move with
+    /// a copy of the containing record iff the field is by-value
+    /// link-bearing (a link field, or a nested record/tuple that is).
+    /// Container-header fields (list/map/chan/pool/str) are
+    /// pointer-semantic — their ELEMENTS do not move with the record.
+    fn field_moves_link_bytes(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Link(_) => true,
+            Type::Record(_) | Type::Tuple(_) => self.has_self_link(ty),
+            _ => false,
+        }
+    }
+
+    /// DIFF-5 (Impl-P): the link-field layout of a record — (offset,
+    /// name, target-type label) for every link<T, u16> field, in field
+    /// order. Consumed by the checker's intrinsic arms and by the ir.rs
+    /// lowering (the runtime re-encode/scan calls carry it).
+    pub fn link_fields_of(&self, rec: &str) -> Vec<(i64, String, String)> {
+        let Some(r) = self.records.get(rec) else {
+            return Vec::new();
+        };
+        r.fields
+            .iter()
+            .filter(|f| matches!(f.ty, Type::Link(_)))
+            .map(|f| {
+                let target = match &f.ty {
+                    Type::Link(t) => t.to_string(),
+                    _ => String::new(),
+                };
+                (f.offset, f.name.clone(), target)
+            })
+            .collect()
+    }
 }
 
 struct Checker<'a> {
@@ -1805,6 +1876,11 @@ pub fn resolve_type_ast(t: &TypeAst, db: &CheckDb) -> Type {
         TypeAst::Ref(inner) => Type::Ref(Box::new(resolve_type_ast(inner, db))),
         TypeAst::Pool(inner) => Type::Pool(Box::new(resolve_type_ast(inner, db))),
         TypeAst::Handle(inner) => Type::Handle(Box::new(resolve_type_ast(inner, db))),
+        // SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the link's inner
+        // type is the TARGET type — resolve it through the record table so
+        // `link<Node>` names the record (the runtime diagnostics and the
+        // HasSelfLink predicate both read the resolved target).
+        TypeAst::Link(inner) => Type::Link(Box::new(resolve_type_ast(inner, db))),
         TypeAst::Optional(inner) => Type::Optional(Box::new(resolve_type_ast(inner, db))),
         TypeAst::Tuple(ts) => Type::Tuple(ts.iter().map(|x| resolve_type_ast(x, db)).collect()),
         TypeAst::Fn { params, ret } => Type::Fn {
@@ -1823,6 +1899,13 @@ fn layout_record(db: &mut CheckDb, r: &RecordItem, diag: &mut Diagnostics) {
             diag.error(r.span, format!("duplicate field '{}'", f.name));
         }
         let ty = resolve_type_ast(&f.ty, db);
+        // SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): a link<T, u16>
+        // field is a 2-byte delta — 2-align it in packed records so the
+        // u16 load/store in the runtime (sn_link_*) is never unaligned.
+        // (Non-packed records slot every field 8-aligned already.)
+        if matches!(ty, Type::Link(_)) && r.packed && offset % 2 != 0 {
+            offset += 1;
+        }
         fields.push(FieldInfo {
             name: f.name.clone(),
             ty: ty.clone(),
@@ -2213,10 +2296,15 @@ impl Checker<'_> {
                         val_ty.clone().unwrap_or(Type::Int)
                     };
                     let decl_ty = if matches!(decl_ty, Type::Named(_)) {
-                        val_ty.unwrap_or(decl_ty)
+                        val_ty.clone().unwrap_or(decl_ty)
                     } else {
                         decl_ty
                     };
+                    // SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the
+                    // value's type, kept for the E0801 declaration-site
+                    // check below (val_ty is consumed by the Named
+                    // resolution above).
+                    let val_ty_kept = val_ty.clone();
                     Self::check_int_literal_range(&decl_ty, value.as_ref(), *span, self.diag);
                     if let Type::List(elem) = &decl_ty {
                         if let Some(Expr { kind: ExprKind::List(els), .. }) = value.as_ref() {
@@ -2238,6 +2326,40 @@ impl Checker<'_> {
                     }
                     let decl_ty_clone = decl_ty.clone();
                     self.declare(name, decl_ty, *is_const, *span);
+                    // SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the
+                    // E0801 by-value-copy rejection, DECLARATION-
+                    // INITIALIZATION form (kills G1 §1 A2 → S4).
+                    // `Node d = s` copies the HasSelfLink value's bytes
+                    // (sn_record_copy in the lowering) to d's address:
+                    // every 2-byte delta in the copy would decode
+                    // against d's address, not the link's target. The
+                    // spec's rule-2 copy — the closure extends it from
+                    // plain assignment to the declaration initializer.
+                    // Fires iff has_self_link(type_of(rhs)) ∧ the RHS is
+                    // an lvalue-load (a call/literal RHS materializes
+                    // fresh — sret builds it in place — and stays
+                    // legal; the fresh-construction discharge is
+                    // link_push_fresh_ok.sn).
+                    if let Some(v) = value {
+                        if let Some(vt) = &val_ty_kept {
+                            if self.db.has_self_link(vt) && Self::is_lvalue_load(v) {
+                                let src = Self::expr_label(v);
+                                let t = vt.to_string();
+                                self.diag.error(
+                                    v.span,
+                                    format!(
+                                        "E0801 (assign): cannot assign '{src}' to '{name}' by \
+                                         value because '{t}' contains a self-relative \
+                                         'link<{t}, u16>' (the copied delta would decode \
+                                         against '{name}''s address, not the link's target); \
+                                         assign a freshly constructed value (built in place \
+                                         via sret), pass 'ref<{t}>', or use \
+                                         'relocate_node(src, dst)'. [E0801]"
+                                    ),
+                                );
+                            }
+                        }
+                    }
                     // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the
                     // handle-home provenance side table (kills G1 §1 A6c).
                     // The pool method calls produce handles, so the
@@ -2531,6 +2653,34 @@ impl Checker<'_> {
                         }
                     }
                 }
+                // SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the
+                // E0801 by-value-copy rejection, ASSIGNMENT form (the
+                // spec's rule 2, kills G1 §1 A2 → S4). `d = s` where s
+                // is an lvalue-load of a HasSelfLink type copies the
+                // stored bytes to d's address — the copied deltas
+                // would decode against d's address, not the link's
+                // target. Fires iff has_self_link(type_of(rhs)) ∧
+                // rhs_is_lvalue_load(rhs); a freshly materializing RHS
+                // (call/literal — sret) stays legal.
+                if *op == AssignOp::Eq
+                    && self.db.has_self_link(&vt)
+                    && Self::is_lvalue_load(value)
+                {
+                    let src = Self::expr_label(value);
+                    let dst = Self::expr_label(target);
+                    let t = vt.to_string();
+                    self.diag.error(
+                        value.span,
+                        format!(
+                            "E0801 (assign): cannot assign '{src}' to '{dst}' by value \
+                             because '{t}' contains a self-relative 'link<{t}, u16>' (the \
+                             copied delta would decode against '{dst}''s address, not the \
+                             link's target); assign a freshly constructed value (built in \
+                             place via sret), pass 'ref<{t}>', or use \
+                             'relocate_node(src, dst)'. [E0801]"
+                        ),
+                    );
+                }
                 if *op == AssignOp::Eq {
                     if !tt.assignable_from(&vt, &self.db.blueprints) {
                         // allow Int literal -> fixed int / float, checked for range below
@@ -2817,6 +2967,46 @@ impl Checker<'_> {
                                                                 Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. } => e,
                                                             };
                                                             if let ExprKind::Ident(var_name) = &arg_e.kind {
+                                                                // SWARM RABBIT HOLE — Wave 11
+                                                                // / DIFF-5 (Impl-P): the E0801
+                                                                // by-value-copy rejection,
+                                                                // MATCH-BINDING form (the spec's
+                                                                // verbatim diagnostic, kills G1
+                                                                // §1 A2 → S4). The spec-as-written
+                                                                // rule 2 was silent on match arms:
+                                                                // binding a HasSelfLink payload to
+                                                                // a by-value pattern variable
+                                                                // copies the payload bytes into
+                                                                // the binding's address — the
+                                                                // copied delta would decode against
+                                                                // the binding's address, not the
+                                                                // link's target. Fires iff
+                                                                // has_self_link(payload) ∧ the
+                                                                // pattern arg is a positional
+                                                                // (by-value) binding; an `inout`
+                                                                // (ref) pattern binding and `_`
+                                                                // (no binding) stay legal.
+                                                                if var_name != "_"
+                                                                    && matches!(a, Arg::Pos(_))
+                                                                    && self.db.has_self_link(
+                                                                        &v_info.fields[i].1,
+                                                                    )
+                                                                {
+                                                                    self.diag.error(
+                                                                        arg_e.span,
+                                                                        format!(
+                                                                            "E0801 (match): cannot \
+                                                                             bind '{var_name}' by \
+                                                                             value from the match \
+                                                                             arm on '{en}': '{en}' \
+                                                                             contains a self-relative \
+                                                                             'link<{en}, u16>'; bind \
+                                                                             'ref<{en}>' in the pattern, \
+                                                                             or 'relocate_node' into a \
+                                                                             fresh destination. [E0801]"
+                                                                        ),
+                                                                    );
+                                                                }
                                                                 if var_name != "_" {
                                                                     self.scopes.last_mut().unwrap().insert(
                                                                         var_name.clone(),
@@ -3894,6 +4084,133 @@ impl Checker<'_> {
         }
     }
 
+    /* SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the link
+       intrinsics' checker surface (kills G1 §1 A2 → S4). The
+       self-relative link system's runtime half: the block carriers
+       (contiguous records with `link<T, u16>` fields — the
+       self-contained slice of the spec's model), the position-checked
+       encode/decode, relocate_node/relocate_range (the re-encode
+       semantics + the constant-shift exemption), and the to_bytes
+       sender-side scan. The checker validates the record type
+       argument's layout (link fields, the ≤4 bound the runtime calls
+       carry) and the static link-field ordinals; the ir.rs lowering
+       reads the same layout and emits the runtime calls with the
+       offsets, field names, target labels and source labels the
+       verbatim E0801 diagnostics name. */
+    fn check_link_intrinsic(
+        &mut self,
+        n: &str,
+        type_args: &[TypeAst],
+        args: &[Arg],
+        span: Span,
+    ) -> Option<Type> {
+        const LINK_INTRINSICS: [&str; 8] = [
+            "link_block_new",
+            "link_set",
+            "link_get",
+            "link_elem",
+            "relocate_node",
+            "relocate_range",
+            "link_to_bytes",
+            "link_to_bytes_raw",
+        ];
+        if !LINK_INTRINSICS.contains(&n) {
+            return None;
+        }
+        let arity = match n {
+            "link_block_new" => 1, // (count) — the size comes from the type
+            "link_elem" => 2,     // (block, index)
+            "link_get" => 3,      // (block, index, link-field ordinal)
+            "relocate_node" => 4, // (src, si, dst, di)
+            "relocate_range" | "link_to_bytes" | "link_to_bytes_raw" => 3,
+            _ => 5, // link_set: (block, i, ordinal, tblock, ti)
+        };
+        if args.len() != arity {
+            self.diag
+                .error(span, format!("'{n}' expects {arity} args, got {}", args.len()));
+            return Some(Type::Ptr);
+        }
+        let Some(ta) = type_args.first() else {
+            self.diag.error(
+                span,
+                format!("'{n}' requires an explicit record type argument: {n}<Record>(...)"),
+            );
+            return Some(Type::Ptr);
+        };
+        let t = resolve_type_ast(ta, self.db);
+        let Type::Record(rec) = &t else {
+            self.diag.error(
+                span,
+                format!(
+                    "'{n}' requires a record type argument (the link carriers are \
+                     records with 'link<T, u16>' fields); got {t}"
+                ),
+            );
+            return Some(Type::Ptr);
+        };
+        let links = self.db.link_fields_of(rec);
+        if links.len() > 4 {
+            self.diag.error(
+                span,
+                format!(
+                    "record '{rec}' has {} link fields; the link intrinsics \
+                     support at most 4 per record (the runtime calls carry a \
+                     fixed offset/name window)",
+                    links.len()
+                ),
+            );
+            return Some(Type::Ptr);
+        }
+        // link_set/link_get name the link field by its 0-based ordinal
+        // among the record's link fields — a static index, so the
+        // lowering can emit the byte offset as an immediate.
+        if n == "link_set" || n == "link_get" {
+            let field_arg = match args.get(2) {
+                Some(Arg::Pos(e)) => e,
+                _ => {
+                    self.diag.error(
+                        span,
+                        format!("'{n}''s link-field ordinal must be a positional integer literal"),
+                    );
+                    return Some(Type::Int);
+                }
+            };
+            let Some(idx) = Self::int_lit_value(field_arg) else {
+                self.diag.error(
+                    field_arg.span,
+                    format!(
+                        "'{n}''s link-field ordinal must be an integer literal \
+                         (0-based, among '{rec}''s link fields)"
+                    ),
+                );
+                return Some(Type::Int);
+            };
+            if links.is_empty() {
+                self.diag.error(
+                    field_arg.span,
+                    format!(
+                        "record '{rec}' has no 'link<T, u16>' fields; there is no \
+                         link field for '{n}' to name"
+                    ),
+                );
+            } else if idx < 0 || idx as usize >= links.len() {
+                self.diag.error(
+                    field_arg.span,
+                    format!(
+                        "link-field ordinal {idx} out of range: record '{rec}' has \
+                         {} link field(s)",
+                        links.len()
+                    ),
+                );
+            }
+        }
+        Some(match n {
+            "link_block_new" | "link_elem" | "link_to_bytes" | "link_to_bytes_raw" => Type::Ptr,
+            "link_get" => Type::Int,
+            _ => Type::Void,
+        })
+    }
+
     fn check_call(&mut self, callee: &Expr, type_args: &[TypeAst], args: &[Arg], span: Span) -> Type {
         if let ExprKind::Member { base, name } = &callee.kind {
             // Static call: BlueprintName.static_method(...)
@@ -4110,6 +4427,16 @@ impl Checker<'_> {
                     return Type::Pool(Box::new(resolve_type_ast(arg, self.db)));
                 }
                 return Type::Ptr;
+            }
+            // SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the link
+            // intrinsics — the runtime half of the E0801 seam closure
+            // (relocate_node / relocate_range / the to_bytes scan, plus
+            // the block constructors the discipline's tests and
+            // benchmarks drive). Recognized here (before ident_call)
+            // because they all carry an explicit record type argument
+            // whose layout the checker validates.
+            if let Some(t) = self.check_link_intrinsic(n, type_args, args, span) {
+                return t;
             }
             return self.ident_call(n, args, span);
         }
@@ -4563,6 +4890,51 @@ impl Checker<'_> {
         }
     }
 
+    /* SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the lvalue-load
+       half of the E0801 predicate (kills G1 §1 A2 → S4). E0801 fires
+       iff `has_self_link(type_of(rhs)) ∧ rhs_is_lvalue_load(rhs)`: the
+       RHS READS a HasSelfLink value from storage that survives the
+       copy (Ident/Index/Member rooted at a storage location — the
+       loaded bytes carry deltas encoded for the SOURCE field
+       addresses), vs. CONSTRUCTS one fresh (constructor/literal/call —
+       the DPS sret destination-projection semantics: the value is
+       built in place at its final address, so the deltas encode
+       correctly and the copy discipline does not apply). */
+    fn is_lvalue_load(e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Ident(_) => true,
+            ExprKind::Index { base, .. } | ExprKind::Member { base, .. } => {
+                Self::is_lvalue_load(base)
+            }
+            _ => false,
+        }
+    }
+
+    /// DIFF-5 (Impl-P): a compact source-shaped rendering of an
+    /// expression for the E0801 diagnostics — the pushed/assigned
+    /// expression appears in the message as the user wrote it
+    /// (`src[0]`, `n.next`, `xs`).
+    fn expr_label(e: &Expr) -> String {
+        match &e.kind {
+            ExprKind::Int(v) => v.to_string(),
+            ExprKind::Bool(b) => b.to_string(),
+            ExprKind::None => "none".to_string(),
+            ExprKind::Ident(n) => n.clone(),
+            ExprKind::Self_ => "self".to_string(),
+            ExprKind::Index { base, index } => {
+                format!("{}[{}]", Self::expr_label(base), Self::expr_label(index))
+            }
+            ExprKind::Member { base, name } => {
+                format!("{}.{}", Self::expr_label(base), name)
+            }
+            ExprKind::Call { .. } => "ctor(...)".to_string(),
+            ExprKind::List(_) => "[...]".to_string(),
+            ExprKind::Map(_) => "{...}".to_string(),
+            ExprKind::Tuple(_) => "(...)".to_string(),
+            _ => "expr".to_string(),
+        }
+    }
+
     /// SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the pool that
     /// minted the handle this expression evaluates to — the
     /// provenance the tree lacked (kills G1 §1 A6c). Recognized
@@ -4882,6 +5254,41 @@ impl Checker<'_> {
                 }
             }
         }
+        // SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the E0801
+        // by-value-copy rejection, PASS-BY-VALUE form (the spec's rule
+        // 2, kills G1 §1 A2 → S4). A HasSelfLink lvalue-load passed
+        // into a by-value parameter copies the stored bytes to the
+        // parameter's address — every 2-byte delta in the copy would
+        // decode against the parameter's address, not the link's
+        // target. Fires iff has_self_link(param) ∧ the arg is a
+        // positional lvalue-load; `Arg::Inout` (the ref/inout form) and
+        // freshly materializing args (call/literal — sret) stay legal.
+        for (i, a) in args.iter().enumerate() {
+            let Some(p) = params.get(i) else { continue };
+            if !self.db.has_self_link(&p.1) {
+                continue;
+            }
+            let expr = match a {
+                Arg::Pos(e) => e,
+                _ => continue,
+            };
+            if Self::is_lvalue_load(expr) {
+                let src = Self::expr_label(expr);
+                let t = p.1.to_string();
+                self.diag.error(
+                    expr.span,
+                    format!(
+                        "E0801 (call): cannot pass '{src}' by value to parameter \
+                         '{}' of '{}': '{t}' contains a self-relative \
+                         'link<{t}, u16>' (the copied delta would decode against \
+                         the parameter's address, not the link's target); pass \
+                         'ref<{t}>' (or 'inout'), or use 'relocate_node(src, dst)'. \
+                         [E0801]",
+                        p.0, sig.name
+                    ),
+                );
+            }
+        }
         let inout_flags = if is_method && sig.inout_params.len() > param_offset {
             &sig.inout_params[param_offset..]
         } else {
@@ -5130,6 +5537,38 @@ impl Checker<'_> {
                     if !elem.assignable_from(&t, &self.db.blueprints) {
                         self.diag.error(e.span, format!("cannot push {t} into list<{elem}>"));
                     }
+                    // SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P):
+                    // THE A2 KILL — the E0801 by-value-copy rejection,
+                    // PUSH form (the spec's verbatim diagnostic, kills
+                    // G1 §1 A2 → S4). The spec-as-written rule 2 covered
+                    // assignment and pass-by-value but was SILENT on
+                    // push/insert: `dst.push(src[0])` copies a
+                    // HasSelfLink value by value — the pushed bytes
+                    // carry deltas encoded against the SOURCE field
+                    // addresses, which would decode against dst's
+                    // address. Fires iff has_self_link(elem type) ∧ the
+                    // pushed RHS is an lvalue-load; a freshly
+                    // materializing RHS (`xs.push(make())` — sret
+                    // builds it at the destination) and push_ref (the
+                    // ref<T> form — no byte copy) stay legal.
+                    if self.db.has_self_link(elem) && Self::is_lvalue_load(e) {
+                        let src = Self::expr_label(e);
+                        let dst = Self::root_var_of_expr(recv)
+                            .unwrap_or_else(|| Self::expr_label(recv));
+                        let t = elem.to_string();
+                        self.diag.error(
+                            e.span,
+                            format!(
+                                "E0801 (push): cannot push '{src}' into '{dst}' by \
+                                 value because '{t}' contains a self-relative \
+                                 'link<{t}, u16>' (the copied delta would decode \
+                                 against '{dst}''s address, not the link's target); \
+                                 push a freshly constructed value (built in place \
+                                 via sret), pass 'ref<{t}>', or use \
+                                 'relocate_node(src, dst)'. [E0801]"
+                            ),
+                        );
+                    }
                 }
                 Type::Void
             }
@@ -5188,6 +5627,32 @@ impl Checker<'_> {
                     }
                     if !v.assignable_from(&vt, &self.db.blueprints) {
                         self.diag.error(ve.span, format!("cannot insert value of type {vt} into map<{k}, {v}>"));
+                    }
+                    // SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the
+                    // E0801 push rejection's INSERT twin — the spec's
+                    // rejection set is "push/insert of an lvalue-read":
+                    // inserting a HasSelfLink lvalue-load into a map
+                    // cell copies the stored bytes (the same
+                    // delta-decode hazard as the push form). Same
+                    // predicate, same verbatim diagnostic family,
+                    // dst = the map.
+                    if self.db.has_self_link(v) && Self::is_lvalue_load(ve) {
+                        let src = Self::expr_label(ve);
+                        let dst = Self::root_var_of_expr(recv)
+                            .unwrap_or_else(|| Self::expr_label(recv));
+                        let t = v.to_string();
+                        self.diag.error(
+                            ve.span,
+                            format!(
+                                "E0801 (push): cannot push '{src}' into '{dst}' by \
+                                 value because '{t}' contains a self-relative \
+                                 'link<{t}, u16>' (the copied delta would decode \
+                                 against '{dst}''s address, not the link's target); \
+                                 push a freshly constructed value (built in place \
+                                 via sret), pass 'ref<{t}>', or use \
+                                 'relocate_node(src, dst)'. [E0801]"
+                            ),
+                        );
                     }
                 }
                 Type::Void

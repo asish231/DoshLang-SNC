@@ -1,0 +1,24 @@
+// SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the to_bytes scan's
+// ACCEPT side — the whole-list serialization of a self-contained
+// block. Every link target lies inside the serialized slice
+// (slice_base ≤ t < slice_end), so the scan passes, the slice bytes
+// are packed, and the round trip is sound: the bulk-copy claim made
+// TRUE BY PRECONDITION (the sender-side scan) instead of false by
+// omission. The buffer readback verifies the packed bytes: the first
+// element's payload survives the copy.
+
+record Node {
+    int val
+    link<Node> next
+}
+
+fn main() {
+    ptr xs = link_block_new<Node>(4)
+    ptr_store(xs, 0, 4242)
+    link_set<Node>(xs, 0, 0, xs, 1)
+    link_set<Node>(xs, 1, 0, xs, 2)
+    link_set<Node>(xs, 2, 0, xs, 3)
+    ptr buf = link_to_bytes<Node>(xs, 0, 4)
+    print(ptr_int(buf) != 0)
+    print(ptr_load(buf, 0))
+}

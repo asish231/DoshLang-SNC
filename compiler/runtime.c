@@ -2875,7 +2875,284 @@ void sn_zfix_release(void *p) {
 
 
 /* --------------------------------------------------------------------- */
-/*  SnView — the incremental view engine (Problem-5 second slice).        */
+/*  The self-relative link system (SWARM RABBIT HOLE, Wave 11 / DIFF-5,  */
+/*  Impl-P, Cohort Delta; kills G1 §1 A2 → S4; STRATA §2.4.6's           */
+/*  NoRelLinkCopy closure — wave2_spec_diffs.md DIFF-5).                   */
+/*                                                                       */
+/*  link<T, u16>: a 2-byte self-relative delta field. A value of the    */
+/*  type at address A stores δ = target − A (decoded: target = A + δ);    */
+/*  the u16 range bounds |δ| ≤ 32767. The value is position-dependent    */
+/*  BY CONSTRUCTION: a byte-copy preserves deltas relative to the        */
+/*  SOURCE field addresses, so the checker rejects every by-value copy  */
+/*  of a HasSelfLink value that reads stored bytes (E0801 — the          */
+/*  compiler's four sites), and this runtime provides the only legal    */
+/*  movers:                                                             */
+/*                                                                       */
+/*   sn_relocate_node  — decode at source (t = addr(f_src) + δ), re-     */
+/*     encode at destination (δ' = t − addr(f_dst)), |δ'| ≤ 32767 else   */
+/*     the E0801 (relocate) fail-fast. Links targeting INSIDE the moved */
+/*     value are fixed to the new interior; links targeting outside     */
+/*     keep their absolute target (re-based: δ' = δ − (addr(f_dst) −     */
+/*     addr(f_src))).                                                   */
+/*                                                                       */
+/*   sn_relocate_range — the CONSTANT-SHIFT EXEMPTION, the one bulk      */
+/*     path where memcpy is sound without per-link re-encode: with      */
+/*     uniform k = dst_base − src_base every intra-range link is delta- */
+/*     preserving (target and field both shift by k ⇒ δ unchanged), so  */
+/*     the range bulk-copies iff self-contained (the same scan as       */
+/*     to_bytes); range-boundary-crossing links re-encode once with     */
+/*     δ' = δ − k. Two O(N) passes, never per-link re-encode of the      */
+/*     interior.                                                         */
+/*                                                                       */
+/*   sn_link_to_bytes  — the O(N) SENDER-SIDE self-containedness scan   */
+/*     before packing: for every non-null link field at element offset  */
+/*     e inside the serialized range, decode t = field_addr + δ and     */
+/*     require slice_base ≤ t < slice_end. Cross-slice links (targets   */
+/*     in other lists on the same lane — legal to HOLD, illegal to      */
+/*     SERIALIZE) → the E0801 (serialize) fail-fast: §4.5's load-time    */
+/*     verifier would otherwise receive a guaranteed failure. raw=1 is  */
+/*     the bench-only comparator that prices the scan (never sound to  */
+/*     call on link-bearing data).                                       */
+/*                                                                       */
+/*   sn_link_block_new / sn_link_elem / sn_link_set / sn_link_get — the  */
+/*     contiguous block carriers (the self-contained slice of the        */
+/*     spec's model: n record slots back to back) and the position-     */
+/*     checked encode/decode the tests and benchmarks drive. Blocks     */
+/*     zero on creation: raw 0 is the NULL link (scans and re-encodes  */
+/*     skip nulls). The layout (element size, the ≤4 link-field        */
+/*     offsets, their names and target-type labels) is compile-time-    */
+/*     constant per call site: the compiler emits it into every call,   */
+/*     which is what makes the verbatim diagnostics name the field.     */
+/*                                                                       */
+/*  SOUNDNESS (DIFF-5's statement, enforced here): every copy of a      */
+/*  HasSelfLink value now either constructs it fresh at its final       */
+/*  address (sret), re-encodes every delta against the new field        */
+/*  address (relocate_*), or is rejected (E0801) — no 2-byte delta is   */
+/*  ever interpreted against an address it was not encoded for; the    */
+/*  to_bytes scan extends the same invariant across the serialization  */
+/*  boundary, making the bulk-copy claim TRUE BY PRECONDITION instead  */
+/*  of false by omission.                                                */
+/* --------------------------------------------------------------------- */
+
+/* The fixed per-record link-field window the compiler emits (4 slots,
+   unused slots carry offset -1 and ""). */
+#define SN_LINK_MAX 4
+
+static int sn_link_range_ok(int64_t d) { return d >= -32767 && d <= 32767; }
+
+static int16_t sn_link_raw_at(void *node, int64_t off) {
+    int16_t v;
+    memcpy(&v, (char *)node + off, sizeof v);
+    return v;
+}
+
+static void sn_link_store_at(void *node, int64_t off, int64_t d) {
+    int16_t v = (int16_t)d;
+    memcpy((char *)node + off, &v, sizeof v);
+}
+
+/* E0801 (relocate) — the spec's verbatim diagnostic (DIFF-5 (c)); the
+   range is written with the unicode minus sign exactly as spec'd. */
+static void sn_link_die_relocate(const char *f, const char *src, const char *dst,
+                                 int64_t nd, const char *t) {
+    fprintf(stderr,
+            "E0801 (relocate): cannot relocate '%s' from '%s' to '%s': "
+            "the re-encoded delta (%" PRId64 ") for its link target exceeds "
+            "the i16 range [\xE2\x88\x92" "32767, +32767]; move the value and "
+            "its target closer together, or use 'link<%s in pool, u32>'. "
+            "[E0801]\n",
+            f, src, dst, nd, t);
+    exit(1);
+}
+
+/* E0801 (serialize) — the spec's verbatim diagnostic (DIFF-5 (b)). */
+static void sn_link_die_serialize(const char *xs, int64_t a, int64_t b,
+                                  const char *t, int64_t i, const char *field) {
+    fprintf(stderr,
+            "E0801 (serialize): cannot serialize '%s[%" PRId64 "..%" PRId64
+            "]' to bytes: 'link<%s, u16>' at element %" PRId64 " ('%s') "
+            "decodes to an address outside the serialized slice "
+            "(cross-slice links cannot survive relocation). Serialize the "
+            "enclosing whole list, drop the link, or use 'link<%s in pool, "
+            "u32>'. [E0801]\n",
+            xs, a, b, t, i, field, t);
+    exit(1);
+}
+
+/* A contiguous block of n record slots, zeroed: every link field starts
+   as the NULL link (raw 0). malloc'd (the lane-backed flavor of the
+   same carriers is exercised against these functions directly in the
+   systems test via sn_lane_alloc). */
+void *sn_link_block_new(int64_t n, int64_t sz) {
+    if (n < 0) n = 0;
+    if (sz < 1) sz = 1;
+    void *p = xmalloc((size_t)(n * sz) + 1);
+    memset(p, 0, (size_t)(n * sz));
+    return p;
+}
+
+/* The address of slot i — the readout primitive (decode comparisons,
+   checksums). */
+void *sn_link_elem(void *block, int64_t i, int64_t sz) {
+    return (char *)block + i * sz;
+}
+
+/* Encode: δ = target_addr − field_addr, written AT the field (the only
+   checked writer — the field's position is what the delta encodes
+   against, so the encode cannot exist without the address). |δ| ≤
+   32767 else the same E0801 (relocate) fail-fast: the 2-byte type
+   cannot represent the geometry, and a wrapped delta would be a lie. */
+void sn_link_set(void *block, int64_t i, int64_t off, void *tblock, int64_t ti,
+                 int64_t sz, const char *flabel, const char *tlabel) {
+    char *field = (char *)block + i * sz + off;
+    char *target = (char *)tblock + ti * sz;
+    int64_t d = (int64_t)(target - field);
+    if (!sn_link_range_ok(d)) {
+        sn_link_die_relocate(flabel, "the field", "the target", d, tlabel);
+    }
+    sn_link_store_at(field, 0, d);
+}
+
+/* Decode: t = field_addr + δ (the i16 sign extension IS the decode);
+   the NULL link (raw 0) reads as 0. No dereference ever happens on a
+   decoded target on this surface — link_get is the readout. */
+int64_t sn_link_get(void *block, int64_t i, int64_t off, int64_t sz) {
+    char *field = (char *)block + i * sz + off;
+    int16_t raw = sn_link_raw_at(field, 0);
+    if (raw == 0) return 0;
+    return (int64_t)(field + (int64_t)raw);
+}
+
+/* relocate_node: decode every link AT THE SOURCE, byte-copy, re-encode
+   AT THE DESTINATION. Interior targets follow the moved value; outside
+   targets keep their absolute address. */
+void sn_relocate_node(void *src, int64_t si, void *dst, int64_t di, int64_t sz,
+                      int64_t nl, int64_t o0, int64_t o1, int64_t o2, int64_t o3,
+                      const char *f0, const char *f1, const char *f2, const char *f3,
+                      const char *t0, const char *t1, const char *t2, const char *t3,
+                      const char *src_label, const char *dst_label) {
+    int64_t offs[SN_LINK_MAX] = { o0, o1, o2, o3 };
+    const char *names[SN_LINK_MAX] = { f0, f1, f2, f3 };
+    const char *targs[SN_LINK_MAX] = { t0, t1, t2, t3 };
+    char *s = (char *)src + si * sz;
+    char *d = (char *)dst + di * sz;
+    /* Pass 1 — decode at source (the deltas are readable only where
+       they were encoded). */
+    int64_t raw[SN_LINK_MAX];
+    for (int j = 0; j < SN_LINK_MAX; j++) {
+        raw[j] = (j < nl && offs[j] >= 0) ? (int64_t)sn_link_raw_at(s, offs[j]) : 0;
+    }
+    memcpy(d, s, (size_t)sz);
+    /* Pass 2 — re-encode at destination. */
+    for (int j = 0; j < nl && offs[j] >= 0; j++) {
+        if (raw[j] == 0) continue; /* the NULL link is position-free */
+        char *t = (char *)s + offs[j] + raw[j]; /* field_addr + δ */
+        char *t_new;
+        if (t >= s && t < s + sz) {
+            t_new = d + (t - s); /* interior: fixed to the new interior */
+        } else {
+            t_new = t;           /* outside: keeps its absolute target */
+        }
+        int64_t dp = (int64_t)(t_new - (d + offs[j]));
+        if (!sn_link_range_ok(dp)) {
+            sn_link_die_relocate(names[j], src_label, dst_label, dp, targs[j]);
+        }
+        sn_link_store_at(d, offs[j], dp);
+    }
+}
+
+/* relocate_range — the constant-shift bulk exemption. Pass 1 is the
+   self-containedness/boundary scan (O(N) in slice bytes): intra-range
+   links need NO re-encode (δ unchanged under the uniform shift —
+   provably the identity), boundary-crossing links must fit after
+   δ' = δ − k. The memcpy is the ONE exempt bulk copy. Pass 2 re-walks
+   the (untouched) source to write the boundary re-encodes. */
+void sn_relocate_range(void *src, void *dst, int64_t n, int64_t sz,
+                       int64_t nl, int64_t o0, int64_t o1, int64_t o2, int64_t o3,
+                       const char *f0, const char *f1, const char *f2, const char *f3,
+                       const char *t0, const char *t1, const char *t2, const char *t3,
+                       const char *src_label, const char *dst_label) {
+    int64_t offs[SN_LINK_MAX] = { o0, o1, o2, o3 };
+    const char *names[SN_LINK_MAX] = { f0, f1, f2, f3 };
+    const char *targs[SN_LINK_MAX] = { t0, t1, t2, t3 };
+    if (n <= 0) return;
+    int64_t total = n * sz;
+    int64_t k = (int64_t)((char *)dst - (char *)src);
+    /* Pass 1 — the scan (also the range check for boundary links). */
+    for (int64_t e = 0; e < n; e++) {
+        char *node = (char *)src + e * sz;
+        for (int j = 0; j < nl && offs[j] >= 0; j++) {
+            int64_t raw = (int64_t)sn_link_raw_at(node, offs[j]);
+            if (raw == 0) continue;
+            char *field = node + offs[j];
+            char *t = field + raw;
+            if (t >= (char *)src && t < (char *)src + total) continue; /* intra-range */
+            int64_t dp = raw - k; /* = t − (dst field addr) */
+            if (!sn_link_range_ok(dp)) {
+                char sl[64], el[64];
+                snprintf(sl, sizeof sl, "%s[%" PRId64 "]", src_label, e);
+                snprintf(el, sizeof el, "%s[%" PRId64 "]", dst_label, e);
+                sn_link_die_relocate(names[j], sl, el, dp, targs[j]);
+            }
+        }
+    }
+    /* The exempt bulk copy. */
+    memcpy(dst, src, (size_t)total);
+    /* Pass 2 — re-encode the boundary-crossing links (the source is
+       untouched; walk it again). */
+    for (int64_t e = 0; e < n; e++) {
+        char *snode = (char *)src + e * sz;
+        char *dnode = (char *)dst + e * sz;
+        for (int j = 0; j < nl && offs[j] >= 0; j++) {
+            int64_t raw = (int64_t)sn_link_raw_at(snode, offs[j]);
+            if (raw == 0) continue;
+            char *field = snode + offs[j];
+            char *t = field + raw;
+            if (t >= (char *)src && t < (char *)src + total) continue;
+            sn_link_store_at(dnode, offs[j], raw - k);
+        }
+    }
+}
+
+/* to_bytes — the sender-side scan + pack. Slice [a, b) of the block;
+   every non-null link must decode INSIDE the serialized slice. The
+   returned buffer is exactly the slice bytes (the caller knows the
+   length: (b − a) · sz). raw=1 skips the scan: the BENCH-ONLY
+   comparator (link_to_bytes_raw) that prices it. */
+void *sn_link_to_bytes(void *base, int64_t a, int64_t b, int64_t sz,
+                       int64_t nl, int64_t o0, int64_t o1, int64_t o2, int64_t o3,
+                       const char *xs_label,
+                       const char *f0, const char *f1, const char *f2, const char *f3,
+                       const char *t0, const char *t1, const char *t2, const char *t3,
+                       int64_t raw) {
+    int64_t offs[SN_LINK_MAX] = { o0, o1, o2, o3 };
+    const char *names[SN_LINK_MAX] = { f0, f1, f2, f3 };
+    const char *targs[SN_LINK_MAX] = { t0, t1, t2, t3 };
+    if (a < 0) a = 0;
+    if (b < a) b = a;
+    char *slice_base = (char *)base + a * sz;
+    char *slice_end = (char *)base + b * sz;
+    if (!raw) {
+        for (int64_t e = a; e < b; e++) {
+            char *node = (char *)base + e * sz;
+            for (int j = 0; j < nl && offs[j] >= 0; j++) {
+                int64_t r = (int64_t)sn_link_raw_at(node, offs[j]);
+                if (r == 0) continue;
+                char *t = node + offs[j] + r;
+                if (t < slice_base || t >= slice_end) {
+                    sn_link_die_serialize(xs_label, a, b, targs[j], e, names[j]);
+                }
+            }
+        }
+    }
+    int64_t bytes = (b - a) * sz;
+    void *buf = xmalloc((size_t)(bytes > 0 ? bytes : 1));
+    if (bytes > 0) memcpy(buf, slice_base, (size_t)bytes);
+    return buf;
+}
+
+/* ---------------------------------------------------------------------
+ *  SnView — the incremental view engine (Problem-5 second slice).        */
 /*  Impl-H, Cohort Delta, Wave 7. Built on Impl-G's SnZSet (Tier G).     */
 /*                                                                       */
 /*  A view is a dataflow node wrapping an input Z-set (the source), a    */

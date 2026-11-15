@@ -1,0 +1,24 @@
+// SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the E0801 seam
+// closure's PASS-BY-VALUE rejection (kills G1 §1 A2 → S4). A HasSelfLink
+// value passed into a by-value parameter is copied to the parameter's
+// address — every 2-byte delta in the copy would decode against the
+// parameter's address, not the link's target. `take(s)` passes the
+// lvalue-load `s` (an Ident read of storage) by value → E0801 (call).
+//
+// The legal discharges: pass `ref<Node>` (the borrow copies the address,
+// not the delta bytes), or relocate_node into a fresh destination.
+
+record Node {
+    int val
+    link<Node> next
+}
+
+fn take(Node n) {
+    print(n.val)
+}
+
+fn main() {
+    Node s
+    s.val = 1
+    take(s)
+}

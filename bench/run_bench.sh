@@ -297,8 +297,7 @@ gpool_rows() {
     local warm=$((rounds / 10))
     if [ "$warm" -lt 1 ]; then warm=1; fi
     local f r b spec
-    b=sn_gpool_bench
-    f="$OUT/$b.txt"
+    b=sn_gpool_bench    f="$OUT/$b.txt"
     : > "$f"
     echo "-- warmup $b (rounds=$warm)" >&2
     "$OUT/$b" "$warm" >/dev/null 2>&1
@@ -326,6 +325,62 @@ if [ -n "${GP_ONLY:-}" ]; then
     gpool_rows
     echo
     echo "== done (GP_ONLY). raw runs in $OUT/sn_gpool_bench.txt ; see RESULTS_GPOOL.md =="
+    exit 0
+fi
+
+# ---------- link rows (Wave 11, DIFF-5, Impl-P) ----------
+# The self-relative link system's price rows, in-language: the to_bytes
+# sender-side scan (scan_bytes) vs the raw pack without it
+# (raw_bytes) — the O(N) precondition that makes "100% legal bulk
+# copy" TRUE instead of false by omission; relocate_range (the
+# constant-shift bulk exemption: one scan + one memcpy + boundary
+# re-encodes) vs per-node relocate_node (the decode/copy/re-encode/
+# round-check sequence per node) — the exemption's payoff; and the
+# raw 2-word ptr copy (raw_copy) — the unchecked by-value byte-copy
+# the E0801 checker REJECTS on HasSelfLink values, priced as the
+# floor (reloc_node - raw_copy = the honest price of the discipline).
+# N=100K nodes/round (the brief's size), every phase >= 100x the ms
+# clock (the W2F discipline); every row prints a deterministic
+# checksum. Results: bench/RESULTS_LINK.md.
+# LINK_ONLY=1 ./run_bench.sh runs just these rows.
+link_rows() {
+    echo "-- building link bench (Wave 11, Impl-P)"
+    "$SNC" link_bench.sn -o "$OUT/sn_link_bench" || exit 1
+    # 200 rounds x 100K ops keeps every phase >= 100ms (>= 100x the
+    # 1-ms clock, the W2F discipline; the timer row keeps the
+    # gpool/lcell 100_000-pair shape).
+    local rounds="${LINK_ROUNDS:-200}"
+    local warm=$((rounds / 10))
+    if [ "$warm" -lt 1 ]; then warm=1; fi
+    local f r b spec
+    b=sn_link_bench
+    f="$OUT/$b.txt"
+    : > "$f"
+    echo "-- warmup $b (rounds=$warm)" >&2
+    "$OUT/$b" "$warm" >/dev/null 2>&1
+    echo "-- timed $b x$RUNS (rounds=$rounds)" >&2
+    for r in $(seq "$RUNS"); do
+        "$OUT/$b" "$rounds" >> "$f" 2>/dev/null
+    done
+    echo "-- link medians (rounds=$rounds, N=100K node ops/round, median of $RUNS):"
+    for spec in \
+        "timer ns_per_op" \
+        "scan_bytes ns_per_op" \
+        "raw_bytes ns_per_op" \
+        "reloc_range ns_per_op" \
+        "reloc_node ns_per_op" \
+        "raw_copy ns_per_op"; do
+        set -- $spec
+        echo "  $1.$2 = $(median_row "$OUT/sn_link_bench.txt" "$1" "$2")"
+    done
+    echo "-- link checksums (must be identical across all runs):"
+    grep -h "^BENCH row=" "$OUT/sn_link_bench.txt" | grep -v "row=timer" | sort | uniq -c
+}
+
+if [ -n "${LINK_ONLY:-}" ]; then
+    link_rows
+    echo
+    echo "== done (LINK_ONLY). raw runs in $OUT/sn_link_bench.txt ; see RESULTS_LINK.md =="
     exit 0
 fi
 
@@ -357,6 +412,9 @@ lcell_rows
 
 # zfix rows (Wave 9, Impl-N): see zfix_rows above
 zfix_rows
+
+# link rows (Wave 11, Impl-P): see link_rows above
+link_rows
 
 # per-run peak RSS (one run each; RSS is stable)
 echo "-- peak RSS (KB)"

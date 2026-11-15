@@ -30,6 +30,17 @@ pub enum Type {
     Pool(Box<Type>),
     /// 64-bit generational handle (`handle<T>`).
     Handle(Box<Type>),
+    /// SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the self-relative
+    /// link (`link<T, u16>`; kills G1 §1 A2 → S4). A value of this type
+    /// at address A stores δ = target − A (decoded: target = A + δ);
+    /// the u16 range bounds |δ| ≤ 32767. The inner type is the LINK
+    /// TARGET. The 2-byte value is position-dependent BY CONSTRUCTION:
+    /// a by-value copy of it (or of any type containing it — the
+    /// HasSelfLink predicate, check.rs) would decode against the copy's
+    /// address, so such copies are checked (E0801) and only
+    /// construct-in-place (sret), re-encoding relocation
+    /// (relocate_node/relocate_range) or by-reference moves are legal.
+    Link(Box<Type>),
     /// Opaque raw pointer (C FFI). No borrow tracking, no auto-deref.
     Ptr,
     Optional(Box<Type>),
@@ -128,6 +139,7 @@ impl Type {
             Type::Mut(inner) => TypeAst::Mut(Box::new(inner.to_type_ast())),
             Type::Pool(inner) => TypeAst::Pool(Box::new(inner.to_type_ast())),
             Type::Handle(inner) => TypeAst::Handle(Box::new(inner.to_type_ast())),
+            Type::Link(inner) => TypeAst::Link(Box::new(inner.to_type_ast())),
             Type::Ptr => TypeAst::Ptr,
             Type::Optional(inner) => TypeAst::Optional(Box::new(inner.to_type_ast())),
             Type::Tuple(ts) => TypeAst::Tuple(ts.iter().map(|t| t.to_type_ast()).collect()),
@@ -219,6 +231,19 @@ impl Type {
         if let (Type::Handle(a), Type::Handle(b)) = (self, other) {
             return a == b || a.assignable_from(b, bps);
         }
+        // DIFF-5 (Impl-P): `link<T, u16>` — identical target types assign
+        // (the 2-byte delta is target-typed but width-fixed); and an int
+        // literal assigns to a link (the RAW-delta escape hatch: 0 is the
+        // null link — position-independent, so constructing with 0 is
+        // sound; any other literal writes a delta the position discipline
+        // will check at every decode boundary). The by-value COPIES of
+        // link-bearing values are what E0801 governs (check.rs).
+        if let (Type::Link(a), Type::Link(b)) = (self, other) {
+            return a == b || a.assignable_from(b, bps);
+        }
+        if let Type::Link(_) = self {
+            return matches!(other, Type::Int);
+        }
         if (matches!(self, Type::Int) && matches!(other, Type::Handle(_)))
             || (matches!(self, Type::Handle(_)) && matches!(other, Type::Int))
         {
@@ -306,6 +331,8 @@ impl Type {
         match self {
             Type::I8|Type::U8|Type::Byte|Type::Bool => 1,
             Type::I16|Type::U16 => 2,
+            // DIFF-5 (Impl-P): link<T, u16> IS the 2-byte delta field.
+            Type::Link(_) => 2,
             Type::I32|Type::U32|Type::Float => 4,
             Type::Int|Type::U64|Type::Dec(_) => 8,
             Type::Enum(_) => 8,
@@ -368,6 +395,9 @@ impl fmt::Display for Type {
             Type::Mut(inner) => write!(f, "mut<{inner}>"),
             Type::Pool(inner) => write!(f, "pool<{inner}>"),
             Type::Handle(inner) => write!(f, "handle<{inner}>"),
+            // DIFF-5 (Impl-P): the display carries the implemented width —
+            // the verbatim E0801 diagnostics name the type as link<T, u16>.
+            Type::Link(inner) => write!(f, "link<{inner}, u16>"),
             Type::Blueprint(n) | Type::Named(n) | Type::Record(n) | Type::Enum(n) | Type::Contract(n) => write!(f, "{n}"),
             Type::Any => write!(f, "any"),
             Type::Lock => write!(f, "lock"),
@@ -422,6 +452,7 @@ pub fn ast_to_type(t: &TypeAst) -> Type {
         TypeAst::Ref(i) => Type::Ref(Box::new(ast_to_type(i))),
         TypeAst::Pool(i) => Type::Pool(Box::new(ast_to_type(i))),
         TypeAst::Handle(i) => Type::Handle(Box::new(ast_to_type(i))),
+        TypeAst::Link(i) => Type::Link(Box::new(ast_to_type(i))),
         TypeAst::Optional(i) => Type::Optional(Box::new(ast_to_type(i))),
         TypeAst::Tuple(xs) => Type::Tuple(xs.iter().map(ast_to_type).collect()),
     }

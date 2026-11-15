@@ -1,0 +1,24 @@
+// SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the E0801 seam
+// closure's ASSIGNMENT rejection (kills G1 §1 A2 → S4). A record with a
+// self-relative `link<Node, u16>` field is a HasSelfLink type: its 2-byte
+// deltas decode against the FIELD ADDRESS they were encoded for. An
+// lvalue-load (`s` — an Ident read of storage) assigned/copied by value
+// moves those bytes to a new address, where every copied delta would
+// decode against the WRONG address — the spec's rule-2 copy, now also
+// enforced at the declaration-initialization form (`Node d = s`) and the
+// plain assignment form (`d = s`). → E0801 (assign).
+//
+// The legal discharges (rule 1): construct fresh at the final address,
+// pass `ref<Node>`, or relocate_node (which re-encodes every delta).
+
+record Node {
+    int val
+    link<Node> next
+}
+
+fn main() {
+    Node s
+    s.val = 1
+    Node d = s
+    d = s
+}

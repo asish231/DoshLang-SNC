@@ -1,0 +1,34 @@
+// SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the i16-range
+// rejection of relocate_node — E0801 (relocate), the verbatim runtime
+// diagnostic. The re-encoded delta δ' = t − addr(f_dst) must satisfy
+// |δ'| ≤ 32767; here the destination block is placed > 40000 bytes from
+// the out-link's target (an adaptive candidate loop — malloc placement
+// varies), so δ' ≈ −(distance) exceeds the range and the relocation
+// fail-fasts instead of silently truncating the delta. The 2-byte link
+// type can never represent the moved geometry — the honest verdict is
+// the checked error, never a wrapped delta.
+
+record Node {
+    int val
+    link<Node> next
+}
+
+fn main() {
+    ptr a = link_block_new<Node>(2)
+    link_set<Node>(a, 0, 0, a, 1)
+    ptr filler = link_block_new<Node>(4096)
+    ptr b = link_block_new<Node>(1)
+    int pa = ptr_int(link_elem<Node>(a, 0))
+    int tries = 0
+    while (tries < 4096) {
+        int pb = ptr_int(link_elem<Node>(b, 0))
+        if (pb - pa > 40000 or pa - pb > 40000) {
+            tries = 100000
+        } else {
+            b = link_block_new<Node>(1)
+            tries = tries + 1
+        }
+    }
+    relocate_node<Node>(a, 0, b, 0)
+    print("unreachable")
+}
