@@ -1,0 +1,10 @@
+// SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the dims are
+// in the TYPE (`morton list<T, dims=[n1, n2]>`); the constructor's
+// literal dims must agree with the declared type — a mismatch means
+// the type annotation lies about the bounds the runtime checks.
+// MUST FAIL TO COMPILE.
+
+fn main() {
+    morton list<int, dims=[8, 8]> m = morton_new(16, 16)
+    print("unreachable")
+}

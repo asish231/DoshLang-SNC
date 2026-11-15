@@ -1,0 +1,13 @@
+// SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the bounds
+// discipline — SFC addressing is bounds-checked against the dims,
+// never wraps. The code space of a power-of-two grid covers the grid
+// exactly, so an out-of-range coordinate is a program bug, not a
+// padding cell; the runtime fails fast with [E-SFC] (the E-LKIND
+// backstop pattern — fork-probe-able in tests/systems/test_sfc.c).
+// MUST DIE AT RUNTIME.
+
+fn main() {
+    morton list<int, dims=[8, 8]> m = morton_new(8, 8)
+    print(morton_get(m, 9, 0))   // i = 9 out of bounds → [E-SFC]
+    print("unreachable")
+}

@@ -1,0 +1,51 @@
+// SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): from_lex — the
+// one blocked reshuffle that converts a lexicographic (row-major)
+// source into curve order (A2 §3; the 2–5%-of-runtime layout price
+// ICS'99 prices — priced honestly in bench/RESULTS_SFC.md). The
+// reshuffle is a PERMUTATION: the multiset of values is preserved
+// (verified by readback) and every cell lands at its own
+// interleave address. Fixed-size T, no directory (A2 §3).
+
+fn main() {
+    int n1 = 8
+    int n2 = 8
+    // the row-major source: src[i*8 + j] = i*8 + j
+    list<int> src = []
+    int i = 0
+    while (i < n1) {
+        int j = 0
+        while (j < n2) {
+            src.push(i * n2 + j)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    morton list<int, dims=[8, 8]> m = morton_from_lex(src, 8, 8)
+    // readback 1: the coordinate view — every cell sees its row-major
+    // value (the blocked reshuffle is exact, not approximate)
+    int bad = 0
+    int sum_lex = 0
+    i = 0
+    while (i < n1) {
+        int j = 0
+        while (j < n2) {
+            int v = morton_get(m, i, j)
+            if (v != i * n2 + j) { bad = bad + 1 }
+            sum_lex = sum_lex + v
+            j = j + 1
+        }
+        i = i + 1
+    }
+    // readback 2: the curve-order scan — the same multiset, stride-1
+    int sum_curve = 0
+    int k = 0
+    while (k < morton_len(m)) {
+        sum_curve = sum_curve + morton_scan_get(m, k)
+        k = k + 1
+    }
+    print(bad)             // 0 — every cell exact
+    print(sum_curve)       // 2016 — Σ 0..63
+    print(sum_lex)         // 2016 — the multiset preserved
+    print(morton_len(m))   // 64
+    print("PASS: morton_from_lex")
+}

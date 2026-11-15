@@ -1,0 +1,416 @@
+// SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the SFC
+// layouts' benchmark, in-language — A2's space-filling-geometry
+// decision table, priced (§2.4; the honest direction report lives in
+// bench/RESULTS_SFC.md).
+//
+// THE HONEST COMPARISONS:
+//   (a) lex_build vs from_lex — the row-major build (1M list pushes
+//       per round) vs the one blocked reshuffle of the SAME 1M
+//       values into curve order (the 2–5%-of-runtime layout price
+//       ICS'99 names — the from_lex row includes the zero fill, the
+//       honest one-time cost of deterministic reads on reused lane
+//       bytes).
+//   (b) stencil_lex_rowmajor vs stencil_lex_morton — the 5-point
+//       stencil over a 1024×1024 grid, LEXICOGRAPHIC access on both
+//       layouts (8 MB of values — past this M4's L2, so the locality
+//       effect is real, not cache-resident). A2 §2.1's honest
+//       direction: row-major has the best MEAN neighbor-gap
+//       (Abel–Mark 1990); Morton's claim is recursive-kernel dyadic
+//       contiguity (Chatterjee ICS'99), not a flat-stencil win —
+//       report whichever way it lands.
+//   (c) stencil_curve_morton vs stencil_lex_morton — the SAME sweep
+//       in CURVE order vs lexicographic order on the same morton
+//       buffer: the T5b win measured (wrong-order iteration over SFC
+//       storage = Θ(N) misses — the warning's price, A2 §3/T5(b)).
+//   (d) hilbert_box / hilbert_box_dyadic vs hilbert_linear — box
+//       queries over a fully-populated 512×512 map: 100 random boxes
+//       (sides 8..63 — the OFF-ALIGNED regime, where the slice-1
+//       range scan honestly degrades: the box's key range spans a
+//       large code swath and the scan pays it) and 400 dyadic boxes
+//       (side 32, aligned — A2's "aligned dyadic boxes = exactly 1
+//       cluster": the tight-range regime where the segment advance
+//       wins) vs the full linear scan over the same entries. The
+//       CHECKSUMS MUST AGREE (linear == random + dyadic — the
+//       exactness claim, self-checked).
+//   (e) interleave — the pure interleave+deinterleave cost (ns/op),
+//       software-path on this AArch64 machine (no BMI2 — C2.8; the
+//       sfc_path line prints the resolved path).
+//
+// Shape (the W2F discipline, verbatim): SNlang's only clock is the
+// ms-resolution time_now_ms, so every timed op phase totals >= 100x
+// that (the per-row multipliers below are sized to clear 100 ms at
+// the default base of 5); the driver (bench/run_bench.sh, SFC_ONLY=1)
+// runs one warmup at base/10 then RUNS timed runs and takes the
+// median; every row prints its own deterministic checksum, and the
+// cross-row checksum sets must agree.
+//
+// The stencil checksums (all three sweeps) MUST be identical: the
+// same set of interior cells, summed in three different orders —
+// the order-independence witness.
+
+use std.os
+
+fn report(str row, int ns_per_op, int phase_ms, int ops, int ck) {
+    print("BENCH row=" + row + " ns_per_op=" + cast(ns_per_op, str)
+        + " phase_ms=" + cast(phase_ms, str)
+        + " ops=" + cast(ops, str)
+        + " checksum=" + cast(ck, str))
+}
+
+fn main() {
+    int base = 5
+    list<str> a = args()
+    if (a.length() > 1) {
+        int v = cast(a[1], int)
+        if (v > 0) {
+            base = v
+        }
+    }
+    if (base < 1) { base = 1 }
+    int rlex = base * 20     // lex_build / from_lex rounds (1M values each)
+    int rsten = base * 20    // stencil sweeps
+    int rbox = base * 50     // random-box rounds (100 boxes each)
+    int rboxd = base * 50    // dyadic-box rounds (400 boxes each — the tight-range regime is ~100x cheaper per box)
+    int rlin = 1             // linear-scan rounds (one pass clears the floor)
+    int rinter = base * 2    // interleave rounds (10M pairs each)
+    gc_set_threshold(2000000000)
+
+    // The dispatch self-report (C2.8): 0 = the software shift-or path
+    // (this AArch64 machine has no BMI2), 1 = PDEP/PEXT.
+    print("sfc_path=" + cast(sfc_path(), str))
+
+    int side = 1024
+    int n = side * side     // 1,048,576 values — 8 MB, past L2
+
+    // ---- the shared setup (untimed): the row-major source + twins
+    list<int> src = []
+    int i = 0
+    while (i < n) {
+        src.push(i + 1)
+        i = i + 1
+    }
+    // the morton twin of the same values (one blocked reshuffle)
+    morton list<int, dims=[1024, 1024]> m = morton_from_lex(src, 1024, 1024)
+    // the row-major twin (the same values, heap list)
+    list<int> rm = []
+    i = 0
+    while (i < n) {
+        rm.push(i + 1)
+        i = i + 1
+    }
+
+    // ---- timer overhead: 100_000 time_now_ms() call pairs
+    int t0 = time_now_ms()
+    int kt = 0
+    int acct = 0
+    while (kt < 100000) {
+        acct = acct + time_now_ms()
+        kt = kt + 1
+    }
+    int t1 = time_now_ms()
+    report("timer", (t1 - t0) * 1000000 / 100000, t1 - t0, 100000, acct)
+
+    // ---- (a1) lex_build: the row-major build (1M pushes per round
+    //      into the scratch list, cleared per round — the steady-state
+    //      push cost, the same regime from_lex's source sits in)
+    list<int> sink = []
+    t0 = time_now_ms()
+    i = 0
+    while (i < rlex) {
+        sink.clear()
+        int j = 0
+        while (j < n) {
+            sink.push(j + 1)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    t1 = time_now_ms()
+    int ops = rlex * n
+    report("lex_build", (t1 - t0) * 1000000 / ops, t1 - t0, ops, sink.length())
+
+    // ---- (a2) from_lex: the blocked reshuffle (region-scoped — the
+    //      lane reclaims each round's 8 MB reservation at the block
+    //      exit; the reshuffle + the zero fill are the row's whole
+    //      cost, 3 spot-check reads the checksum)
+    t0 = time_now_ms()
+    int ck = 0
+    i = 0
+    while (i < rlex) {
+        region {
+            morton list<int, dims=[1024, 1024]> mm = morton_from_lex(src, 1024, 1024)
+            ck = ck + morton_get(mm, 0, 0) + morton_get(mm, 1023, 1023) + morton_get(mm, 511, 512)
+        }
+        i = i + 1
+    }
+    t1 = time_now_ms()
+    report("from_lex", (t1 - t0) * 1000000 / ops, t1 - t0, ops, ck)
+
+    // ---- (b1) stencil_lex_rowmajor: the 5-point stencil over the
+    //      row-major twin, lexicographic (i outer, j inner)
+    t0 = time_now_ms()
+    ck = 0
+    i = 0
+    while (i < rsten) {
+        int ii = 1
+        while (ii < side - 1) {
+            int jj = 1
+            while (jj < side - 1) {
+                ck = ck + rm[ii * side + jj]
+                     + rm[(ii - 1) * side + jj]
+                     + rm[(ii + 1) * side + jj]
+                     + rm[ii * side + jj - 1]
+                     + rm[ii * side + jj + 1]
+                jj = jj + 1
+            }
+            ii = ii + 1
+        }
+        i = i + 1
+    }
+    t1 = time_now_ms()
+    ops = rsten * (side - 2) * (side - 2) * 5
+    report("stencil_lex_rowmajor", (t1 - t0) * 1000000 / ops, t1 - t0, ops, ck)
+
+    // ---- (b2) stencil_lex_morton: the same sweep over the morton
+    //      buffer, lexicographic coordinates (the T5b shape — but a
+    //      while-loop pair, so the warning stays silent here; the
+    //      warning's own firing is pinned in examples/sfc_t5b_warn.sn)
+    t0 = time_now_ms()
+    int ck2 = 0
+    i = 0
+    while (i < rsten) {
+        int ii = 1
+        while (ii < side - 1) {
+            int jj = 1
+            while (jj < side - 1) {
+                ck2 = ck2 + morton_get(m, ii, jj)
+                     + morton_get(m, ii - 1, jj)
+                     + morton_get(m, ii + 1, jj)
+                     + morton_get(m, ii, jj - 1)
+                     + morton_get(m, ii, jj + 1)
+                jj = jj + 1
+            }
+            ii = ii + 1
+        }
+        i = i + 1
+    }
+    t1 = time_now_ms()
+    report("stencil_lex_morton", (t1 - t0) * 1000000 / ops, t1 - t0, ops, ck2)
+
+    // ---- (c) stencil_curve_morton: the same sweep in CURVE order —
+    //      the code IS the linear index, so the walk is a stride-1
+    //      buffer scan with the coords recovered per visit (the
+    //      O(1)-carry iteration; A2 §2.3)
+    t0 = time_now_ms()
+    int ck3 = 0
+    i = 0
+    while (i < rsten) {
+        int k = 0
+        while (k < n) {
+            int x = morton_x(k)
+            int y = morton_y(k)
+            if (x >= 1 and x < side - 1 and y >= 1 and y < side - 1) {
+                ck3 = ck3 + morton_scan_get(m, k)
+                     + morton_get(m, x + 1, y)
+                     + morton_get(m, x - 1, y)
+                     + morton_get(m, x, y + 1)
+                     + morton_get(m, x, y - 1)
+            }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    t1 = time_now_ms()
+    report("stencil_curve_morton", (t1 - t0) * 1000000 / ops, t1 - t0, ops, ck3)
+
+    // ---- (d) the hilbert box rows: 100 random boxes (the off-aligned
+    //      regime) + 400 dyadic boxes (the 1-cluster regime) over the
+    //      fully-populated 512×512 map
+    int hk = 9
+    int hside = 512
+    hilbert map<int, int> hmap = hilbert_new(9)
+    int c = 0
+    while (c < hside * hside) {
+        hilbert_insert(hmap, hilbert_dx(c, hk), hilbert_dy(c, hk), c)
+        c = c + 1
+    }
+    // the deterministic box set, from the run_bench.sh (b) control's
+    // LCG family (draw before advance): 100 random + 400 dyadic
+    list<int> bx0 = []
+    list<int> by0 = []
+    list<int> bx1 = []
+    list<int> by1 = []
+    int st = 12345
+    int b = 0
+    while (b < 100) {
+        st = (st * 1103515245 + 12345) % 2147483648
+        int x0 = st % (hside - 64)
+        st = (st * 1103515245 + 12345) % 2147483648
+        int y0 = st % (hside - 64)
+        st = (st * 1103515245 + 12345) % 2147483648
+        int w = 8 + st % 56
+        bx0.push(x0)
+        by0.push(y0)
+        bx1.push(x0 + w)
+        by1.push(y0 + w)
+        b = b + 1
+    }
+    while (b < 500) {
+        st = (st * 1103515245 + 12345) % 2147483648
+        int x0 = (st % 16) * 32
+        st = (st * 1103515245 + 12345) % 2147483648
+        int y0 = (st % 16) * 32
+        bx0.push(x0)
+        by0.push(y0)
+        bx1.push(x0 + 31)
+        by1.push(y0 + 31)
+        b = b + 1
+    }
+
+    // ---- (d1) hilbert_box: the segment advance over the RANDOM
+    //      boxes' key ranges (the honest slice-1 cost — the range
+    //      scan pays the span; see RESULTS_SFC.md §3)
+    t0 = time_now_ms()
+    int hb_cnt = 0
+    int hb_sum = 0
+    int hb_xor = 0
+    int hb0c = 0
+    int hb0s = 0
+    int hb0x = 0
+    i = 0
+    while (i < rbox) {
+        int rc = 0
+        int rs = 0
+        int rx = 0
+        b = 0
+        while (b < 100) {
+            int x0 = bx0[b]
+            int y0 = by0[b]
+            int x1 = bx1[b]
+            int y1 = by1[b]
+            int idx = hilbert_box_first(hmap, x0, y0, x1, y1)
+            while (idx != -1) {
+                int v = hilbert_entry_val(hmap, idx)
+                rc = rc + 1
+                rs = rs + v
+                rx = rx ^ v
+                idx = hilbert_box_next(hmap, x0, y0, x1, y1, idx)
+            }
+            b = b + 1
+        }
+        if (i == 0) {
+            hb0c = rc
+            hb0s = rs
+            hb0x = rx
+        }
+        hb_cnt = hb_cnt + rc
+        hb_sum = hb_sum + rs
+        hb_xor = hb_xor ^ rx
+        i = i + 1
+    }
+    t1 = time_now_ms()
+    ops = rbox * 100
+    report("hilbert_box", (t1 - t0) * 1000000 / ops, t1 - t0, ops, hb_cnt)
+
+    // ---- (d2) hilbert_box_dyadic: the DYADIC boxes — aligned 32×32,
+    //      exactly one cluster: the tight-range regime
+    t0 = time_now_ms()
+    int hd_cnt = 0
+    int hd_sum = 0
+    int hd_xor = 0
+    int hd0c = 0
+    int hd0s = 0
+    int hd0x = 0
+    i = 0
+    while (i < rboxd) {
+        int rc = 0
+        int rs = 0
+        int rx = 0
+        b = 100
+        while (b < 500) {
+            int x0 = bx0[b]
+            int y0 = by0[b]
+            int x1 = bx1[b]
+            int y1 = by1[b]
+            int idx = hilbert_box_first(hmap, x0, y0, x1, y1)
+            while (idx != -1) {
+                int v = hilbert_entry_val(hmap, idx)
+                rc = rc + 1
+                rs = rs + v
+                rx = rx ^ v
+                idx = hilbert_box_next(hmap, x0, y0, x1, y1, idx)
+            }
+            b = b + 1
+        }
+        if (i == 0) {
+            hd0c = rc
+            hd0s = rs
+            hd0x = rx
+        }
+        hd_cnt = hd_cnt + rc
+        hd_sum = hd_sum + rs
+        hd_xor = hd_xor ^ rx
+        i = i + 1
+    }
+    t1 = time_now_ms()
+    ops = rboxd * 400
+    report("hilbert_box_dyadic", (t1 - t0) * 1000000 / ops, t1 - t0, ops, hd_cnt)
+
+    // ---- (d3) hilbert_linear: the FULL linear scan over the same
+    //      entries for the SAME 500 boxes (the reference's cost —
+    //      box-shape-independent by construction)
+    t0 = time_now_ms()
+    int hl_cnt = 0
+    int hl_sum = 0
+    int hl_xor = 0
+    i = 0
+    while (i < rlin) {
+        b = 0
+        while (b < 500) {
+            int x0 = bx0[b]
+            int y0 = by0[b]
+            int x1 = bx1[b]
+            int y1 = by1[b]
+            int e = 0
+            while (e < hside * hside) {
+                int ex = hilbert_entry_x(hmap, e)
+                int ey = hilbert_entry_y(hmap, e)
+                if (ex >= x0 and ex <= x1 and ey >= y0 and ey <= y1) {
+                    int v = hilbert_entry_val(hmap, e)
+                    hl_cnt = hl_cnt + 1
+                    hl_sum = hl_sum + v
+                    hl_xor = hl_xor ^ v
+                }
+                e = e + 1
+            }
+            b = b + 1
+        }
+        i = i + 1
+    }
+    t1 = time_now_ms()
+    ops = rlin * 500
+    report("hilbert_linear", (t1 - t0) * 1000000 / ops, t1 - t0, ops, hl_cnt)
+    // the exactness self-check line (per-round): linear == random + dyadic
+    print("sfc_box_split=" + cast(hb0c, str) + "," + cast(hb0s, str) + "," + cast(hb0x, str)
+        + "," + cast(hd0c, str) + "," + cast(hd0s, str) + "," + cast(hd0x, str)
+        + "," + cast(hl_cnt, str) + "," + cast(hl_sum, str) + "," + cast(hl_xor, str))
+
+    // ---- (e) interleave: the pure interleave+deinterleave pair cost
+    //      (software-path on this machine — the sfc_path line above)
+    int kp = 10000000
+    t0 = time_now_ms()
+    int iacc = 0
+    i = 0
+    while (i < rinter) {
+        int k = 0
+        while (k < kp) {
+            int code = morton_index(k % 1024, k % 512)
+            iacc = iacc + morton_x(code) + morton_y(code)
+            k = k + 1
+        }
+        i = i + 1
+    }
+    t1 = time_now_ms()
+    ops = rinter * kp
+    report("interleave", (t1 - t0) * 1000000 / ops, t1 - t0, ops, iacc)
+}

@@ -1,0 +1,10 @@
+// SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the hilbert
+// map's slice-1 element discipline — d=2 point keys as the (x, y)
+// int pair and int values (the sorted lane carries key/x/y/val).
+// Other key/value types are the slice-2 boundary.
+// MUST FAIL TO COMPILE.
+
+fn main() {
+    hilbert map<str, int> h = hilbert_new(2)
+    print("unreachable")
+}

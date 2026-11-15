@@ -81,6 +81,12 @@ enum {
     KIND_BOX = 7,
     KIND_JSON = 8,
     KIND_CLOS = 9,
+    /* SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the SFC
+       layouts (the morton list / hilbert map headers). Lane-backed:
+       never gc_track'd, ARC'd nowhere (the sn_release no-op below is
+       the defense-in-depth backstop). */
+    KIND_MORTON = 10,
+    KIND_HILBERT = 11,
     KIND_USER = 100
 };
 
@@ -1092,6 +1098,13 @@ void sn_gc_leave(void) {
 void sn_release(void *p) {
     if (!p) return;
     Obj *o = (Obj *)p;
+    /* SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the
+       lane-backed SFC layouts never participate in ARC — the lane
+       owns the bytes and reclaims them at its rewind. A stray release
+       (an alias the checker's store rules did not see) is a NO-OP
+       here, not a free of lane memory; the checker's E-GC-IN-LANE
+       store rejections are the primary line. */
+    if (o->kind == KIND_MORTON || o->kind == KIND_HILBERT) return;
     o->rc--;
     if (o->rc > 0) return;
     gc_untrack(p);
@@ -2749,6 +2762,836 @@ void sn_wave_join(void *wave) {
     free(w->slots);
     free(w);
 }
+
+/* --------------------------------------------------------------------- */
+/*  SnMorton / SnHilbert — the SFC layouts (SWARM RABBIT HOLE, Wave 14,    */
+/*  Impl-S, Cohort Delta; A2 §2.4's space-filling-geometry decision       */
+/*  table, made executable).                                             */
+/*                                                                       */
+/*  morton list<T, dims=[n1, n2]> — tensor iteration with per-element    */
+/*  indexed access (A2 §2.4): ONE contiguous lane reservation (header +  */
+/*  the values, commit-on-push — the SnLane machinery), NO directory for  */
+/*  fixed-size T, addr = base + interleave(i, j)·8. The code space        */
+/*  covers a power-of-two grid EXACTLY (codes [0, d1·d2) ↔ cells), so     */
+/*  the O(1)-carry iteration is the integer increment (consecutive        */
+/*  cells have consecutive codes — the code IS the linear index) and the  */
+/*  curve-order scan is a stride-1 buffer walk (A2 §2.3). Position       */
+/*  independence: the values are ints, never absolute pointers —          */
+/*  to_bytes/from_bytes is zero-fixup by construction (the link<T, u16>   */
+/*  seam needs its O(N) scan for exactly the self-relative bytes this     */
+/*  layout does not have). from_lex is the one blocked reshuffle          */
+/*  (Chatterjee ICS'99's 2–5%-of-runtime layout price — a dyadic tile    */
+/*  at a time, so each tile's scatter lands in one contiguous code run).  */
+/*                                                                       */
+/*  hilbert map<int, int> — spatial range queries (A2 §2.4): entries     */
+/*  sorted by d=2 Hilbert key on a lane (the order IS the index — exact   */
+/*  point lookup is a binary search, no auxiliary hash); the box query    */
+/*  is the Tropf–Herzog/Lawder–King segment advance over the box's key    */
+/*  range. The range is computed EXACTLY from the curve's connectedness   */
+/*  (it enters and exits any box on the boundary — consecutive cells     */
+/*  are unit-step neighbors — so min/max over the box's boundary cells    */
+/*  IS the key range; Θ(perimeter·k) here, the Lawder–King Θ(k) hix       */
+/*  descent is the documented slice-2 refinement). The key itself is     */
+/*  the Butz 1971 / Skilling 2004 loop — Θ(k), no direct LUT (A2 §2.2;   */
+/*  the per-access cost is the honest price C2.9 names). Insert is        */
+/*  append-in-key-order O(1); out-of-order is the honest slice-1         */
+/*  REFUSAL ([E-SFC-ORDER] — no silent sort; the rebuild-epoch policy     */
+/*  is the documented future form, A2 §3's P1/P3 flag).                   */
+/*                                                                       */
+/*  Lane discipline (E-GC-IN-LANE): both layouts' storage lives on lane 0 */
+/*  and is NEVER gc_track'd; sn_release on either kind is a NO-OP (a      */
+/*  stray release would free lane bytes as heap — the checker rejects    */
+/*  the store sites; the no-op is the runtime backstop). They die at      */
+/*  the lane's rewind, exactly like lane-backed list headers.            */
+/* --------------------------------------------------------------------- */
+
+/* --- the feature dispatch (A2 §2.2 / C2.8 — load-bearing) ---------------
+   The interleave/deinterleave is dispatched ONCE PER PROCESS: BMI2
+   PDEP/PEXT on x86-64 (__builtin_cpu_supports("bmi2") — 2 PDEP + or,
+   the 3-cycle Haswell+ form), the software shift-or path (~10 ops,
+   still ≪ an L2 miss) everywhere else — AArch64 has no BMI2 (this M4
+   runs the software path). The knob SN_SFC_FORCE_PATH=soft forces the
+   software path (the systems suite's equivalence probe runs the grid
+   under both settings and diffs); =bmi2 fails fast off a BMI2 machine
+   (executing PDEP without the feature would be an illegal instruction
+   — the refusal is the honest answer, not a crash). NEVER use the
+   PDEP builtins unconditionally: they do not compile on arm64. */
+/* The forward shims: sn_lane_alloc / sn_bytearray_new are defined
+   later in the file (the single-TU layout keeps the SFC section
+   beside the wave/zset tiers); the local declaration mirrors
+   sn_list_new_lane's (the lane section's own precedent). */
+static void *sn_lane_alloc_fwd(int64_t lane_id, int64_t bytes) {
+    void *sn_lane_alloc(int64_t lane_id, int64_t bytes);
+    return sn_lane_alloc(lane_id, bytes);
+}
+
+static void *sn_bytearray_new_fwd(int64_t cap) {
+    void *sn_bytearray_new(int64_t cap);
+    return sn_bytearray_new(cap);
+}
+
+#define SN_SFC_EVEN_MASK 0x5555555555555555ULL /* the x (even-bit) spread mask */
+
+static int g_sfc_dispatch = -1; /* -1 unresolved, 0 software, 1 BMI2 */
+
+static int sn_sfc_bmi2_ready(void) {
+    if (g_sfc_dispatch >= 0) return g_sfc_dispatch;
+    int bmi2 = 0;
+#if defined(__x86_64__) || defined(_M_X64)
+    __builtin_cpu_init();
+    bmi2 = __builtin_cpu_supports("bmi2") ? 1 : 0;
+#endif
+    const char *e = getenv("SN_SFC_FORCE_PATH");
+    if (e) {
+        if (strcmp(e, "soft") == 0) {
+            bmi2 = 0;
+        } else if (strcmp(e, "bmi2") == 0) {
+            if (!bmi2) {
+                fprintf(stderr,
+                        "runtime error: SN_SFC_FORCE_PATH=bmi2 but this machine has "
+                        "no BMI2 (AArch64 has no PDEP/PEXT — C2.8; the software "
+                        "shift-or path is what runs here) [E-SFC-PATH]\n");
+                exit(1);
+            }
+        }
+    }
+    g_sfc_dispatch = bmi2;
+    return bmi2;
+}
+
+/* The test/bench readout: which path the process resolved (0=soft, 1=BMI2). */
+int64_t sn_sfc_path(void) {
+    return sn_sfc_bmi2_ready();
+}
+
+/* Test hook: re-resolve the dispatch. The knob is read at resolution
+   time, so the equivalence probes run one pass per setting IN ONE
+   PROCESS (setenv + recheck + hash, both settings, compare) — and a
+   fork'd child can force a setting its parent never resolved. */
+void sn_sfc_force_recheck(void) {
+    g_sfc_dispatch = -1;
+}
+
+/* The software spread/compact: x's bits to the even positions and back
+   (the classic 5-step shift-or; ~10 ops total — A2 §2.2's non-BMI2
+   tier, ≪ an L2 miss). */
+static uint64_t sn_sfc_part_by1(uint64_t x) {
+    x &= 0x00000000FFFFFFFFULL;
+    x = (x | (x << 16)) & 0x0000FFFF0000FFFFULL;
+    x = (x | (x << 8)) & 0x00FF00FF00FF00FFULL;
+    x = (x | (x << 4)) & 0x0F0F0F0F0F0F0F0FULL;
+    x = (x | (x << 2)) & 0x3333333333333333ULL;
+    x = (x | (x << 1)) & SN_SFC_EVEN_MASK;
+    return x;
+}
+
+static uint64_t sn_sfc_compact_by1(uint64_t x) {
+    x &= SN_SFC_EVEN_MASK;
+    x = (x | (x >> 1)) & 0x3333333333333333ULL;
+    x = (x | (x >> 2)) & 0x0F0F0F0F0F0F0F0FULL;
+    x = (x | (x >> 4)) & 0x00FF00FF00FF00FFULL;
+    x = (x | (x >> 8)) & 0x0000FFFF0000FFFFULL;
+    x = (x | (x >> 16)) & 0x00000000FFFFFFFFULL;
+    return x;
+}
+
+static uint64_t sn_morton_interleave_soft(uint64_t x, uint64_t y) {
+    return sn_sfc_part_by1(x) | (sn_sfc_part_by1(y) << 1);
+}
+
+static void sn_morton_deinterleave_soft(uint64_t m, uint64_t *x, uint64_t *y) {
+    *x = sn_sfc_compact_by1(m);
+    *y = sn_sfc_compact_by1(m >> 1);
+}
+
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+static uint64_t sn_morton_interleave_bmi2(uint64_t x, uint64_t y) {
+    return _pdep_u64(x, SN_SFC_EVEN_MASK)
+         | _pdep_u64(y, SN_SFC_EVEN_MASK << 1);
+}
+static void sn_morton_deinterleave_bmi2(uint64_t m, uint64_t *x, uint64_t *y) {
+    *x = _pext_u64(m, SN_SFC_EVEN_MASK);
+    *y = _pext_u64(m, SN_SFC_EVEN_MASK << 1);
+}
+#endif
+
+static uint64_t sn_morton_interleave(uint64_t x, uint64_t y) {
+    if (sn_sfc_bmi2_ready()) {
+#if defined(__x86_64__) || defined(_M_X64)
+        return sn_morton_interleave_bmi2(x, y);
+#endif
+    }
+    return sn_morton_interleave_soft(x, y);
+}
+
+static void sn_morton_deinterleave(uint64_t m, uint64_t *x, uint64_t *y) {
+    if (sn_sfc_bmi2_ready()) {
+#if defined(__x86_64__) || defined(_M_X64)
+        sn_morton_deinterleave_bmi2(m, x, y);
+        return;
+#endif
+    }
+    sn_morton_deinterleave_soft(m, x, y);
+}
+
+/* --- SnMorton: one contiguous reservation, header + curve-order data --- */
+
+typedef struct SnMorton {
+    int64_t rc;    /* unused on the lane (no ARC — see sn_release's no-op) */
+    int64_t kind;  /* KIND_MORTON */
+    int64_t d1;    /* dim 1 (a power of two) */
+    int64_t d2;    /* dim 2 (a power of two) */
+    int64_t len;   /* d1·d2 == the code space size (exact — no padding) */
+    int64_t data[]; /* the values in curve order: data[interleave(i, j)] */
+} SnMorton;
+
+static void sn_morton_die_dims(int64_t d1, int64_t d2) {
+    fprintf(stderr,
+            "runtime error: morton dims must be equal powers of two (slice 1 maps "
+            "the SQUARE grid onto the code space exactly — no padding; unequal "
+            "dims want the padded reservation / the hybrid 2^t tile floor, the "
+            "slice-2 form), got dims=[%lld, %lld] [E-SFC]\n",
+            (long long)d1, (long long)d2);
+    exit(1);
+}
+
+static void sn_morton_check_dims(int64_t d1, int64_t d2) {
+    /* equal powers of two: the code space covers a SQUARE power-of-two
+       grid exactly — interleave(d−1, d−1)+1 == d·d. Unequal
+       power-of-two dims spread the code space past d1·d2 (the
+       high-axis/low-axis corner overflows the reservation), so slice
+       1 refuses them (the padded reservation is the slice-2 form). */
+    if (d1 <= 0 || d1 > (1ll << 31) || d1 != d2 || (d1 & (d1 - 1)) != 0) {
+        sn_morton_die_dims(d1, d2);
+    }
+}
+
+static void *sn_morton_build(int64_t d1, int64_t d2) {
+    sn_morton_check_dims(d1, d2);
+    int64_t len = d1 * d2; /* d == 2^a ≤ 2^31 → len = d·d ≤ 2^62, fits i64 */
+    /* The byte-budget check BEFORE any multiply: keeps the
+       reservation inside the 256 MB lane AND len·8 inside int64 (the
+       dims alone cannot — 2^31-squared wants 2^65 bytes). */
+    if (len > (256ll * 1024 * 1024 - 64) / 8) {
+        fprintf(stderr,
+                "runtime error: morton dims [%lld, %lld] need about %lld MB — "
+                "over the 256 MB Elastic Lane reservation; use a smaller grid "
+                "or an explicit slab [E-SFC]\n",
+                (long long)d1, (long long)d2, (long long)(len / 131072));
+        exit(1);
+    }
+    int64_t bytes = (int64_t)sizeof(SnMorton) + len * (int64_t)sizeof(int64_t);
+    SnMorton *m = (SnMorton *)sn_lane_alloc_fwd(0, bytes);
+    m->rc = 1;
+    m->kind = KIND_MORTON;
+    m->d1 = d1;
+    m->d2 = d2;
+    m->len = len;
+    /* determinism: fresh lane bytes are stale after any rewind, and a
+       read of an unwritten cell must not leak them (the zero fill is
+       part of the layout's one-time price — priced in the from_lex
+       bench row). */
+    memset(m->data, 0, (size_t)len * sizeof(int64_t));
+    return m;
+}
+
+static SnMorton *sn_morton_of(void *p, const char *op) {
+    SnMorton *m = (SnMorton *)p;
+    if (!m || m->kind != KIND_MORTON) {
+        fprintf(stderr,
+                "runtime error: %s operates on a morton list (the lane-backed "
+                "SFC header); the value is not one [E-SFC]\n",
+                op);
+        exit(1);
+    }
+    return m;
+}
+
+void *sn_morton_new(int64_t d1, int64_t d2) {
+    return sn_morton_build(d1, d2);
+}
+
+/* from_lex — the one blocked reshuffle (A2 §3; the 2–5%-of-runtime
+   price, priced in bench/RESULTS_SFC.md). The source is a plain
+   row-major list<int> of exactly d1·d2 values; the write walks
+   dyadic 8×8 tiles so each tile's scatter lands in one contiguous
+   code run (the quadtree block property — a 2^a×2^b dyadic tile's
+   codes are contiguous), keeping the reshuffle cache-local on both
+   sides. The result is a PERMUTATION: every cell lands at its own
+   interleave address, the multiset is preserved. */
+void *sn_morton_from_lex(void *src, int64_t d1, int64_t d2) {
+    sn_morton_check_dims(d1, d2);
+    int64_t n = sn_list_len(src);
+    int64_t len = d1 * d2;
+    if (n != len) {
+        fprintf(stderr,
+                "runtime error: morton_from_lex source holds %lld values, dims "
+                "[%lld, %lld] need %lld — the lexicographic reshape is exact "
+                "[E-SFC]\n",
+                (long long)n, (long long)d1, (long long)d2, (long long)len);
+        exit(1);
+    }
+    SnMorton *m = (SnMorton *)sn_morton_build(d1, d2);
+    const int64_t T = 8; /* the dyadic tile side (a code run of 64) */
+    for (int64_t ti = 0; ti < d1; ti += T) {
+        for (int64_t tj = 0; tj < d2; tj += T) {
+            int64_t ie = ti + T < d1 ? ti + T : d1;
+            int64_t je = tj + T < d2 ? tj + T : d2;
+            for (int64_t i = ti; i < ie; i++) {
+                for (int64_t j = tj; j < je; j++) {
+                    m->data[sn_morton_interleave((uint64_t)i, (uint64_t)j)]
+                        = sn_list_get_i64(src, i * d2 + j);
+                }
+            }
+        }
+    }
+    return m;
+}
+
+int64_t sn_morton_get(void *p, int64_t i, int64_t j) {
+    SnMorton *m = sn_morton_of(p, "morton_get");
+    if (i < 0 || i >= m->d1 || j < 0 || j >= m->d2) {
+        fprintf(stderr,
+                "runtime error: morton index (%lld, %lld) out of bounds for dims "
+                "[%lld, %lld] — SFC addressing is bounds-checked, never wraps "
+                "[E-SFC]\n",
+                (long long)i, (long long)j, (long long)m->d1, (long long)m->d2);
+        exit(1);
+    }
+    return m->data[sn_morton_interleave((uint64_t)i, (uint64_t)j)];
+}
+
+void sn_morton_set(void *p, int64_t i, int64_t j, int64_t v) {
+    SnMorton *m = sn_morton_of(p, "morton_set");
+    if (i < 0 || i >= m->d1 || j < 0 || j >= m->d2) {
+        fprintf(stderr,
+                "runtime error: morton index (%lld, %lld) out of bounds for dims "
+                "[%lld, %lld] — SFC addressing is bounds-checked, never wraps "
+                "[E-SFC]\n",
+                (long long)i, (long long)j, (long long)m->d1, (long long)m->d2);
+        exit(1);
+    }
+    m->data[sn_morton_interleave((uint64_t)i, (uint64_t)j)] = v;
+}
+
+/* The pure index arithmetic — the feature-dispatched interleave. */
+int64_t sn_morton_index(int64_t i, int64_t j) {
+    if (i < 0 || i > INT32_MAX || j < 0 || j > INT32_MAX) {
+        fprintf(stderr,
+                "runtime error: morton coordinates must be in [0, 2^31) — the "
+                "interleave spreads two 32-bit axes into one 64-bit code "
+                "[E-SFC]\n");
+        exit(1);
+    }
+    return (int64_t)sn_morton_interleave((uint64_t)i, (uint64_t)j);
+}
+
+int64_t sn_morton_x(int64_t k) {
+    if (k < 0) {
+        fprintf(stderr, "runtime error: morton code must be non-negative [E-SFC]\n");
+        exit(1);
+    }
+    uint64_t x, y;
+    sn_morton_deinterleave((uint64_t)k, &x, &y);
+    return (int64_t)x;
+}
+
+int64_t sn_morton_y(int64_t k) {
+    if (k < 0) {
+        fprintf(stderr, "runtime error: morton code must be non-negative [E-SFC]\n");
+        exit(1);
+    }
+    uint64_t x, y;
+    sn_morton_deinterleave((uint64_t)k, &x, &y);
+    return (int64_t)y;
+}
+
+int64_t sn_morton_len(void *p) {
+    return sn_morton_of(p, "morton_len")->len;
+}
+
+/* The curve-order read: position k in CODE order — a stride-1 buffer
+   walk (A2 §2.3's linear scan; the curve costs nothing at L1 during
+   traversal). */
+int64_t sn_morton_scan_get(void *p, int64_t k) {
+    SnMorton *m = sn_morton_of(p, "morton_scan_get");
+    if (k < 0 || k >= m->len) {
+        fprintf(stderr,
+                "runtime error: morton curve position %lld out of range [0, "
+                "%lld) — the curve-order scan is bounds-checked [E-SFC]\n",
+                (long long)k, (long long)m->len);
+        exit(1);
+    }
+    return m->data[k];
+}
+
+/* to_bytes — the values as a self-describing blob (dims header + the
+   raw curve-order bytes). VALUES ONLY: no absolute pointers anywhere
+   in the layout, so the round trip is ZERO-FIXUP by construction
+   (position independence — what the link<T, u16> seam needs an O(N)
+   scan for, this layout gets for free). */
+void *sn_morton_to_bytes(void *p) {
+    SnMorton *m = sn_morton_of(p, "morton_to_bytes");
+    int64_t payload = m->len * (int64_t)sizeof(int64_t);
+    ByteArray *b = (ByteArray *)sn_bytearray_new_fwd(24 + payload);
+    int64_t hdr[3] = { m->d1, m->d2, m->len };
+    memcpy(b->data, hdr, sizeof hdr);
+    memcpy(b->data + sizeof hdr, m->data, (size_t)payload);
+    b->len = (int64_t)sizeof hdr + payload;
+    return b;
+}
+
+void *sn_morton_from_bytes(void *bytes, int64_t d1, int64_t d2) {
+    ByteArray *b = (ByteArray *)bytes;
+    if (!b || b->kind != KIND_BYTEARRAY) {
+        fprintf(stderr,
+                "runtime error: morton_from_bytes expects a to_bytes blob (a "
+                "bytearray) [E-SFC]\n");
+        exit(1);
+    }
+    sn_morton_check_dims(d1, d2);
+    if (b->len < 24) {
+        fprintf(stderr,
+                "runtime error: morton_from_bytes blob holds %lld bytes — too "
+                "short for the dims header [E-SFC]\n",
+                (long long)b->len);
+        exit(1);
+    }
+    int64_t hdr[3];
+    memcpy(hdr, b->data, sizeof hdr);
+    if (hdr[0] != d1 || hdr[1] != d2) {
+        fprintf(stderr,
+                "runtime error: morton_from_bytes dims [%lld, %lld] do not "
+                "match the blob's dims [%lld, %lld] — the serialized header "
+                "is the source of truth and the type must agree [E-SFC]\n",
+                (long long)d1, (long long)d2, (long long)hdr[0], (long long)hdr[1]);
+        exit(1);
+    }
+    if (b->len != 24 + hdr[2] * (int64_t)sizeof(int64_t)) {
+        fprintf(stderr,
+                "runtime error: morton_from_bytes blob holds %lld value bytes, "
+                "the header's dims need %lld — the blob is truncated [E-SFC]\n",
+                (long long)(b->len - 24), (long long)(hdr[2] * 8));
+        exit(1);
+    }
+    SnMorton *m = (SnMorton *)sn_morton_build(d1, d2);
+    memcpy(m->data, b->data + 24, (size_t)m->len * sizeof(int64_t));
+    return m;
+}
+
+/* --- SnHilbert: the sorted-key lane (the order IS the index) ------------ */
+
+typedef struct SnHilbert {
+    int64_t rc;    /* unused on the lane (no ARC) */
+    int64_t kind;  /* KIND_HILBERT */
+    int64_t k;     /* the order: the grid side is 2^k */
+    int64_t len;   /* entries */
+    int64_t cap;
+    int64_t *keys;  /* the sorted d=2 Hilbert codes — the order IS the index */
+    int64_t *xs;    /* the coords, parallel columns (SoA in one reservation) */
+    int64_t *ys;
+    int64_t *vals;
+    /* The per-query range cache (A2 §2.4: the key is computed ONCE per
+       box and amortized over V elements). hilbert_box_first computes
+       the box's key range and caches it; hilbert_box_next over the
+       SAME box reuses it — a stateless-int iterator whose per-query
+       arithmetic is paid once (a different box invalidates the
+       cache). Single-threaded by the slice-1 contract. */
+    int64_t cx0, cy0, cx1, cy1; /* the cached box (raw, unclipped) */
+    int64_t ckmin, ckmax;       /* the cached range */
+    int64_t ccached;            /* 1 once a range is cached */
+} SnHilbert;
+
+/* The Butz 1971 / Skilling 2004 loop (Θ(k), no direct LUT — A2 §2.2).
+   The standard quadrant-digit form: per level, the quadrant digit is
+   (3·rx)^ry and the frame rotates (Butz's rotation propagation); the
+   base-4 digits of the code ARE the quadrant ranks. */
+static void sn_hilbert_rot(int64_t n, int64_t *x, int64_t *y, int rx, int ry) {
+    if (ry == 0) {
+        if (rx == 1) {
+            *x = n - 1 - *x;
+            *y = n - 1 - *y;
+        }
+        int64_t t = *x;
+        *x = *y;
+        *y = t;
+    }
+}
+
+static int64_t sn_hilbert_encode(int64_t x, int64_t y, int64_t n) {
+    int64_t d = 0;
+    for (int64_t s = n / 2; s > 0; s /= 2) {
+        int rx = (x & s) > 0;
+        int ry = (y & s) > 0;
+        d += s * s * ((3 * rx) ^ ry);
+        sn_hilbert_rot(n, &x, &y, rx, ry);
+    }
+    return d;
+}
+
+static void sn_hilbert_decode(int64_t n, int64_t d, int64_t *x, int64_t *y) {
+    *x = 0;
+    *y = 0;
+    for (int64_t s = 1, t = d; s < n; s *= 2) {
+        int rx = 1 & (t / 2);
+        int ry = 1 & (t ^ rx);
+        sn_hilbert_rot(s, x, y, rx, ry);
+        *x += s * rx;
+        *y += s * ry;
+        t /= 4;
+    }
+}
+
+static SnHilbert *sn_hilbert_of(void *p, const char *op) {
+    SnHilbert *h = (SnHilbert *)p;
+    if (!h || h->kind != KIND_HILBERT) {
+        fprintf(stderr,
+                "runtime error: %s operates on a hilbert map (the lane-backed "
+                "SFC header); the value is not one [E-SFC]\n",
+                op);
+        exit(1);
+    }
+    return h;
+}
+
+void *sn_hilbert_new(int64_t k) {
+    if (k < 1 || k > 31) {
+        fprintf(stderr,
+                "runtime error: hilbert_new's order k must be in 1..=31 (the "
+                "d=2 grid side is 2^k and the code must fit the 62-bit "
+                "space), got %lld [E-SFC]\n",
+                (long long)k);
+        exit(1);
+    }
+    SnHilbert *h = (SnHilbert *)sn_lane_alloc_fwd(0, (int64_t)sizeof(SnHilbert));
+    h->rc = 1;
+    h->kind = KIND_HILBERT;
+    h->k = k;
+    h->len = 0;
+    h->cap = 0;
+    h->keys = NULL;
+    h->xs = NULL;
+    h->ys = NULL;
+    h->vals = NULL;
+    h->ccached = 0;
+    return h;
+}
+
+/* Growth: the four columns live in ONE contiguous lane reservation,
+   re-made at double capacity (the old block is abandoned to the
+   rewind — lane bump memory, never freed in place; amortized O(1)
+   per insert, the list-growth discipline). */
+static void sn_hilbert_grow(SnHilbert *h) {
+    if (h->len < h->cap) return;
+    int64_t ncap = h->cap ? h->cap * 2 : 16;
+    int64_t *base = (int64_t *)sn_lane_alloc_fwd(
+        0, ncap * 4 * (int64_t)sizeof(int64_t));
+    int64_t *nk = base;
+    int64_t *nx = base + ncap;
+    int64_t *ny = base + 2 * ncap;
+    int64_t *nv = base + 3 * ncap;
+    if (h->len > 0) {
+        memcpy(nk, h->keys, (size_t)h->len * sizeof(int64_t));
+        memcpy(nx, h->xs, (size_t)h->len * sizeof(int64_t));
+        memcpy(ny, h->ys, (size_t)h->len * sizeof(int64_t));
+        memcpy(nv, h->vals, (size_t)h->len * sizeof(int64_t));
+    }
+    h->keys = nk;
+    h->xs = nx;
+    h->ys = ny;
+    h->vals = nv;
+    h->cap = ncap;
+}
+
+void sn_hilbert_insert(void *p, int64_t x, int64_t y, int64_t v) {
+    SnHilbert *h = sn_hilbert_of(p, "hilbert_insert");
+    int64_t side = 1ll << h->k;
+    if (x < 0 || x >= side || y < 0 || y >= side) {
+        fprintf(stderr,
+                "runtime error: hilbert point (%lld, %lld) out of the 2^%lld "
+                "grid — the d=2 key space is bounds-checked [E-SFC]\n",
+                (long long)x, (long long)y, (long long)h->k);
+        exit(1);
+    }
+    int64_t key = sn_hilbert_encode(x, y, side);
+    if (h->len > 0) {
+        int64_t last = h->keys[h->len - 1];
+        if (key < last) {
+            fprintf(stderr,
+                    "runtime error: hilbert insert out of key order (new key "
+                    "%lld after last %lld) — the sorted lane IS the index and "
+                    "slice 1 does not reorder; insert along the curve or "
+                    "await the rebuild-epoch policy (P1/P3) [E-SFC-ORDER]\n",
+                    (long long)key, (long long)last);
+            exit(1);
+        }
+        if (key == last) {
+            fprintf(stderr,
+                    "runtime error: hilbert point (%lld, %lld) already present "
+                    "(key %lld) — maps hold one value per point; slice 1 has "
+                    "no retraction (await the rebuild-epoch policy, P1/P3) "
+                    "[E-SFC-DUP]\n",
+                    (long long)x, (long long)y, (long long)key);
+            exit(1);
+        }
+    }
+    sn_hilbert_grow(h);
+    h->keys[h->len] = key;
+    h->xs[h->len] = x;
+    h->ys[h->len] = y;
+    h->vals[h->len] = v;
+    h->len++;
+    /* a mutation invalidates any in-flight box iteration's cached
+       range (the append never reorders the [0, len) prefix, but the
+       iterator's bounds and the range's emptiness are per-query
+       facts — recompute on the next query). */
+    h->ccached = 0;
+}
+
+/* The binary search over the sorted lane (the order IS the index —
+   no auxiliary hash; A2 §3). */
+static int64_t sn_hilbert_lower_bound(SnHilbert *h, int64_t key) {
+    int64_t lo = 0, hi = h->len;
+    while (lo < hi) {
+        int64_t mid = lo + (hi - lo) / 2;
+        if (h->keys[mid] < key) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+static int64_t sn_hilbert_find(SnHilbert *h, int64_t key) {
+    int64_t i = sn_hilbert_lower_bound(h, key);
+    if (i < h->len && h->keys[i] == key) return i;
+    return -1;
+}
+
+int64_t sn_hilbert_get(void *p, int64_t x, int64_t y) {
+    SnHilbert *h = sn_hilbert_of(p, "hilbert_get");
+    int64_t side = 1ll << h->k;
+    if (x < 0 || x >= side || y < 0 || y >= side) {
+        fprintf(stderr,
+                "runtime error: hilbert point (%lld, %lld) out of the 2^%lld "
+                "grid — the d=2 key space is bounds-checked [E-SFC]\n",
+                (long long)x, (long long)y, (long long)h->k);
+        exit(1);
+    }
+    int64_t key = sn_hilbert_encode(x, y, side);
+    int64_t i = sn_hilbert_find(h, key);
+    if (i < 0) {
+        fprintf(stderr,
+                "runtime error: hilbert point (%lld, %lld) not present — "
+                "slice 1 has no optional values on this surface; probe with "
+                "hilbert_has [E-SFC-KEYX]\n",
+                (long long)x, (long long)y);
+        exit(1);
+    }
+    return h->vals[i];
+}
+
+int64_t sn_hilbert_has(void *p, int64_t x, int64_t y) {
+    SnHilbert *h = sn_hilbert_of(p, "hilbert_has");
+    int64_t side = 1ll << h->k;
+    if (x < 0 || x >= side || y < 0 || y >= side) return 0;
+    return sn_hilbert_find(h, sn_hilbert_encode(x, y, side)) >= 0 ? 1 : 0;
+}
+
+int64_t sn_hilbert_len(void *p) {
+    return sn_hilbert_of(p, "hilbert_len")->len;
+}
+
+int64_t sn_hilbert_code(int64_t x, int64_t y, int64_t k) {
+    if (k < 1 || k > 31) {
+        fprintf(stderr,
+                "runtime error: hilbert order k must be in 1..=31 [E-SFC]\n");
+        exit(1);
+    }
+    int64_t side = 1ll << k;
+    if (x < 0 || x >= side || y < 0 || y >= side) {
+        fprintf(stderr,
+                "runtime error: hilbert point (%lld, %lld) out of the 2^%lld "
+                "grid — the d=2 key space is bounds-checked [E-SFC]\n",
+                (long long)x, (long long)y, (long long)k);
+        exit(1);
+    }
+    return sn_hilbert_encode(x, y, side);
+}
+
+int64_t sn_hilbert_dx(int64_t c, int64_t k) {
+    int64_t side;
+    int64_t x, y;
+    if (k < 1 || k > 31) {
+        fprintf(stderr, "runtime error: hilbert order k must be in 1..=31 [E-SFC]\n");
+        exit(1);
+    }
+    side = 1ll << k;
+    if (c < 0 || c >= side * side) {
+        fprintf(stderr,
+                "runtime error: hilbert code %lld out of range [0, %lld) for "
+                "order %lld [E-SFC]\n",
+                (long long)c, (long long)(side * side), (long long)k);
+        exit(1);
+    }
+    sn_hilbert_decode(side, c, &x, &y);
+    return x;
+}
+
+int64_t sn_hilbert_dy(int64_t c, int64_t k) {
+    int64_t side;
+    int64_t x, y;
+    if (k < 1 || k > 31) {
+        fprintf(stderr, "runtime error: hilbert order k must be in 1..=31 [E-SFC]\n");
+        exit(1);
+    }
+    side = 1ll << k;
+    if (c < 0 || c >= side * side) {
+        fprintf(stderr,
+                "runtime error: hilbert code %lld out of range [0, %lld) for "
+                "order %lld [E-SFC]\n",
+                (long long)c, (long long)(side * side), (long long)k);
+        exit(1);
+    }
+    sn_hilbert_decode(side, c, &x, &y);
+    return y;
+}
+
+static int64_t sn_hilbert_entry_col(SnHilbert *h, int64_t idx, int64_t *col,
+                                    const char *op) {
+    if (idx < 0 || idx >= h->len) {
+        fprintf(stderr,
+                "runtime error: hilbert entry index %lld out of range [0, "
+                "%lld) — the sorted lane's order is the index [E-SFC]\n",
+                (long long)idx, (long long)h->len);
+        exit(1);
+    }
+    return col[idx];
+}
+
+int64_t sn_hilbert_entry_key(void *p, int64_t idx) {
+    SnHilbert *h = sn_hilbert_of(p, "hilbert_entry_key");
+    return sn_hilbert_entry_col(h, idx, h->keys, "hilbert_entry_key");
+}
+
+int64_t sn_hilbert_entry_x(void *p, int64_t idx) {
+    SnHilbert *h = sn_hilbert_of(p, "hilbert_entry_x");
+    return sn_hilbert_entry_col(h, idx, h->xs, "hilbert_entry_x");
+}
+
+int64_t sn_hilbert_entry_y(void *p, int64_t idx) {
+    SnHilbert *h = sn_hilbert_of(p, "hilbert_entry_y");
+    return sn_hilbert_entry_col(h, idx, h->ys, "hilbert_entry_y");
+}
+
+int64_t sn_hilbert_entry_val(void *p, int64_t idx) {
+    SnHilbert *h = sn_hilbert_of(p, "hilbert_entry_val");
+    return sn_hilbert_entry_col(h, idx, h->vals, "hilbert_entry_val");
+}
+
+/* The box's key range, EXACT: the curve enters and exits any box on
+   its boundary (connectedness — consecutive cells are unit-step
+   neighbors), so min/max over the box's boundary cells IS the
+   Tropf–Herzog range. Θ(perimeter·k); the Lawder–King Θ(k) hix
+   descent is the documented slice-2 refinement. Returns 0 when the
+   clipped box is empty. */
+static int sn_hilbert_box_range(SnHilbert *h, int64_t x0, int64_t y0,
+                                int64_t x1, int64_t y1,
+                                int64_t *kmin, int64_t *kmax) {
+    int64_t side = 1ll << h->k;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > side - 1) x1 = side - 1;
+    if (y1 > side - 1) y1 = side - 1;
+    if (x0 > x1 || y0 > y1) return 0;
+    int64_t lo = INT64_MAX, hi = INT64_MIN;
+    for (int64_t x = x0; x <= x1; x++) {
+        int64_t a = sn_hilbert_encode(x, y0, side);
+        int64_t b = sn_hilbert_encode(x, y1, side);
+        if (a < lo) lo = a;
+        if (a > hi) hi = a;
+        if (b < lo) lo = b;
+        if (b > hi) hi = b;
+    }
+    for (int64_t y = y0; y <= y1; y++) {
+        int64_t a = sn_hilbert_encode(x0, y, side);
+        int64_t b = sn_hilbert_encode(x1, y, side);
+        if (a < lo) lo = a;
+        if (a > hi) hi = a;
+        if (b < lo) lo = b;
+        if (b > hi) hi = b;
+    }
+    *kmin = lo;
+    *kmax = hi;
+    return 1;
+}
+
+/* The segment advance: from `idx` (INCLUSIVE), skip entries whose key
+   is in range but whose point is outside the box, and stop at the
+   first in-box entry — or at the range's end (-1). The entries in
+   [kmin, kmax] are the box's segments (A2's S_q/(2d) cluster law:
+   the scan touches exactly the range, never the whole lane). */
+static int64_t sn_hilbert_box_advance(SnHilbert *h, int64_t x0, int64_t y0,
+                                      int64_t x1, int64_t y1, int64_t kmax,
+                                      int64_t idx) {
+    while (idx < h->len && h->keys[idx] <= kmax) {
+        if (h->xs[idx] >= x0 && h->xs[idx] <= x1
+            && h->ys[idx] >= y0 && h->ys[idx] <= y1) {
+            return idx;
+        }
+        idx++;
+    }
+    return -1;
+}
+
+int64_t sn_hilbert_box_first(void *p, int64_t x0, int64_t y0,
+                             int64_t x1, int64_t y1) {
+    SnHilbert *h = sn_hilbert_of(p, "hilbert_box_first");
+    int64_t kmin, kmax;
+    if (!sn_hilbert_box_range(h, x0, y0, x1, y1, &kmin, &kmax)) return -1;
+    if (h->len == 0) return -1;
+    /* cache the range for the box_next chain (A2 §2.4: computed once
+       per box, amortized over the yielded entries) */
+    h->cx0 = x0;
+    h->cy0 = y0;
+    h->cx1 = x1;
+    h->cy1 = y1;
+    h->ckmin = kmin;
+    h->ckmax = kmax;
+    h->ccached = 1;
+    return sn_hilbert_box_advance(h, x0, y0, x1, y1, kmax,
+                                  sn_hilbert_lower_bound(h, kmin));
+}
+
+int64_t sn_hilbert_box_next(void *p, int64_t x0, int64_t y0, int64_t x1,
+                            int64_t y1, int64_t idx) {
+    SnHilbert *h = sn_hilbert_of(p, "hilbert_box_next");
+    int64_t kmax;
+    if (h->ccached && h->cx0 == x0 && h->cy0 == y0 && h->cx1 == x1 && h->cy1 == y1) {
+        /* the same query's chain: the cached range (the O(1)
+           amortized step — no boundary re-encoding per advance). */
+        kmax = h->ckmax;
+    } else {
+        int64_t kmin;
+        if (!sn_hilbert_box_range(h, x0, y0, x1, y1, &kmin, &kmax)) return -1;
+        h->cx0 = x0;
+        h->cy0 = y0;
+        h->cx1 = x1;
+        h->cy1 = y1;
+        h->ckmin = kmin;
+        h->ckmax = kmax;
+        h->ccached = 1;
+    }
+    if (idx < 0 || idx >= h->len) {
+        fprintf(stderr,
+                "runtime error: hilbert box iterator position %lld out of "
+                "range [0, %lld) — pass the index hilbert_box_first/next "
+                "returned [E-SFC]\n",
+                (long long)idx, (long long)h->len);
+        exit(1);
+    }
+    return sn_hilbert_box_advance(h, x0, y0, x1, y1, kmax, idx + 1);
+}
+
 
 /* --------------------------------------------------------------------- */
 /*  SnZFix — Salt ζ: the fixpoint-bracket engine (SWARM RABBIT HOLE,     */

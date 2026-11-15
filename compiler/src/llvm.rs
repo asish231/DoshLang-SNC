@@ -432,6 +432,39 @@ declare void @sn_wave_capture(ptr, i64, ptr)
 declare i64 @sn_wave_read_w(ptr, ptr)
 declare void @sn_wave_contrib(ptr, ptr, i64, i64)
 declare void @sn_wave_join(ptr)
+/* SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the SFC
+   layouts — A2's space-filling-geometry decision table executable
+   (morton list = tensor iteration; hilbert map = range queries).
+   The interleave/deinterleave is FEATURE-DISPATCHED once per process
+   inside the runtime (C2.8: PDEP/PEXT on x86-64 with BMI2, the
+   software shift-or path elsewhere — SN_SFC_FORCE_PATH forces the
+   software path for the equivalence probes). */
+declare ptr @sn_morton_new(i64, i64)
+declare ptr @sn_morton_from_lex(ptr, i64, i64)
+declare ptr @sn_morton_from_bytes(ptr, i64, i64)
+declare i64 @sn_morton_get(ptr, i64, i64)
+declare void @sn_morton_set(ptr, i64, i64, i64)
+declare i64 @sn_morton_index(i64, i64)
+declare i64 @sn_morton_x(i64)
+declare i64 @sn_morton_y(i64)
+declare i64 @sn_morton_len(ptr)
+declare i64 @sn_morton_scan_get(ptr, i64)
+declare ptr @sn_morton_to_bytes(ptr)
+declare ptr @sn_hilbert_new(i64)
+declare i64 @sn_hilbert_code(i64, i64, i64)
+declare i64 @sn_hilbert_dx(i64, i64)
+declare i64 @sn_hilbert_dy(i64, i64)
+declare void @sn_hilbert_insert(ptr, i64, i64, i64)
+declare i64 @sn_hilbert_get(ptr, i64, i64)
+declare i64 @sn_hilbert_has(ptr, i64, i64)
+declare i64 @sn_hilbert_len(ptr)
+declare i64 @sn_hilbert_entry_key(ptr, i64)
+declare i64 @sn_hilbert_entry_x(ptr, i64)
+declare i64 @sn_hilbert_entry_y(ptr, i64)
+declare i64 @sn_hilbert_entry_val(ptr, i64)
+declare i64 @sn_hilbert_box_first(ptr, i64, i64, i64, i64)
+declare i64 @sn_hilbert_box_next(ptr, i64, i64, i64, i64, i64)
+declare i64 @sn_sfc_path()
 ; Salt ζ — the fixpoint-bracket engine (SWARM RABBIT HOLE, Wave 9, Impl-N;
 ; W2C §3.3–§3.5). No sn_zfix_count / sn_zfix_negate exist at runtime: the
 ; admission checker ALWAYS rejects the two named divergence classes with

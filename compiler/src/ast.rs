@@ -220,6 +220,21 @@ pub enum TypeAst {
     /// of the stored bytes would decode every delta against the wrong
     /// address (E0801, kills G1 §1 A2 → S4).
     Link(Box<TypeAst>),
+    /// SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the morton
+    /// layout — `morton list<T, dims=[n1, n2]>` (A2 §2.4's decision
+    /// table: tensor iteration with per-element indexed access).
+    /// One contiguous lane reservation, fixed-size T (int, slice 1 —
+    /// no directory), addr = lane_base + interleave(i, j)·sizeof(T);
+    /// the dims are part of the type and must be powers of two.
+    Morton {
+        elem: Box<TypeAst>,
+        dims: Vec<i64>,
+    },
+    /// SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the hilbert
+    /// layout — `hilbert map<K, V>` (A2 §2.4: spatial range queries).
+    /// Entries sorted by d=2 Hilbert key on a lane; the sorted order
+    /// IS the index. Slice 1 implements hilbert map<int, int>.
+    Hilbert(Box<TypeAst>, Box<TypeAst>),
     Optional(Box<TypeAst>),
     Tuple(Vec<TypeAst>),
     Fn {

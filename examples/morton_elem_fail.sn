@@ -1,0 +1,13 @@
+// SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the fixed-size
+// element discipline (A2 §3: "no directory for fixed-size T").
+// Slice 1 implements morton list<int, dims=[n1, n2]>: fixed-size int
+// elements, addr = lane_base + interleave(i, j) · 8. Variable-size or
+// packed elements want the directory lane keyed by Morton key (box
+// queries read contiguous directory segments first) — the documented
+// slice-2 form.
+// MUST FAIL TO COMPILE.
+
+fn main() {
+    morton list<str, dims=[8, 8]> m = morton_new(8, 8)
+    print("unreachable")
+}

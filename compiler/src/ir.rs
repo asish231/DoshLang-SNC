@@ -2726,7 +2726,10 @@ impl Cx<'_> {
         match t {
             Type::Ptr | Type::List(_) | Type::Map(_, _) | Type::Blueprint(_)
             | Type::Record(_) | Type::Contract(_) | Type::Any | Type::Optional(_)
-            | Type::Ref(_) | Type::Chan(_) | Type::Json | Type::Named(_) => v,
+            | Type::Ref(_) | Type::Chan(_) | Type::Json | Type::Named(_)
+            // Wave 14 (Impl-S): the SFC layouts are pointer-like
+            // values (the lane-backed header pointer) — pass through.
+            | Type::Morton(_, _) | Type::Hilbert(_, _) => v,
             Type::Enum(en) if self.db.is_algebraic_enum(&en) => v,
             _ => {
                 let p = self.t();
@@ -4211,6 +4214,202 @@ impl Cx<'_> {
                 self.line(&format!("{r} = call i64 @sn_lcell_value(ptr {p})"));
                 (r, Type::Int)
             }
+            /* SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the
+               SFC layouts, lowered (A2 §2.4's decision table
+               executable). Every intrinsic is ONE runtime call — the
+               addr arithmetic (interleave) is feature-dispatched ONCE
+               PER PROCESS inside the runtime (C2.8: PDEP/PEXT on
+               x86-64 BMI2, the software shift-or path elsewhere),
+               never inlined into the IR, so the dispatch knob
+               (SN_SFC_FORCE_PATH) and the equivalence probes see the
+               one definition. The collection args lower as ptr (the
+               lane-backed header pointer); the dims/k ride as i64
+               immediates from the checker-validated literals. */
+            "morton_new" => {
+                let d1 = vs.first().map(|x| x.0.clone()).unwrap_or("0".into());
+                let d2 = vs.get(1).map(|x| x.0.clone()).unwrap_or("0".into());
+                let r = self.t();
+                self.line(&format!("{r} = call ptr @sn_morton_new(i64 {d1}, i64 {d2})"));
+                (r, Type::Morton(Box::new(Type::Int), vec![]))
+            }
+            "morton_from_lex" => {
+                let s0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let src = self.as_ptr(s0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let d1 = vs.get(1).map(|x| x.0.clone()).unwrap_or("0".into());
+                let d2 = vs.get(2).map(|x| x.0.clone()).unwrap_or("0".into());
+                let r = self.t();
+                self.line(&format!(
+                    "{r} = call ptr @sn_morton_from_lex(ptr {src}, i64 {d1}, i64 {d2})"
+                ));
+                (r, Type::Morton(Box::new(Type::Int), vec![]))
+            }
+            "morton_from_bytes" => {
+                let b0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let bytes = self.as_ptr(b0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let d1 = vs.get(1).map(|x| x.0.clone()).unwrap_or("0".into());
+                let d2 = vs.get(2).map(|x| x.0.clone()).unwrap_or("0".into());
+                let r = self.t();
+                self.line(&format!(
+                    "{r} = call ptr @sn_morton_from_bytes(ptr {bytes}, i64 {d1}, i64 {d2})"
+                ));
+                (r, Type::Morton(Box::new(Type::Int), vec![]))
+            }
+            "morton_get" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let p = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let i = self.sfc_i(&vs, 1);
+                let j = self.sfc_i(&vs, 2);
+                let r = self.t();
+                self.line(&format!("{r} = call i64 @sn_morton_get(ptr {p}, i64 {i}, i64 {j})"));
+                (r, Type::Int)
+            }
+            "morton_set" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let p = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let i = self.sfc_i(&vs, 1);
+                let j = self.sfc_i(&vs, 2);
+                let v = self.sfc_i(&vs, 3);
+                self.line(&format!(
+                    "call void @sn_morton_set(ptr {p}, i64 {i}, i64 {j}, i64 {v})"
+                ));
+                ("0".into(), Type::Void)
+            }
+            "morton_index" => {
+                let i = self.sfc_i(&vs, 0);
+                let j = self.sfc_i(&vs, 1);
+                let r = self.t();
+                self.line(&format!("{r} = call i64 @sn_morton_index(i64 {i}, i64 {j})"));
+                (r, Type::Int)
+            }
+            "morton_x" | "morton_y" => {
+                let k = self.sfc_i(&vs, 0);
+                let r = self.t();
+                let f = if n == "morton_x" { "sn_morton_x" } else { "sn_morton_y" };
+                self.line(&format!("{r} = call i64 @{f}(i64 {k})"));
+                (r, Type::Int)
+            }
+            "morton_len" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let p = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let r = self.t();
+                self.line(&format!("{r} = call i64 @sn_morton_len(ptr {p})"));
+                (r, Type::Int)
+            }
+            "morton_scan_get" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let p = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let k = self.sfc_i(&vs, 1);
+                let r = self.t();
+                self.line(&format!("{r} = call i64 @sn_morton_scan_get(ptr {p}, i64 {k})"));
+                (r, Type::Int)
+            }
+            "morton_to_bytes" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let p = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let r = self.t();
+                self.line(&format!("{r} = call ptr @sn_morton_to_bytes(ptr {p})"));
+                (r, Type::Ptr)
+            }
+            "hilbert_new" => {
+                let k = vs.first().map(|x| x.0.clone()).unwrap_or("0".into());
+                let r = self.t();
+                self.line(&format!("{r} = call ptr @sn_hilbert_new(i64 {k})"));
+                (r, Type::Hilbert(Box::new(Type::Int), Box::new(Type::Int)))
+            }
+            "hilbert_code" => {
+                let x = self.sfc_i(&vs, 0);
+                let y = self.sfc_i(&vs, 1);
+                let k = self.sfc_i(&vs, 2);
+                let r = self.t();
+                self.line(&format!("{r} = call i64 @sn_hilbert_code(i64 {x}, i64 {y}, i64 {k})"));
+                (r, Type::Int)
+            }
+            "hilbert_dx" | "hilbert_dy" => {
+                let c = self.sfc_i(&vs, 0);
+                let k = self.sfc_i(&vs, 1);
+                let r = self.t();
+                let f = if n == "hilbert_dx" { "sn_hilbert_dx" } else { "sn_hilbert_dy" };
+                self.line(&format!("{r} = call i64 @{f}(i64 {c}, i64 {k})"));
+                (r, Type::Int)
+            }
+            "hilbert_insert" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let p = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let x = self.sfc_i(&vs, 1);
+                let y = self.sfc_i(&vs, 2);
+                let v = self.sfc_i(&vs, 3);
+                self.line(&format!(
+                    "call void @sn_hilbert_insert(ptr {p}, i64 {x}, i64 {y}, i64 {v})"
+                ));
+                ("0".into(), Type::Void)
+            }
+            "hilbert_get" | "hilbert_has" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let p = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let x = self.sfc_i(&vs, 1);
+                let y = self.sfc_i(&vs, 2);
+                let r = self.t();
+                if n == "hilbert_get" {
+                    self.line(&format!("{r} = call i64 @sn_hilbert_get(ptr {p}, i64 {x}, i64 {y})"));
+                    (r, Type::Int)
+                } else {
+                    self.line(&format!("{r} = call i64 @sn_hilbert_has(ptr {p}, i64 {x}, i64 {y})"));
+                    (r, Type::Bool)
+                }
+            }
+            "hilbert_len" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let p = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let r = self.t();
+                self.line(&format!("{r} = call i64 @sn_hilbert_len(ptr {p})"));
+                (r, Type::Int)
+            }
+            "hilbert_entry_key" | "hilbert_entry_x" | "hilbert_entry_y" | "hilbert_entry_val" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let p = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let idx = self.sfc_i(&vs, 1);
+                let r = self.t();
+                let f = match n {
+                    "hilbert_entry_key" => "sn_hilbert_entry_key",
+                    "hilbert_entry_x" => "sn_hilbert_entry_x",
+                    "hilbert_entry_y" => "sn_hilbert_entry_y",
+                    _ => "sn_hilbert_entry_val",
+                };
+                self.line(&format!("{r} = call i64 @{f}(ptr {p}, i64 {idx})"));
+                (r, Type::Int)
+            }
+            "hilbert_box_first" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let p = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let x0 = self.sfc_i(&vs, 1);
+                let y0 = self.sfc_i(&vs, 2);
+                let x1 = self.sfc_i(&vs, 3);
+                let y1 = self.sfc_i(&vs, 4);
+                let r = self.t();
+                self.line(&format!(
+                    "{r} = call i64 @sn_hilbert_box_first(ptr {p}, i64 {x0}, i64 {y0}, i64 {x1}, i64 {y1})"
+                ));
+                (r, Type::Int)
+            }
+            "hilbert_box_next" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let p = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let x0 = self.sfc_i(&vs, 1);
+                let y0 = self.sfc_i(&vs, 2);
+                let x1 = self.sfc_i(&vs, 3);
+                let y1 = self.sfc_i(&vs, 4);
+                let idx = self.sfc_i(&vs, 5);
+                let r = self.t();
+                self.line(&format!(
+                    "{r} = call i64 @sn_hilbert_box_next(ptr {p}, i64 {x0}, i64 {y0}, i64 {x1}, i64 {y1}, i64 {idx})"
+                ));
+                (r, Type::Int)
+            }
+            "sfc_path" => {
+                let r = self.t();
+                self.line(&format!("{r} = call i64 @sn_sfc_path()"));
+                (r, Type::Int)
+            }
             /* Salt-ζ fixpoint builtins (SWARM RABBIT HOLE, Wave 9,
                Impl-N; W2C §3.3–§3.5): the admitted closure bracket over
                Tier-G (zfix_new) and Tier-L (zfix_new_l) carriers, the
@@ -5522,6 +5721,15 @@ impl Cx<'_> {
         } else {
             v
         }
+    }
+
+    /* SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the SFC
+       intrinsics' int-arg reader — the coordinates/keys/codes ride as
+       i64 (the as_bits pass-through; the collection args go through
+       as_ptr instead — the lane-backed header pointer). */
+    fn sfc_i(&mut self, vs: &[(String, Type)], i: usize) -> String {
+        let a = vs.get(i).cloned().unwrap_or(("0".into(), Type::Int));
+        self.as_bits(a.0, &a.1)
     }
 
     fn from_bits(&mut self, bits: String, t: &Type) -> String {

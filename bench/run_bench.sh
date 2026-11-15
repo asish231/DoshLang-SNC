@@ -436,6 +436,69 @@ if [ -n "${WAVE_ONLY:-}" ]; then
     exit 0
 fi
 
+# ---------- sfc rows (Wave 14, Impl-S) ----------
+# bench/sfc_bench.sn — the SFC layouts' price rows, in-language (A2's
+# space-filling-geometry decision table, priced; SWARM RABBIT HOLE,
+# Wave 14). Rows: lex_build vs from_lex (the row-major build vs the
+# one blocked reshuffle of the same 1M values — the 2–5%-of-runtime
+# layout price ICS'99 names), the 5-point stencil over a 1024×1024
+# grid (8 MB — past L2) in three orders/layouts (lexicographic
+# row-major, lexicographic morton, curve-ordered morton — the honest
+# direction report: Abel–Mark says row-major wins the mean
+# neighbor-gap; Chatterjee's morton claim is recursive-kernel dyadic
+# contiguity, not flat stencils), the hilbert box queries (100 random
+# + 400 dyadic boxes over a fully-populated 512×512 map — the
+# segment advance vs the full linear scan over the same entries; the
+# CHECKSUMS MUST AGREE: linear == random + dyadic, the exactness
+# claim self-checked via the sfc_box_split line), and the pure
+# interleave cost (software-path on this AArch64 machine — no BMI2,
+# C2.8; the sfc_path line prints the resolved path). Every op phase
+# >= 100x the ms clock (the W2F discipline). Results:
+# bench/RESULTS_SFC.md. SFC_ONLY=1 ./run_bench.sh runs just these rows.
+sfc_rows() {
+    echo "-- building sfc bench (Wave 14, Impl-S)"
+    "$SNC" sfc_bench.sn -o "$OUT/sn_sfc_bench" || exit 1
+    local rounds="${SFC_ROUNDS:-5}"
+    local warm=$((rounds / 10))
+    if [ "$warm" -lt 1 ]; then warm=1; fi
+    local f r b spec
+    b=sn_sfc_bench
+    f="$OUT/$b.txt"
+    : > "$f"
+    echo "-- warmup $b (base=$warm)" >&2
+    "$OUT/$b" "$warm" >/dev/null 2>&1
+    echo "-- timed $b x$RUNS (base=$rounds)" >&2
+    for r in $(seq "$RUNS"); do
+        "$OUT/$b" "$rounds" >> "$f" 2>/dev/null
+    done
+    echo "-- sfc medians (base=$rounds, median of $RUNS):"
+    for spec in \
+        "timer ns_per_op" \
+        "lex_build ns_per_op" \
+        "from_lex ns_per_op" \
+        "stencil_lex_rowmajor ns_per_op" \
+        "stencil_lex_morton ns_per_op" \
+        "stencil_curve_morton ns_per_op" \
+        "hilbert_box ns_per_op" \
+        "hilbert_box_dyadic ns_per_op" \
+        "hilbert_linear ns_per_op" \
+        "interleave ns_per_op"; do
+        set -- $spec
+        echo "  $1.$2 = $(median_row "$OUT/$b.txt" "$1" "$2")"
+    done
+    echo "-- sfc dispatch + checksums (must be identical across all runs; the box split must satisfy linear == random + dyadic):"
+    grep -h "^sfc_path=" "$OUT/$b.txt" | sort | uniq -c
+    grep -h "^sfc_box_split=" "$OUT/$b.txt" | sort | uniq -c
+    grep -h "^BENCH row=" "$OUT/$b.txt" | grep -v "row=timer" | sort | uniq -c
+}
+
+if [ -n "${SFC_ONLY:-}" ]; then
+    sfc_rows
+    echo
+    echo "== done (SFC_ONLY). raw runs in $OUT/sn_sfc_bench.txt ; see RESULTS_SFC.md =="
+    exit 0
+fi
+
 # ---------- run + collect ----------
 collect() {  # collect NAME -- cmd...
     local name="$1"; shift; shift
@@ -470,6 +533,9 @@ link_rows
 
 # wave rows (Wave 13, Impl-R): see wave_rows above
 wave_rows
+
+# sfc rows (Wave 14, Impl-S): see sfc_rows above
+sfc_rows
 
 # per-run peak RSS (one run each; RSS is stable)
 echo "-- peak RSS (KB)"

@@ -1,0 +1,71 @@
+// SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the box query
+// — the Tropf–Herzog / Lawder–King segment advance (A2 §3: compute
+// the key range of the query box, find the start segment, advance
+// while the key stays in range — O(1 + V·w/B + S_q/(2d)), clusters
+// proportional to the box's boundary surface, not its volume).
+// Verified EXACT against a linear-scan reference over the same
+// entries: every axis-aligned box of the 8×8 grid, both sides
+// accumulating the same (count, sum, xor) triple over the result
+// set — same set of results, any order.
+
+fn main() {
+    int k = 3                  // the order: an 8×8 grid, ALL 64 cells present
+    hilbert map<int, int> h = hilbert_new(3)
+    int c = 0
+    while (c < 64) {
+        hilbert_insert(h, hilbert_dx(c, k), hilbert_dy(c, k), c)
+        c = c + 1
+    }
+    int boxes = 0
+    int agree = 1
+    int x0 = 0
+    while (x0 < 8) {
+        int y0 = 0
+        while (y0 < 8) {
+            int x1 = x0
+            while (x1 < 8) {
+                int y1 = y0
+                while (y1 < 8) {
+                    // the segment advance: first/next over the box's
+                    // key range; the checksum triple is order-free
+                    int cnt = 0
+                    int sum = 0
+                    int xsum = 0
+                    int idx = hilbert_box_first(h, x0, y0, x1, y1)
+                    while (idx != -1) {
+                        cnt = cnt + 1
+                        int v = hilbert_entry_val(h, idx)
+                        sum = sum + v
+                        xsum = xsum ^ v
+                        idx = hilbert_box_next(h, x0, y0, x1, y1, idx)
+                    }
+                    // the linear-scan reference over the same entries
+                    int rcnt = 0
+                    int rsum = 0
+                    int rxsum = 0
+                    int e = 0
+                    while (e < hilbert_len(h)) {
+                        int ex = hilbert_entry_x(h, e)
+                        int ey = hilbert_entry_y(h, e)
+                        if (ex >= x0 and ex <= x1 and ey >= y0 and ey <= y1) {
+                            int v = hilbert_entry_val(h, e)
+                            rcnt = rcnt + 1
+                            rsum = rsum + v
+                            rxsum = rxsum ^ v
+                        }
+                        e = e + 1
+                    }
+                    if (cnt != rcnt or sum != rsum or xsum != rxsum) { agree = 0 }
+                    boxes = boxes + 1
+                    y1 = y1 + 1
+                }
+                x1 = x1 + 1
+            }
+            y0 = y0 + 1
+        }
+        x0 = x0 + 1
+    }
+    print(boxes)    // 1296 — every axis-aligned box of the grid
+    print(agree)    // 1 — EXACT set equality on every box
+    print("PASS: hilbert_box")
+}

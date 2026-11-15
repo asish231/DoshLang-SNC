@@ -1,0 +1,46 @@
+// SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the morton
+// layout's index arithmetic, end-to-end — A2 §2.2/C2.8: the
+// feature-dispatched interleave/deinterleave (PDEP/PEXT on x86-64
+// with BMI2, the software shift-or path elsewhere — dispatched once
+// per process; this M4 runs the software path), pinned as the
+// interleave↔deinterleave bijection over a 64×64 grid. The code
+// order IS the curve order: consecutive cells have consecutive codes
+// (the O(1)-carry iteration is the integer increment), and the code
+// space covers a power-of-two grid exactly.
+
+fn main() {
+    // the first four cells of the z-order: (0,0) (1,0) (0,1) (1,1)
+    print(morton_index(0, 0))   // 0
+    print(morton_index(1, 0))   // 1
+    print(morton_index(0, 1))   // 2
+    print(morton_index(1, 1))   // 3
+    print(morton_index(2, 0))   // 4 — x's bit 1 lands at code bit 2
+
+    int n = 64
+    int bad = 0
+    int i = 0
+    while (i < n) {
+        int j = 0
+        while (j < n) {
+            int k = morton_index(i, j)
+            if (morton_x(k) != i) { bad = bad + 1 }
+            if (morton_y(k) != j) { bad = bad + 1 }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    // every code in [0, n*n) decodes to a distinct in-grid pair —
+    // the O(1)-carry iteration visits every index exactly once
+    int acc = 0
+    int c = 0
+    while (c < n * n) {
+        int x = morton_x(c)
+        int y = morton_y(c)
+        if (x < 0 or x >= n or y < 0 or y >= n) { bad = bad + 1 }
+        acc = acc + x * 131 + y
+        c = c + 1
+    }
+    print(bad)          // 0
+    print(acc)          // 17031168 — the deterministic grid sum
+    print("PASS: morton_roundtrip")
+}

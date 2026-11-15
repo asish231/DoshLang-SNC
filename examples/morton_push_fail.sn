@@ -1,0 +1,14 @@
+// SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the E-GC-IN-LANE
+// store rule at the SFC boundary. A lane-backed SFC collection cannot
+// be stored into a GC-managed holder: the collector cannot trace into
+// lane memory, and the holder's release would free lane bytes as if
+// they were heap. SFC collections live in their region's lane and die
+// at its rewind — exactly the lane-backed list discipline.
+// MUST FAIL TO COMPILE.
+
+fn main() {
+    morton list<int, dims=[4, 4]> m = morton_new(4, 4)
+    list<any> xs = []
+    xs.push(m)
+    print("unreachable")
+}

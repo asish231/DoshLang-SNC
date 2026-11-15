@@ -145,6 +145,15 @@ pub enum TokenKind {
        staged into the J(W) join), and the block exit is the J2
        batched canonical fold. */
     Wave,
+    /* SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the SFC
+       layout type keywords — A2's space-filling-geometry decision
+       table made executable (§2.4). `morton list<T, dims=[n1, n2]>`:
+       tensor iteration with per-element indexed access (addr =
+       lane_base + interleave(i, j)·sizeof(T); no directory for
+       fixed-size T). `hilbert map<K, V>`: spatial range queries (the
+       d=2 sorted-key lane IS the index). */
+    MortonKw,
+    HilbertKw,
 }
 
 #[derive(Clone, Debug)]

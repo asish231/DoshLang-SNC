@@ -162,6 +162,15 @@ pub fn compile(opts: &CompileOptions) -> Result<CompileResult, String> {
     if !diag.is_empty() {
         return Err(diag.render(&files));
     }
+    // SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the W-*
+    // warnings (the T5b lexicographic-over-SFC detector) render to
+    // stderr on a SUCCESSFUL build — an advisory about a legal
+    // program wasting the layout, never a gate. Printed before the
+    // cache path: the warning is a property of the SOURCE, not the
+    // build.
+    if !diag.warnings.is_empty() {
+        eprint!("{}", diag.render_warnings(&files));
+    }
     let cov_files: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
     let _ = crate::ir::cov_collect(opts.coverage);
     // SWARM RABBIT HOLE — D0 gap #2 (Impl-B): -O1+ lowers the inline lane

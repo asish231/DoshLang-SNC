@@ -1,0 +1,60 @@
+sfc_path=0
+BENCH row=timer ns_per_op=10 phase_ms=1 ops=100000 checksum=179471519486454221
+BENCH row=lex_build ns_per_op=1 phase_ms=173 ops=104857600 checksum=1048576
+BENCH row=from_lex ns_per_op=1 phase_ms=162 ops=104857600 checksum=157235400
+BENCH row=stencil_lex_rowmajor ns_per_op=0 phase_ms=390 ops=522242000 checksum=273805474817000
+BENCH row=stencil_lex_morton ns_per_op=2 phase_ms=1056 ops=522242000 checksum=273805474817000
+BENCH row=stencil_curve_morton ns_per_op=2 phase_ms=1293 ops=522242000 checksum=273805474817000
+BENCH row=hilbert_box ns_per_op=17160 phase_ms=429 ops=25000 checksum=39279500
+BENCH row=hilbert_box_dyadic ns_per_op=3660 phase_ms=366 ops=100000 checksum=102400000
+BENCH row=hilbert_linear ns_per_op=434000 phase_ms=217 ops=500 checksum=566718
+sfc_box_split=157118,21638316786,177382,409600,50541158400,0,566718,72179475186,177382
+BENCH row=interleave ns_per_op=6 phase_ms=628 ops=100000000 checksum=76698525440
+sfc_path=0
+BENCH row=timer ns_per_op=10 phase_ms=1 ops=100000 checksum=179471519959653581
+BENCH row=lex_build ns_per_op=1 phase_ms=194 ops=104857600 checksum=1048576
+BENCH row=from_lex ns_per_op=1 phase_ms=164 ops=104857600 checksum=157235400
+BENCH row=stencil_lex_rowmajor ns_per_op=0 phase_ms=391 ops=522242000 checksum=273805474817000
+BENCH row=stencil_lex_morton ns_per_op=2 phase_ms=1059 ops=522242000 checksum=273805474817000
+BENCH row=stencil_curve_morton ns_per_op=2 phase_ms=1299 ops=522242000 checksum=273805474817000
+BENCH row=hilbert_box ns_per_op=17200 phase_ms=430 ops=25000 checksum=39279500
+BENCH row=hilbert_box_dyadic ns_per_op=3620 phase_ms=362 ops=100000 checksum=102400000
+BENCH row=hilbert_linear ns_per_op=462000 phase_ms=231 ops=500 checksum=566718
+sfc_box_split=157118,21638316786,177382,409600,50541158400,0,566718,72179475186,177382
+BENCH row=interleave ns_per_op=6 phase_ms=623 ops=100000000 checksum=76698525440
+sfc_path=0
+BENCH row=timer ns_per_op=10 phase_ms=1 ops=100000 checksum=179471520436953300
+BENCH row=lex_build ns_per_op=1 phase_ms=170 ops=104857600 checksum=1048576
+BENCH row=from_lex ns_per_op=1 phase_ms=163 ops=104857600 checksum=157235400
+BENCH row=stencil_lex_rowmajor ns_per_op=0 phase_ms=390 ops=522242000 checksum=273805474817000
+BENCH row=stencil_lex_morton ns_per_op=2 phase_ms=1055 ops=522242000 checksum=273805474817000
+BENCH row=stencil_curve_morton ns_per_op=2 phase_ms=1284 ops=522242000 checksum=273805474817000
+BENCH row=hilbert_box ns_per_op=16800 phase_ms=420 ops=25000 checksum=39279500
+BENCH row=hilbert_box_dyadic ns_per_op=3590 phase_ms=359 ops=100000 checksum=102400000
+BENCH row=hilbert_linear ns_per_op=440000 phase_ms=220 ops=500 checksum=566718
+sfc_box_split=157118,21638316786,177382,409600,50541158400,0,566718,72179475186,177382
+BENCH row=interleave ns_per_op=6 phase_ms=636 ops=100000000 checksum=76698525440
+sfc_path=0
+BENCH row=timer ns_per_op=10 phase_ms=1 ops=100000 checksum=179471520908565305
+BENCH row=lex_build ns_per_op=1 phase_ms=171 ops=104857600 checksum=1048576
+BENCH row=from_lex ns_per_op=1 phase_ms=172 ops=104857600 checksum=157235400
+BENCH row=stencil_lex_rowmajor ns_per_op=0 phase_ms=477 ops=522242000 checksum=273805474817000
+BENCH row=stencil_lex_morton ns_per_op=2 phase_ms=1147 ops=522242000 checksum=273805474817000
+BENCH row=stencil_curve_morton ns_per_op=2 phase_ms=1343 ops=522242000 checksum=273805474817000
+BENCH row=hilbert_box ns_per_op=16880 phase_ms=422 ops=25000 checksum=39279500
+BENCH row=hilbert_box_dyadic ns_per_op=3620 phase_ms=362 ops=100000 checksum=102400000
+BENCH row=hilbert_linear ns_per_op=440000 phase_ms=220 ops=500 checksum=566718
+sfc_box_split=157118,21638316786,177382,409600,50541158400,0,566718,72179475186,177382
+BENCH row=interleave ns_per_op=6 phase_ms=666 ops=100000000 checksum=76698525440
+sfc_path=0
+BENCH row=timer ns_per_op=20 phase_ms=2 ops=100000 checksum=179471521408408279
+BENCH row=lex_build ns_per_op=1 phase_ms=175 ops=104857600 checksum=1048576
+BENCH row=from_lex ns_per_op=1 phase_ms=165 ops=104857600 checksum=157235400
+BENCH row=stencil_lex_rowmajor ns_per_op=0 phase_ms=392 ops=522242000 checksum=273805474817000
+BENCH row=stencil_lex_morton ns_per_op=2 phase_ms=1124 ops=522242000 checksum=273805474817000
+BENCH row=stencil_curve_morton ns_per_op=2 phase_ms=1337 ops=522242000 checksum=273805474817000
+BENCH row=hilbert_box ns_per_op=17240 phase_ms=431 ops=25000 checksum=39279500
+BENCH row=hilbert_box_dyadic ns_per_op=3750 phase_ms=375 ops=100000 checksum=102400000
+BENCH row=hilbert_linear ns_per_op=456000 phase_ms=228 ops=500 checksum=566718
+sfc_box_split=157118,21638316786,177382,409600,50541158400,0,566718,72179475186,177382
+BENCH row=interleave ns_per_op=6 phase_ms=633 ops=100000000 checksum=76698525440

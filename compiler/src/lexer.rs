@@ -471,6 +471,11 @@ fn keyword(text: &str) -> TokenKind {
         // `link<T>`; u16 is the only implemented width — the pool-relative
         // `link<T in pool, u32>` form is documented out of scope).
         "link" => TokenKind::LinkKw,
+        // SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the SFC
+        // layout type keywords — `morton list<T, dims=[n1, n2]>` and
+        // `hilbert map<K, V>` (A2 §2.4's decision table, executable).
+        "morton" => TokenKind::MortonKw,
+        "hilbert" => TokenKind::HilbertKw,
         _ => TokenKind::Ident,
     }
 }

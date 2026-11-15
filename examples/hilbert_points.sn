@@ -1,0 +1,29 @@
+// SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): hilbert point
+// queries, exact. The d=2 Hilbert key is the Butz 1971 / Skilling
+// 2004 loop (Θ(k), no direct LUT — A2 §2.2; the per-access cost is
+// the honest price C2.9 names), computed ONCE per insert; the
+// entries sit on a lane sorted by key and THE ORDER IS THE INDEX —
+// exact point lookup is a binary search over the sorted lane
+// (A2 §3), no auxiliary hash structure.
+
+fn main() {
+    int k = 3                          // the order: an 8×8 grid
+    hilbert map<int, int> h = hilbert_new(3)
+    // insert ALONG THE CURVE (codes 0..16, strictly ascending keys —
+    // the append-in-key-order discipline, O(1) per insert)
+    int c = 0
+    while (c < 17) {
+        hilbert_insert(h, hilbert_dx(c, k), hilbert_dy(c, k), c)
+        c = c + 1
+    }
+    print(hilbert_len(h))                                        // 17
+    print(hilbert_has(h, hilbert_dx(0, k), hilbert_dy(0, k)))    // true
+    print(hilbert_has(h, hilbert_dx(40, k), hilbert_dy(40, k)))  // false — only 17 of 64 cells present
+    print(hilbert_get(h, hilbert_dx(9, k), hilbert_dy(9, k)))    // 9 — exact
+    // the entry readback: the sorted lane's order is the index
+    print(hilbert_entry_key(h, 0))                     // 0 — the first key
+    print(hilbert_entry_val(h, 16))                    // 16 — the last insert
+    print(hilbert_entry_x(h, 16) == hilbert_dx(16, k)) // true
+    print(hilbert_entry_y(h, 16) == hilbert_dy(16, k)) // true
+    print("PASS: hilbert_points")
+}

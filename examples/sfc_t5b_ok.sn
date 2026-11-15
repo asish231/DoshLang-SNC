@@ -1,0 +1,25 @@
+// SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the T5b
+// no-false-positive side. Curve-ordered iteration over the morton
+// layout: a single loop over the code k (the O(1) carry — the code
+// IS the linear index), the write/read pair striding through the
+// buffer in storage order (A2 §2.3: in-curve-order iteration is a
+// linear buffer scan — stride-1, prefetcher-perfect; the curve
+// costs nothing at L1 during traversal). No lexicographic pair, no
+// W-SFC-T5B.
+
+fn main() {
+    morton list<int, dims=[8, 8]> m = morton_new(8, 8)
+    int k = 0
+    while (k < 64) {
+        morton_set(m, morton_x(k), morton_y(k), k)   // curve-ordered writes
+        k = k + 1
+    }
+    int s = 0
+    k = 0
+    while (k < 64) {
+        s = s + morton_scan_get(m, k)                // the stride-1 curve scan
+        k = k + 1
+    }
+    print(s)   // 2016 — Σ 0..63
+    print("PASS: sfc_t5b_ok")
+}

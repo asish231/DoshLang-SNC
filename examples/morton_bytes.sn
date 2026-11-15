@@ -1,0 +1,44 @@
+// SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): position
+// independence, executed. A morton list holds VALUES ONLY — no
+// absolute pointers (fixed-size int elements, no directory) — so
+// to_bytes serializes the dims header plus the raw value bytes and
+// the round trip is ZERO-FIXUP by construction (the link<T, u16>
+// seam's O(N) self-containedness scan is not needed here: there is
+// nothing position-dependent to re-encode).
+
+fn main() {
+    morton list<int, dims=[16, 16]> m = morton_new(16, 16)
+    int i = 0
+    while (i < 16) {
+        int j = 0
+        while (j < 16) {
+            morton_set(m, i, j, i * 16 + j + 1)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    // the values, as bytes — the dims ride in a small header
+    ptr bytes = morton_to_bytes(m)
+    // the round trip: a FRESH morton built from the blob — no fixups
+    morton list<int, dims=[16, 16]> m2 = morton_from_bytes(bytes, 16, 16)
+    int bad = 0
+    int sum = 0
+    int k = 0
+    while (k < morton_len(m2)) {
+        sum = sum + morton_scan_get(m2, k)
+        k = k + 1
+    }
+    i = 0
+    while (i < 16) {
+        int j = 0
+        while (j < 16) {
+            if (morton_get(m, i, j) != morton_get(m2, i, j)) { bad = bad + 1 }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    print(bad)             // 0 — bit-identical values
+    print(sum)             // 32896 — Σ 1..256
+    print(morton_len(m2))   // 256
+    print("PASS: morton_bytes")
+}

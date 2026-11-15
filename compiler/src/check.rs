@@ -434,6 +434,14 @@ struct Checker<'a> {
     /// iterations possible). This is R1's "after J(W)" arm made
     /// lexical: provable, or refused.
     joined_stack: Vec<Vec<String>>,
+    /// SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the
+    /// lexically open counted-for loop variables (the T5b shape
+    /// detector's enclosing context). A counted for pushes its
+    /// variable; a nested counted for whose body indexes a morton
+    /// list as get(m, outer, inner) is the PROVABLE lexicographic
+    /// pair — W-SFC-T5B fires there (a warning: the program is legal,
+    /// the layout is wasted — A2 §3/T5(b)).
+    lex_loop_vars: Vec<String>,
 }
 
 pub fn template_param_names(tp: &[crate::ast::TypeParam]) -> Vec<String> {
@@ -573,6 +581,7 @@ pub fn check_programs(programs: &[Program], diag: &mut Diagnostics) -> CheckDb {
             wave_depth: 0,
             spawn_depth: 0,
             joined_stack: vec![Vec::new()],
+            lex_loop_vars: Vec::new(),
         };
         for item in &p.items {
             match item {
@@ -677,6 +686,7 @@ pub fn check_programs(programs: &[Program], diag: &mut Diagnostics) -> CheckDb {
             wave_depth: 0,
             spawn_depth: 0,
             joined_stack: vec![Vec::new()],
+            lex_loop_vars: Vec::new(),
         };
         c.current_bp = Some(inst.name.clone());
         c.current_bp_hierarchy = hierarchy(&c.db.blueprints, &inst.name);
@@ -1874,9 +1884,17 @@ fn collect(db: &mut CheckDb, programs: &[Program], diag: &mut Diagnostics) {
                         db.funcs.insert(format!("{}::{}", b.name, m.name), sig);
                     }
                 }
-                Item::Stmt(Stmt::Decl { names, ty, mode, value, .. }) => {
+                Item::Stmt(Stmt::Decl { names, ty, mode, value, span, .. }) => {
                     if let (Some(n), Some(t)) = (names.first(), ty) {
-                        db.globals.insert(n.clone(), resolve_type_ast(t, db));
+                        let rt = resolve_type_ast(t, db);
+                        // SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort
+                        // Delta): the SFC layout types' discipline at
+                        // the module-scope site (the same check the
+                        // function-body declaration arm runs — the
+                        // dims/elem rules are type facts, not
+                        // expression facts).
+                        check_sfc_type(&rt, *span, diag);
+                        db.globals.insert(n.clone(), rt);
                         // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O):
                         // the global-declaration arm records the pool's
                         // mode (the annotation parsed WITH the
@@ -2514,6 +2532,18 @@ pub fn resolve_type_ast(t: &TypeAst, db: &CheckDb) -> Type {
         // `link<Node>` names the record (the runtime diagnostics and the
         // HasSelfLink predicate both read the resolved target).
         TypeAst::Link(inner) => Type::Link(Box::new(resolve_type_ast(inner, db))),
+        // SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the SFC
+        // layouts' inner types resolve through the record table like
+        // the link target; the elem/dims discipline (fixed-size int,
+        // power-of-two dims) is validated at the declaration and
+        // constructor sites, where a diagnostic can fire.
+        TypeAst::Morton { elem, dims } => {
+            Type::Morton(Box::new(resolve_type_ast(elem, db)), dims.clone())
+        }
+        TypeAst::Hilbert(k, v) => Type::Hilbert(
+            Box::new(resolve_type_ast(k, db)),
+            Box::new(resolve_type_ast(v, db)),
+        ),
         TypeAst::Optional(inner) => Type::Optional(Box::new(resolve_type_ast(inner, db))),
         TypeAst::Tuple(ts) => Type::Tuple(ts.iter().map(|x| resolve_type_ast(x, db)).collect()),
         TypeAst::Fn { params, ret } => Type::Fn {
@@ -2521,6 +2551,131 @@ pub fn resolve_type_ast(t: &TypeAst, db: &CheckDb) -> Type {
             ret: Box::new(ret.as_ref().map(|x| resolve_type_ast(x, db)).unwrap_or(Type::Void)),
         },
         _ => ast_to_type(t),
+    }
+}
+
+/* SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the SFC layout
+   types' discipline checks (A2 §2.4's decision table, executable —
+   the slices' honest boundaries as named, verbatim refusals). Shared
+   by the module-scope collect site and the function-body declaration
+   site (both hold a Diagnostics); the constructor arms re-run the
+   dims rule on their literal arguments. */
+fn check_sfc_type(t: &Type, span: Span, diag: &mut Diagnostics) {
+    match t {
+        // The morton layout: fixed-size int elements (A2 §3: "no
+        // directory for fixed-size T" — slice 1 is int only), both
+        // dims powers of two (the grid maps onto the code space
+        // exactly — no padding).
+        Type::Morton(elem, dims) => {
+            if !matches!(**elem, Type::Int) {
+                diag.error(
+                    span,
+                    format!(
+                        "E-SFC: slice 1 implements morton list<int, dims=[n1, n2]> — \
+                         fixed-size int elements only (no directory for fixed-size \
+                         T; the Morton-keyed directory lane is the slice-2 form), \
+                         got element type {elem} [E-SFC]"
+                    ),
+                );
+            }
+            if dims.len() != 2 {
+                diag.error(
+                    span,
+                    format!(
+                        "E-SFC: morton lists take exactly two dims — \
+                         'morton list<T, dims=[n1, n2]>' (d=2 first; d=3 as the \
+                         0x9249…/0x2492…/0x4924… masks allow is the slice-2 \
+                         boundary), got {} [E-SFC]",
+                        morton_dims_label(dims)
+                    ),
+                );
+            } else if !morton_dims_valid(dims) {
+                diag.error(
+                    span,
+                    format!(
+                        "E-SFC: morton dims must be equal powers of two (slice 1 \
+                         maps the SQUARE grid onto the code space exactly — no \
+                         padding; unequal dims want the padded reservation / the \
+                         hybrid 2^t tile floor, the slice-2 form), got {} [E-SFC]",
+                        morton_dims_label(dims)
+                    ),
+                );
+            }
+        }
+        // The hilbert layout: the d=2 point key is the (x, y) int
+        // pair, the value is int (the sorted lane carries
+        // key/x/y/val); other element types are the slice-2 boundary.
+        Type::Hilbert(k, v) => {
+            if !matches!(**k, Type::Int) || !matches!(**v, Type::Int) {
+                diag.error(
+                    span,
+                    format!(
+                        "E-SFC: slice 1 implements hilbert map<int, int> — the \
+                         d=2 point key is the (x, y) int pair, the value is int; \
+                         other key/value types are the slice-2 boundary, got \
+                         hilbert map<{k}, {v}> [E-SFC]"
+                    ),
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+/// SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the morton
+/// constructors' literal dims — morton_new(d1, d2), morton_from_lex(src,
+/// d1, d2), morton_from_bytes(bytes, d1, d2) — extracted for the
+/// declaration-site dims-agreement rule (the dims are in the type; the
+/// constructor must agree). None when the value is not a morton
+/// constructor or a dim is not a literal (the constructor arm reports
+/// the non-literal case separately).
+fn sfc_ctor_dims_of(value: Option<&Expr>) -> Option<(String, Vec<i64>)> {
+    let e = value?;
+    let ExprKind::Call { callee, args, .. } = &e.kind else { return None };
+    let ExprKind::Ident(f) = &callee.kind else { return None };
+    let offs: &[usize] = match f.as_str() {
+        "morton_new" => &[0, 1],
+        "morton_from_lex" | "morton_from_bytes" => &[1, 2],
+        _ => return None,
+    };
+    let mut dims = Vec::new();
+    for i in offs {
+        let d = args.get(*i).and_then(|a| match a {
+            Arg::Pos(x) => match &x.kind {
+                ExprKind::Int(v) => Some(*v),
+                _ => None,
+            },
+            _ => None,
+        })?;
+        dims.push(d);
+    }
+    Some((f.clone(), dims))
+}
+
+/// The T5b detector's loop-variable reader: a counted for's variable
+/// comes from its init — `for (int i = 0, ...)` declares it, `for (i =
+/// 0, ...)` assigns it. None when the init is neither shape (the
+/// detector stays silent — provable shapes only).
+fn sfc_loop_var_of(s: &Stmt) -> Option<String> {
+    match s {
+        Stmt::Decl { names, .. } => names.first().cloned(),
+        Stmt::Assign { target, .. } => match &target.kind {
+            ExprKind::Ident(n) => Some(n.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The T5b detector's positional-ident reader: arg i as an Ident name
+/// (the loop variables are names in scope).
+fn sfc_pos_ident(args: &[Arg], i: usize) -> Option<String> {
+    match args.get(i)? {
+        Arg::Pos(e) => match &e.kind {
+            ExprKind::Ident(n) => Some(n.clone()),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -2928,6 +3083,39 @@ impl Checker<'_> {
                     let val_ty = value.as_ref().map(|v| self.check_expr(v));
                     let decl_ty = if let Some(t) = ty {
                         let t = resolve_type_ast(t, self.db);
+                        // SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort
+                        // Delta): the SFC layout types' discipline at
+                        // the declaration site — fixed-size int
+                        // elements, power-of-two dims (the grid maps
+                        // onto the code space exactly), hilbert
+                        // map<int, int> (the verbatim E-SFC arms the
+                        // golden suite pins).
+                        check_sfc_type(&t, *span, &mut self.diag);
+                        // The dims-are-in-the-type rule: a morton
+                        // constructor's literal dims must agree with
+                        // the declared type — the annotation must not
+                        // lie about the bounds the runtime checks.
+                        if let Type::Morton(_, ddims) = &t {
+                            if let Some((ctor, cdims)) = sfc_ctor_dims_of(value.as_ref()) {
+                                if &cdims != ddims {
+                                    self.diag.error(
+                                        *span,
+                                        format!(
+                                            "E-SFC: {ctor}'s dims [{}] do not match the \
+                                             declared morton list type's {} — the dims \
+                                             are in the type; the constructor must agree \
+                                             [E-SFC]",
+                                            cdims
+                                                .iter()
+                                                .map(|d| d.to_string())
+                                                .collect::<Vec<_>>()
+                                                .join(", "),
+                                            morton_dims_label(ddims)
+                                        ),
+                                    );
+                                }
+                            }
+                        }
                         if let Some(vt) = &val_ty {
                             let ok = t.assignable_from(vt, &self.db.blueprints)
                                 || *vt == Type::None
@@ -3537,7 +3725,7 @@ impl Checker<'_> {
                 cond,
                 step,
                 body,
-                ..
+                span: for_span,
             } => {
                 self.push();
                 self.check_stmt(init);
@@ -3546,8 +3734,72 @@ impl Checker<'_> {
                 }
                 self.check_stmt(step);
                 self.in_loop += 1;
+                // SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta):
+                // the T5b shape detector (A2 §3/T5(b): wrong-order
+                // iteration over SFC storage = Θ(N) misses, a factor
+                // B/w over the stride-1 curve scan — "the language
+                // must bind iteration order to storage order"). The
+                // PROVABLE shape: this counted for's variable is the
+                // INNER axis of a lexicographic pair — an enclosing
+                // counted for's variable is the OUTER — and the body
+                // indexes a morton list directly as
+                // morton_get/set(m, outer, inner). A WARNING, never
+                // an error: the program is legal, the layout is
+                // wasted. Curve-ordered iteration (morton_scan_get
+                // over the code) is shapeless here and stays silent.
+                if let Some(mv) = sfc_loop_var_of(init) {
+                    if !self.lex_loop_vars.is_empty() {
+                        let outers = self.lex_loop_vars.clone();
+                        let mut hit: Option<(String, String)> = None;
+                        for s in body {
+                            wave_visit_stmt(s, &mut |e| {
+                                if hit.is_some() {
+                                    return;
+                                }
+                                if let ExprKind::Call { callee, args, .. } = &e.kind {
+                                    if let ExprKind::Ident(f) = &callee.kind {
+                                        if f == "morton_get" || f == "morton_set" {
+                                            let a1 = sfc_pos_ident(args, 1);
+                                            let a2 = sfc_pos_ident(args, 2);
+                                            if let (Some(o), Some(w)) = (a1, a2) {
+                                                if w == mv && outers.contains(&o) {
+                                                    let coll = args
+                                                        .first()
+                                                        .and_then(|a| match a {
+                                                            Arg::Pos(x) => {
+                                                                Some(Self::expr_label(x))
+                                                            }
+                                                            _ => None,
+                                                        })
+                                                        .unwrap_or_else(|| "m".into());
+                                                    hit = Some((o, coll));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                        if let Some((ov, coll)) = hit {
+                            self.diag.warn(
+                                *for_span,
+                                format!(
+                                    "W-SFC-T5B: lexicographic iteration ('{ov}' then \
+                                     '{mv}') over morton list '{coll}' wastes the \
+                                     space-filling layout — iterate the curve order \
+                                     (morton_scan_get over the code) or use soa for \
+                                     axis-committed access [W-SFC-T5B]"
+                                ),
+                            );
+                        }
+                    }
+                    self.lex_loop_vars.push(mv);
+                }
                 for s in body {
                     self.check_stmt(s);
+                }
+                if sfc_loop_var_of(init).is_some() {
+                    self.lex_loop_vars.pop();
                 }
                 self.in_loop -= 1;
                 self.pop();
@@ -4458,6 +4710,39 @@ impl Checker<'_> {
                     || n == "zfix_quiescent_l"
                     || n == "zfix_count"
                     || n == "zfix_negate"
+                    /* SFC layout builtins (SWARM RABBIT HOLE, Wave 14,
+                       Impl-S, Cohort Delta; A2 §2.4's decision table —
+                       morton list = tensor iteration, hilbert map =
+                       range queries). The pure index arithmetic
+                       (morton_index/x/y, hilbert_code/dx/dy) and the
+                       collection ops; the arg-type and dims rules fire
+                       in check_call's arms below. */
+                    || n == "morton_new"
+                    || n == "morton_from_lex"
+                    || n == "morton_from_bytes"
+                    || n == "morton_get"
+                    || n == "morton_set"
+                    || n == "morton_index"
+                    || n == "morton_x"
+                    || n == "morton_y"
+                    || n == "morton_len"
+                    || n == "morton_scan_get"
+                    || n == "morton_to_bytes"
+                    || n == "hilbert_new"
+                    || n == "hilbert_code"
+                    || n == "hilbert_dx"
+                    || n == "hilbert_dy"
+                    || n == "hilbert_insert"
+                    || n == "hilbert_get"
+                    || n == "hilbert_has"
+                    || n == "hilbert_len"
+                    || n == "hilbert_entry_key"
+                    || n == "hilbert_entry_x"
+                    || n == "hilbert_entry_y"
+                    || n == "hilbert_entry_val"
+                    || n == "hilbert_box_first"
+                    || n == "hilbert_box_next"
+                    || n == "sfc_path"
                 {
                     Type::Named(format!("builtin:{n}"))
                 } else {
@@ -4553,6 +4838,25 @@ impl Checker<'_> {
                 let mut et = None;
                 for el in els {
                     let t = self.check_expr(el);
+                    // SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort
+                    // Delta): the E-GC-IN-LANE store rule, list-
+                    // literal form — a lane-backed SFC collection
+                    // cannot enter a list (the GC-managed holder
+                    // would release lane bytes as heap).
+                    if matches!(t, Type::Morton(_, _) | Type::Hilbert(_, _)) {
+                        let src = Self::expr_label(el);
+                        self.diag.error(
+                            el.span,
+                            format!(
+                                "E-GC-IN-LANE: cannot store '{src}' into a list \
+                                 literal — a lane-backed SFC collection cannot enter \
+                                 a GC-managed holder (the collector cannot trace \
+                                 lane memory and the holder's release would free it); \
+                                 SFC collections live in their region's lane and die \
+                                 at its rewind [E-GC-IN-LANE]"
+                            ),
+                        );
+                    }
                     match &et {
                         None => et = Some(t),
                         Some(prev) if prev != &t => {
@@ -4706,6 +5010,60 @@ impl Checker<'_> {
                 }
             }
             _ => None,
+        }
+    }
+
+    /* SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the SFC
+       intrinsic arms' argument readers. ident_call pre-checks every
+       positional argument (check_expr at the call head), so the
+       recorded expr_ty is the checked type; these helpers read it
+       back and report the E-SFC arg-type mismatches at the call's
+       span (the verbatim arms the golden suite pins). */
+    fn sfc_arg_ty(&self, args: &[Arg], i: usize) -> Type {
+        args.get(i)
+            .and_then(|a| match a {
+                Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. } => self
+                    .db
+                    .expr_ty
+                    .get(&(e.span.file, e.span.start, e.span.end))
+                    .cloned(),
+                _ => None,
+            })
+            .unwrap_or(Type::Int)
+    }
+
+    fn sfc_lit_arg(&self, args: &[Arg], i: usize) -> Option<i64> {
+        args.get(i).and_then(|a| match a {
+            Arg::Pos(e) => Self::int_lit_value(e),
+            _ => None,
+        })
+    }
+
+    fn sfc_int_arg(&mut self, args: &[Arg], i: usize, op: &str, span: Span) {
+        let t = self.sfc_arg_ty(args, i);
+        if !t.is_fixed_int() && !matches!(t, Type::Int | Type::Any) {
+            self.diag
+                .error(span, format!("{op}'s argument {} must be an int, got {t}", i + 1));
+        }
+    }
+
+    fn sfc_morton_arg(&mut self, args: &[Arg], i: usize, op: &str, span: Span) {
+        let t = self.sfc_arg_ty(args, i);
+        if !matches!(t, Type::Morton(_, _)) {
+            self.diag.error(
+                span,
+                format!(
+                    "{op} operates on a morton list (morton list<T, dims=[n1, n2]>), got {t}"
+                ),
+            );
+        }
+    }
+
+    fn sfc_hilbert_arg(&mut self, args: &[Arg], i: usize, op: &str, span: Span) {
+        let t = self.sfc_arg_ty(args, i);
+        if !matches!(t, Type::Hilbert(_, _)) {
+            self.diag
+                .error(span, format!("{op} operates on a hilbert map<K, V>, got {t}"));
         }
     }
 
@@ -5619,6 +5977,226 @@ impl Checker<'_> {
                 );
                 Type::Void
             }
+            /* SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the
+               SFC layouts' intrinsic arms (A2 §2.4's decision table,
+               executable). morton list<T, dims=[n1, n2]> — tensor
+               iteration with per-element indexed access: the
+               constructors carry the dims as literals (the dims are
+               in the type; the declaration arm cross-checks
+               agreement), the coordinate ops are bounds-checked at
+               runtime ([E-SFC], fail-fast), and the pure index
+               arithmetic (morton_index/x/y) is the feature-dispatched
+               interleave (C2.8). hilbert map<int, int> — range
+               queries: the Butz/Skilling key (hilbert_code/dx/dy,
+               Θ(k), no LUT), the append-in-key-order insert (the
+               sorted lane IS the index), the binary-search point
+               lookup, and the segment-advance box iterator
+               (hilbert_box_first/next — the explicit slice-1 form of
+               the FUR-Hilbert lowering shape). */
+            "morton_new" => {
+                if args.len() != 2 {
+                    self.diag.error(span, format!("morton_new expects 2 args (d1, d2), got {}", args.len()));
+                    return Type::Morton(Box::new(Type::Int), vec![8, 8]);
+                }
+                let dims = match (self.sfc_lit_arg(args, 0), self.sfc_lit_arg(args, 1)) {
+                    (Some(d1), Some(d2)) => vec![d1, d2],
+                    _ => {
+                        self.diag.error(
+                            span,
+                            "morton_new's dims must be integer literals — the dims \
+                             are part of the type (morton list<T, dims=[n1, n2]>) \
+                             and the power-of-two rule is a compile-time fact",
+                        );
+                        return Type::Morton(Box::new(Type::Int), vec![8, 8]);
+                    }
+                };
+                check_sfc_type(&Type::Morton(Box::new(Type::Int), dims.clone()), span, &mut self.diag);
+                Type::Morton(Box::new(Type::Int), dims)
+            }
+            "morton_from_lex" => {
+                if args.len() != 3 {
+                    self.diag.error(span, format!("morton_from_lex expects 3 args (src, d1, d2), got {}", args.len()));
+                    return Type::Morton(Box::new(Type::Int), vec![8, 8]);
+                }
+                let st = self.sfc_arg_ty(args, 0);
+                if !matches!(&st, Type::List(e) if e.is_fixed_int() || matches!(**e, Type::Any)) {
+                    self.diag.error(
+                        span,
+                        format!("morton_from_lex's source must be a list<int> (the lexicographic row-major twin), got {st}"),
+                    );
+                }
+                let dims = match (self.sfc_lit_arg(args, 1), self.sfc_lit_arg(args, 2)) {
+                    (Some(d1), Some(d2)) => vec![d1, d2],
+                    _ => {
+                        self.diag.error(
+                            span,
+                            "morton_from_lex's dims must be integer literals — the dims are part of the type",
+                        );
+                        return Type::Morton(Box::new(Type::Int), vec![8, 8]);
+                    }
+                };
+                check_sfc_type(&Type::Morton(Box::new(Type::Int), dims.clone()), span, &mut self.diag);
+                Type::Morton(Box::new(Type::Int), dims)
+            }
+            "morton_from_bytes" => {
+                if args.len() != 3 {
+                    self.diag.error(span, format!("morton_from_bytes expects 3 args (bytes, d1, d2), got {}", args.len()));
+                    return Type::Morton(Box::new(Type::Int), vec![8, 8]);
+                }
+                let st = self.sfc_arg_ty(args, 0);
+                if !matches!(st, Type::Ptr | Type::Any) {
+                    self.diag.error(
+                        span,
+                        format!("morton_from_bytes expects the to_bytes blob (a ptr), got {st}"),
+                    );
+                }
+                let dims = match (self.sfc_lit_arg(args, 1), self.sfc_lit_arg(args, 2)) {
+                    (Some(d1), Some(d2)) => vec![d1, d2],
+                    _ => {
+                        self.diag.error(
+                            span,
+                            "morton_from_bytes's dims must be integer literals — the dims are part of the type (the runtime checks the blob's header agrees)",
+                        );
+                        return Type::Morton(Box::new(Type::Int), vec![8, 8]);
+                    }
+                };
+                Type::Morton(Box::new(Type::Int), dims)
+            }
+            "morton_get" | "morton_set" => {
+                self.sfc_morton_arg(args, 0, n, span);
+                self.sfc_int_arg(args, 1, n, span);
+                self.sfc_int_arg(args, 2, n, span);
+                if n == "morton_set" {
+                    if args.len() != 4 {
+                        self.diag.error(span, format!("morton_set expects 4 args (m, i, j, v), got {}", args.len()));
+                    }
+                    Type::Void
+                } else {
+                    if args.len() != 3 {
+                        self.diag.error(span, format!("morton_get expects 3 args (m, i, j), got {}", args.len()));
+                    }
+                    Type::Int
+                }
+            }
+            "morton_index" => {
+                if args.len() != 2 {
+                    self.diag.error(span, format!("morton_index expects 2 args (i, j), got {}", args.len()));
+                }
+                self.sfc_int_arg(args, 0, n, span);
+                self.sfc_int_arg(args, 1, n, span);
+                Type::Int
+            }
+            "morton_x" | "morton_y" => {
+                if args.len() != 1 {
+                    self.diag.error(span, format!("{n} expects 1 arg (the code), got {}", args.len()));
+                }
+                self.sfc_int_arg(args, 0, n, span);
+                Type::Int
+            }
+            "morton_len" => {
+                if args.len() != 1 {
+                    self.diag.error(span, format!("morton_len expects 1 arg (m), got {}", args.len()));
+                }
+                self.sfc_morton_arg(args, 0, n, span);
+                Type::Int
+            }
+            "morton_scan_get" => {
+                if args.len() != 2 {
+                    self.diag.error(span, format!("morton_scan_get expects 2 args (m, k), got {}", args.len()));
+                }
+                self.sfc_morton_arg(args, 0, n, span);
+                self.sfc_int_arg(args, 1, n, span);
+                Type::Int
+            }
+            "morton_to_bytes" => {
+                if args.len() != 1 {
+                    self.diag.error(span, format!("morton_to_bytes expects 1 arg (m), got {}", args.len()));
+                }
+                self.sfc_morton_arg(args, 0, n, span);
+                Type::Ptr
+            }
+            "hilbert_new" => {
+                if args.len() != 1 {
+                    self.diag.error(span, format!("hilbert_new expects 1 arg (the order k), got {}", args.len()));
+                    return Type::Hilbert(Box::new(Type::Int), Box::new(Type::Int));
+                }
+                match self.sfc_lit_arg(args, 0) {
+                    Some(k) if (1..=31).contains(&k) => {}
+                    Some(_) => {
+                        self.diag.error(
+                            span,
+                            "hilbert_new's order k must be in 1..=31 (the d=2 grid \
+                             side is 2^k and the code must fit the 62-bit space)",
+                        );
+                    }
+                    None => {
+                        self.diag.error(
+                            span,
+                            "hilbert_new's order k must be an integer literal (the grid side 2^k is a compile-time fact)",
+                        );
+                    }
+                }
+                Type::Hilbert(Box::new(Type::Int), Box::new(Type::Int))
+            }
+            "hilbert_code" | "hilbert_dx" | "hilbert_dy" => {
+                let want = if n == "hilbert_code" { 3 } else { 2 };
+                if args.len() != want {
+                    self.diag.error(span, format!("{n} expects {want} int args, got {}", args.len()));
+                }
+                for i in 0..want {
+                    self.sfc_int_arg(args, i, n, span);
+                }
+                Type::Int
+            }
+            "hilbert_insert" => {
+                if args.len() != 4 {
+                    self.diag.error(span, format!("hilbert_insert expects 4 args (h, x, y, v), got {}", args.len()));
+                }
+                self.sfc_hilbert_arg(args, 0, n, span);
+                self.sfc_int_arg(args, 1, n, span);
+                self.sfc_int_arg(args, 2, n, span);
+                self.sfc_int_arg(args, 3, n, span);
+                Type::Void
+            }
+            "hilbert_get" | "hilbert_has" => {
+                if args.len() != 3 {
+                    self.diag.error(span, format!("{n} expects 3 args (h, x, y), got {}", args.len()));
+                }
+                self.sfc_hilbert_arg(args, 0, n, span);
+                self.sfc_int_arg(args, 1, n, span);
+                self.sfc_int_arg(args, 2, n, span);
+                if n == "hilbert_get" { Type::Int } else { Type::Bool }
+            }
+            "hilbert_len" => {
+                if args.len() != 1 {
+                    self.diag.error(span, format!("hilbert_len expects 1 arg (h), got {}", args.len()));
+                }
+                self.sfc_hilbert_arg(args, 0, n, span);
+                Type::Int
+            }
+            "hilbert_entry_key" | "hilbert_entry_x" | "hilbert_entry_y" | "hilbert_entry_val" => {
+                if args.len() != 2 {
+                    self.diag.error(span, format!("{n} expects 2 args (h, idx), got {}", args.len()));
+                }
+                self.sfc_hilbert_arg(args, 0, n, span);
+                self.sfc_int_arg(args, 1, n, span);
+                Type::Int
+            }
+            "hilbert_box_first" | "hilbert_box_next" => {
+                let want = if n == "hilbert_box_first" { 5 } else { 6 };
+                if args.len() != want {
+                    self.diag.error(span, format!("{n} expects {want} args, got {}", args.len()));
+                }
+                self.sfc_hilbert_arg(args, 0, n, span);
+                for i in 1..want {
+                    self.sfc_int_arg(args, i, n, span);
+                }
+                Type::Int
+            }
+            /* The dispatch readout (C2.8's honest self-report): 0 =
+               the software shift-or path (this AArch64 machine), 1 =
+               BMI2 PDEP/PEXT. */
+            "sfc_path" => Type::Int,
             "pool_insert" => {
                 // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the
                 // E0803.3 gate on the intrinsic form — the pool is the
@@ -6426,6 +7004,32 @@ impl Checker<'_> {
                 }
                 if let Some(Arg::Pos(e)) = args.first() {
                     let t = self.check_expr(e);
+                    // SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort
+                    // Delta): the E-GC-IN-LANE store rule at the SFC
+                    // boundary. A lane-backed SFC collection cannot
+                    // enter a GC-managed holder: the collector cannot
+                    // trace into lane memory (a lane pointer is not a
+                    // heap object — tracking it would put lane bytes
+                    // on the free list), and the holder's release
+                    // would free lane bytes as heap. SFC collections
+                    // live in their region's lane and die at its
+                    // rewind — the lane-backed list discipline.
+                    if matches!(t, Type::Morton(_, _) | Type::Hilbert(_, _)) {
+                        let src = Self::expr_label(e);
+                        let dst = Self::root_var_of_expr(recv)
+                            .unwrap_or_else(|| Self::expr_label(recv));
+                        self.diag.error(
+                            e.span,
+                            format!(
+                                "E-GC-IN-LANE: cannot store '{src}' into '{dst}' — a \
+                                 lane-backed SFC collection cannot enter a \
+                                 GC-managed holder (the collector cannot trace lane \
+                                 memory and the holder's release would free it); SFC \
+                                 collections live in their region's lane and die at \
+                                 its rewind [E-GC-IN-LANE]"
+                            ),
+                        );
+                    }
                     if !elem.assignable_from(&t, &self.db.blueprints) {
                         self.diag.error(e.span, format!("cannot push {t} into list<{elem}>"));
                     }

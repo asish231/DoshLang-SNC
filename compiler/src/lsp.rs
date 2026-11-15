@@ -171,7 +171,10 @@ impl Server {
             Ok(program) => {
                 let mut diag = Diagnostics::default();
                 let _ = check_programs(&[program], &mut diag);
-                diag.errors
+                // Wave 14 (Impl-S): the W-* warnings ride along at
+                // severity 2 (warnings never gate the build).
+                let mut items: Vec<Value> = diag
+                    .errors
                     .iter()
                     .map(|e| {
                         let (sl, sc) = file.loc(e.span.start as usize);
@@ -184,7 +187,19 @@ impl Server {
                             "range": range(sl - 1, sc - 1, el - 1, (ec - 1).max(sc))
                         })
                     })
-                    .collect()
+                    .collect();
+                items.extend(diag.warnings.iter().map(|w| {
+                    let (sl, sc) = file.loc(w.span.start as usize);
+                    let (el, ec) =
+                        file.loc(w.span.end.max(w.span.start.saturating_add(1)) as usize);
+                    json!({
+                        "message": w.message,
+                        "severity": 2,
+                        "source": "snc",
+                        "range": range(sl - 1, sc - 1, el - 1, (ec - 1).max(sc))
+                    })
+                }));
+                items
             }
             Err(e) => vec![json!({
                 "message": e,
@@ -914,6 +929,14 @@ pub fn type_name(t: &crate::types::Type) -> String {
         // SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the
         // self-relative link type, with its implemented width.
         Link(i) => format!("link<{}, u16>", type_name(i)),
+        // Wave 14 (Impl-S): the SFC layouts (the display is the
+        // syntax — the E-SFC diagnostics quote it).
+        Morton(e, dims) => format!(
+            "morton list<{}, {}>",
+            type_name(e),
+            crate::types::morton_dims_label(dims)
+        ),
+        Hilbert(k, v) => format!("hilbert map<{}, {}>", type_name(k), type_name(v)),
     }
 }
 
@@ -963,6 +986,14 @@ fn type_ast_name(t: &crate::ast::TypeAst) -> String {
         // SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the
         // self-relative link type, with its implemented width.
         Link(i) => format!("link<{}, u16>", type_ast_name(i)),
+        // Wave 14 (Impl-S): the SFC layouts (the display is the
+        // syntax).
+        Morton { elem, dims } => format!(
+            "morton list<{}, {}>",
+            type_ast_name(elem),
+            crate::types::morton_dims_label(dims)
+        ),
+        Hilbert(k, v) => format!("hilbert map<{}, {}>", type_ast_name(k), type_ast_name(v)),
     }
 }
 

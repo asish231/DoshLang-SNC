@@ -652,6 +652,47 @@ impl Parser {
                 self.eat_gt()?;
                 Ok(TypeAst::Link(Box::new(inner)))
             }
+            /* SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the
+               SFC layout types — A2 §2.4's decision table executable.
+               `morton list<T, dims=[n1, n2]>`: the dims are integer
+               literals (they are part of the TYPE; the checker's
+               power-of-two rule fires at resolve time). `hilbert
+               map<K, V>`: the d=2 point-key map (slice 1: int, int). */
+            TokenKind::MortonKw => {
+                self.bump();
+                self.eat(TokenKind::ListKw)?;
+                self.eat(TokenKind::Lt)?;
+                let elem = self.parse_type()?;
+                let mut dims = Vec::new();
+                if self.eat_if(TokenKind::Comma) {
+                    let kw = self.expect_ident()?;
+                    if kw != "dims" {
+                        return Err(self.error("expected 'dims' — the morton dims are a named type argument"));
+                    }
+                    self.eat(TokenKind::Eq)?;
+                    self.eat(TokenKind::LBracket)?;
+                    loop {
+                        let d = self.expect_int()?;
+                        dims.push(d);
+                        if !self.eat_if(TokenKind::Comma) {
+                            break;
+                        }
+                    }
+                    self.eat(TokenKind::RBracket)?;
+                }
+                self.eat_gt()?;
+                Ok(TypeAst::Morton { elem: Box::new(elem), dims })
+            }
+            TokenKind::HilbertKw => {
+                self.bump();
+                self.eat(TokenKind::MapKw)?;
+                self.eat(TokenKind::Lt)?;
+                let k = self.parse_type()?;
+                self.eat(TokenKind::Comma)?;
+                let v = self.parse_type()?;
+                self.eat_gt()?;
+                Ok(TypeAst::Hilbert(Box::new(k), Box::new(v)))
+            }
             TokenKind::Ident => {
                 let name = self.expect_ident()?;
                 if self.at(TokenKind::Lt) {
@@ -928,6 +969,12 @@ impl Parser {
             // self-relative link declaration (`link<Node> x = ...`)
             // parses through the typed-decl path like pool/handle.
             TokenKind::LinkKw => true,
+            // SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the
+            // SFC layout declarations (`morton list<int, dims=[8, 8]>
+            // m = ...`, `hilbert map<int, int> h = ...`) parse
+            // through the typed-decl path like link/pool — the `<`
+            // after the `list`/`map` keyword is unambiguous here.
+            TokenKind::MortonKw | TokenKind::HilbertKw => true,
             TokenKind::Ident => {
                 matches!(self.peek_n(1), TokenKind::Ident | TokenKind::Question)
                     // `Foo<Bar> x = ...` — generic type application in a
@@ -2243,5 +2290,11 @@ fn is_type_start(k: TokenKind) -> bool {
             | TokenKind::Ident
             | TokenKind::LParen
             | TokenKind::Fn
+            // SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the
+            // SFC layout declarations route through the typed-decl
+            // path (the statement dispatcher's gate — the method
+            // form looks_like_typed_decl holds the full context).
+            | TokenKind::MortonKw
+            | TokenKind::HilbertKw
     )
 }

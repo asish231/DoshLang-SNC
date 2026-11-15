@@ -1,0 +1,14 @@
+// SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the
+// power-of-two discipline (A2 §3) — slice 1 maps the SQUARE
+// power-of-two grid onto the morton code space EXACTLY (no padding:
+// every code in [0, d*d) is an in-grid cell — unequal power-of-two
+// dims spread the code space past d1*d2 and want the padded
+// reservation / the hybrid 2^t tile floor (Morton above the tile,
+// row-major inside — Chatterjee TPDS 13(11) 2002), the documented
+// slice-2 form).
+// MUST FAIL TO COMPILE.
+
+fn main() {
+    morton list<int, dims=[8, 12]> m = morton_new(8, 12)
+    print("unreachable")
+}

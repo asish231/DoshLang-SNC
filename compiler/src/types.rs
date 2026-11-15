@@ -41,6 +41,20 @@ pub enum Type {
     /// construct-in-place (sret), re-encoding relocation
     /// (relocate_node/relocate_range) or by-reference moves are legal.
     Link(Box<Type>),
+    /// SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the morton
+    /// layout — `morton list<T, dims=[n1, n2]>` (A2 §2.4: tensor
+    /// iteration with per-element indexed access). Lane-backed (one
+    /// contiguous reservation, header + values); values only —
+    /// position-independent by construction (E-GC-IN-LANE: never
+    /// ARC'd, never gc_track'd, never stored into GC holders). Slice
+    /// 1: elem = int, both dims powers of two.
+    Morton(Box<Type>, Vec<i64>),
+    /// SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the
+    /// hilbert layout — `hilbert map<K, V>` (A2 §2.4: spatial range
+    /// queries). Entries sorted by d=2 Hilbert key on a lane; the
+    /// sorted order IS the index. Lane-backed like Morton. Slice 1:
+    /// K = int, V = int.
+    Hilbert(Box<Type>, Box<Type>),
     /// Opaque raw pointer (C FFI). No borrow tracking, no auto-deref.
     Ptr,
     Optional(Box<Type>),
@@ -104,6 +118,10 @@ impl Type {
                 | Type::Lock
                 | Type::Json
                 | Type::Fn { .. }
+                // Wave 14 (Impl-S): the SFC layouts are pointer-like
+                // values (a lane-backed header pointer).
+                | Type::Morton(_, _)
+                | Type::Hilbert(_, _)
         )
     }
 
@@ -140,6 +158,15 @@ impl Type {
             Type::Pool(inner) => TypeAst::Pool(Box::new(inner.to_type_ast())),
             Type::Handle(inner) => TypeAst::Handle(Box::new(inner.to_type_ast())),
             Type::Link(inner) => TypeAst::Link(Box::new(inner.to_type_ast())),
+            // Wave 14 (Impl-S): the SFC layouts' round trip through the
+            // AST form (the parser's named dims argument included).
+            Type::Morton(elem, dims) => TypeAst::Morton {
+                elem: Box::new(elem.to_type_ast()),
+                dims: dims.clone(),
+            },
+            Type::Hilbert(k, v) => {
+                TypeAst::Hilbert(Box::new(k.to_type_ast()), Box::new(v.to_type_ast()))
+            }
             Type::Ptr => TypeAst::Ptr,
             Type::Optional(inner) => TypeAst::Optional(Box::new(inner.to_type_ast())),
             Type::Tuple(ts) => TypeAst::Tuple(ts.iter().map(|t| t.to_type_ast()).collect()),
@@ -244,6 +271,22 @@ impl Type {
         if let Type::Link(_) = self {
             return matches!(other, Type::Int);
         }
+        // Wave 14 (Impl-S): the SFC layouts assign ONLY to the identical
+        // type (the dims are part of the morton identity; the lane-backed
+        // value never coerces to int/ptr — E-GC-IN-LANE polices the store
+        // sites separately).
+        if let (Type::Morton(ea, da), Type::Morton(eb, db)) = (self, other) {
+            return ea == eb && da == db;
+        }
+        if let (Type::Hilbert(ka, va), Type::Hilbert(kb, vb)) = (self, other) {
+            return ka == kb && va == vb;
+        }
+        if matches!(self, Type::Morton(_, _) | Type::Hilbert(_, _)) {
+            return false;
+        }
+        if matches!(other, Type::Morton(_, _) | Type::Hilbert(_, _)) {
+            return false;
+        }
         if (matches!(self, Type::Int) && matches!(other, Type::Handle(_)))
             || (matches!(self, Type::Handle(_)) && matches!(other, Type::Int))
         {
@@ -341,6 +384,28 @@ impl Type {
     }
 }
 
+/* SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the morton
+   type's dims rule — A2 §3's power-of-two discipline, shared by the
+   type-resolution site and the constructor's literal check. Slice 1
+   maps the grid onto the code space EXACTLY (every code in [0, d1*d2)
+   is an in-grid cell), which holds iff the grid is SQUARE and a power
+   of two — unequal power-of-two dims spread the code space past d1*d2
+   (interleave(2^a−1, 2^b−1) needs 2a−1 bits when a > b) and want the
+   PADDED reservation / the hybrid 2^t tile floor (Chatterjee TPDS
+   13(11) 2002), the documented slice-2 form. */
+pub fn morton_dims_valid(dims: &[i64]) -> bool {
+    dims.len() == 2
+        && dims[0] > 0
+        && dims[0] <= (1i64 << 31)
+        && dims[0] == dims[1]
+        && (dims[0] & (dims[0] - 1)) == 0
+}
+
+pub fn morton_dims_label(dims: &[i64]) -> String {
+    let parts: Vec<String> = dims.iter().map(|d| d.to_string()).collect();
+    format!("dims=[{}]", parts.join(", "))
+}
+
 pub fn blueprint_extends(
     bps: &std::collections::HashMap<String, BlueprintInfo>,
     child: &str,
@@ -398,6 +463,10 @@ impl fmt::Display for Type {
             // DIFF-5 (Impl-P): the display carries the implemented width —
             // the verbatim E0801 diagnostics name the type as link<T, u16>.
             Type::Link(inner) => write!(f, "link<{inner}, u16>"),
+            // Wave 14 (Impl-S): the SFC layouts — the display is the
+            // syntax (the verbatim E-SFC diagnostics quote it).
+            Type::Morton(elem, dims) => write!(f, "morton list<{elem}, {}>", morton_dims_label(dims)),
+            Type::Hilbert(k, v) => write!(f, "hilbert map<{k}, {v}>"),
             Type::Blueprint(n) | Type::Named(n) | Type::Record(n) | Type::Enum(n) | Type::Contract(n) => write!(f, "{n}"),
             Type::Any => write!(f, "any"),
             Type::Lock => write!(f, "lock"),
@@ -453,6 +522,8 @@ pub fn ast_to_type(t: &TypeAst) -> Type {
         TypeAst::Pool(i) => Type::Pool(Box::new(ast_to_type(i))),
         TypeAst::Handle(i) => Type::Handle(Box::new(ast_to_type(i))),
         TypeAst::Link(i) => Type::Link(Box::new(ast_to_type(i))),
+        TypeAst::Morton { elem, dims } => Type::Morton(Box::new(ast_to_type(elem)), dims.clone()),
+        TypeAst::Hilbert(k, v) => Type::Hilbert(Box::new(ast_to_type(k)), Box::new(ast_to_type(v))),
         TypeAst::Optional(i) => Type::Optional(Box::new(ast_to_type(i))),
         TypeAst::Tuple(xs) => Type::Tuple(xs.iter().map(ast_to_type).collect()),
     }

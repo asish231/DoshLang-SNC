@@ -800,10 +800,66 @@ else
     FAILURES=$((FAILURES + 1))
 fi
 
+# 22. The SFC layouts — A2's space-filling-geometry decision table's
+#     runtime mechanics (SWARM RABBIT HOLE, Wave 14, Impl-S, Cohort
+#     Delta; A2 §2.2/§2.4). The feature-dispatched interleave
+#     (C2.8: PDEP/PEXT on x86-64 BMI2, the software shift-or path
+#     elsewhere — verified against the bit-by-bit reference and the
+#     forced-dispatch knob), the deinterleave bijection, the
+#     Butz/Skilling hilbert loop (encode/decode round trip + the
+#     vertex-continuous unit steps), the segment-advance box query vs
+#     the linear-scan reference EXACTLY (128 seeded-LCG boxes + the
+#     edge boxes), the O(1)-carry iteration over the real buffer, the
+#     lane backing (zero GC objects moved — E-GC-IN-LANE), the
+#     to_bytes zero-fixup round trip, and the [E-SFC] refusal
+#     backstops (fork'd children: bounds, from_lex length, from_bytes
+#     dims, insert order, duplicate point, absent point, out-of-grid
+#     coordinate, the forced-bmi2 knob). Built twice: plain, then ASan
+#     (22b).
+echo ""
+echo "-----------------------------------------------------------------"
+echo "22. SFC LAYOUTS, RUNTIME MECHANICS (test_sfc.c)"
+echo "-----------------------------------------------------------------"
+OUT_SFC="/tmp/snc_test_sfc_c"
+rm -f "$OUT_SFC"
+if clang -O1 -g -o "$OUT_SFC" "$DIR/test_sfc.c" "$ROOT/compiler/runtime.c" -lpthread 2>/dev/null; then
+    OUTPUT=$("$OUT_SFC")
+    echo "$OUTPUT"
+    if echo "$OUTPUT" | grep -q "PASS:"; then
+        echo ">>> test_sfc(.c): PASSED"
+    else
+        echo ">>> test_sfc(.c): FAILED"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> test_sfc(.c): BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+echo ""
+echo "-----------------------------------------------------------------"
+echo "22b. SFC LAYOUTS, ASAN STRESS (test_sfc.c)"
+echo "-----------------------------------------------------------------"
+OUT_SFC_ASAN="/tmp/snc_test_sfc_c_asan"
+rm -f "$OUT_SFC_ASAN"
+if clang -O1 -g -fsanitize=address -o "$OUT_SFC_ASAN" "$DIR/test_sfc.c" "$ROOT/compiler/runtime.c" -lpthread 2>/dev/null; then
+    OUTPUT=$(ASAN_OPTIONS=detect_leaks=0 "$OUT_SFC_ASAN" 2>&1)
+    echo "$OUTPUT"
+    if echo "$OUTPUT" | grep -q "PASS:"; then
+        echo ">>> test_sfc(.c ASan): PASSED (no ASan reports over the lane reservations / the blocked reshuffle / the box scans / the growth copies)"
+    else
+        echo ">>> test_sfc(.c ASan): FAILED"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> test_sfc(.c ASan): BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
 echo ""
 echo "================================================================="
 if [ $FAILURES -eq 0 ]; then
-    echo "  ALL SYSTEMS & SECURITY TESTS PASSED (33 checks)"
+    echo "  ALL SYSTEMS & SECURITY TESTS PASSED (35 checks)"
     exit 0
 else
     echo "  $FAILURES SYSTEMS TESTS FAILED"

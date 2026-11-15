@@ -1,0 +1,17 @@
+// SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the
+// out-of-order insert — the honest slice-1 REFUSAL. The hilbert
+// map's sorted lane IS its index (binary search over the keys, no
+// auxiliary structure), so an insert whose key does not append
+// would need a reorder — and slice 1 does not silently sort (A2 §3:
+// out-of-order dynamic inserts → REBUILD EPOCHS, flagged for P1/P3).
+// The runtime fails fast with [E-SFC-ORDER]; the future form is
+// named in the diagnostic itself.
+// MUST DIE AT RUNTIME.
+
+fn main() {
+    int k = 2
+    hilbert map<int, int> h = hilbert_new(2)
+    hilbert_insert(h, hilbert_dx(5, k), hilbert_dy(5, k), 5)   // key 5 — appends
+    hilbert_insert(h, hilbert_dx(2, k), hilbert_dy(2, k), 2)   // key 2 < 5 → refused
+    print("unreachable")
+}

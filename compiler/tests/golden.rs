@@ -1954,3 +1954,260 @@ fn wave_er1_not_a_seam_cell_rejected() {
         "expected the seam-cell qualification rule in the diagnostic, got: {err}"
     );
 }
+
+// ---------------------------------------------------------------------
+// SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the SFC layouts
+// — A2's space-filling-geometry decision table made executable (A2
+// §2.4: morton list = tensor iteration with per-element indexed
+// access; hilbert map = spatial range queries, the key computed once
+// and amortized over the box; soa = the lexicographic axis-committed
+// field projection, already landed). The interleave/deinterleave is
+// FEATURE-DISPATCHED once per process (C2.8: PDEP/PEXT on x86-64
+// with BMI2, the software shift-or path elsewhere); the T5b warning
+// binds iteration order to storage order (A2 §3).
+// ---------------------------------------------------------------------
+
+/// Compile with --emit-llvm and REQUIRE success, returning the
+/// compile's stderr — the W-* warnings land there (warnings are
+/// never errors; the build proceeds).
+fn compile_ok_stderr(rel: &str) -> String {
+    let root = repo_root();
+    let src = root.join(rel);
+    let compile = Command::new(snc_bin())
+        .arg(&src)
+        .arg("--emit-llvm")
+        .current_dir(&root)
+        .output()
+        .expect("run snc");
+    assert!(
+        compile.status.success(),
+        "{rel} must compile — warnings are not errors"
+    );
+    String::from_utf8_lossy(&compile.stderr).into()
+}
+
+/// The morton index arithmetic round trip: interleave↔deinterleave is
+/// a bijection over the grid (every pair encodes to a distinct code,
+/// every code decodes to an in-grid pair — the O(1)-carry iteration
+/// visits every index exactly once; the code space covers a
+/// power-of-two grid exactly).
+#[test]
+fn morton_index_roundtrip() {
+    assert_out(
+        "examples/morton_roundtrip.sn",
+        "0\n1\n2\n3\n4\n0\n17031168\nPASS: morton_roundtrip\n",
+    );
+}
+
+/// from_lex equivalence: the blocked reshuffle is a permutation —
+/// every cell reads back its row-major value (the coordinate view)
+/// and the curve-order scan sees the same multiset (2016 both ways).
+#[test]
+fn morton_from_lex_equivalence() {
+    assert_out(
+        "examples/morton_from_lex.sn",
+        "0\n2016\n2016\n64\nPASS: morton_from_lex\n",
+    );
+}
+
+/// Position independence, executed: a morton list holds values only
+/// (no absolute pointers), so to_bytes/from_bytes round-trips with
+/// ZERO fixups — the serialized bytes rebuild a fresh, bit-identical
+/// collection (the link<T, u16> seam needs an O(N) scan for exactly
+/// the self-relative bytes SFC storage does not have).
+#[test]
+fn morton_bytes_position_independence() {
+    assert_out(
+        "examples/morton_bytes.sn",
+        "0\n32896\n256\nPASS: morton_bytes\n",
+    );
+}
+
+/// Hilbert point queries, exact: the Butz/Skilling key computed once
+/// per insert; the sorted lane's order IS the index (binary search
+/// point lookups, no auxiliary hash); the entry readback exposes the
+/// lane's sorted order.
+#[test]
+fn hilbert_point_queries_exact() {
+    assert_out(
+        "examples/hilbert_points.sn",
+        "17\ntrue\nfalse\n9\n0\n16\ntrue\ntrue\nPASS: hilbert_points\n",
+    );
+}
+
+/// The segment-advance box query == the linear-scan reference, EXACT:
+/// every axis-aligned box of the 8×8 grid (1296 boxes), both sides
+/// accumulating the same order-free (count, sum, xor) triple over
+/// the result set — Tropf–Herzog/Lawder–King exactness (A2 §3).
+#[test]
+fn hilbert_box_matches_linear_scan() {
+    assert_out(
+        "examples/hilbert_box.sn",
+        "1296\n1\nPASS: hilbert_box\n",
+    );
+}
+
+/// The out-of-order insert — the honest slice-1 REFUSAL, verbatim:
+/// the sorted lane IS the index and slice 1 does not silently sort;
+/// the diagnostic names the rebuild-epoch future form (A2 §3's
+/// P1/P3 flag). The process dies at the insert, exit 1.
+#[test]
+fn hilbert_insert_order_refused_verbatim() {
+    let (code, out, err) = compile_run("examples/hilbert_insert_order_fail.sn");
+    assert_eq!(code, 1, "the process must die at the refused insert");
+    assert!(
+        out.is_empty(),
+        "nothing may print before the refusal, got: {out}"
+    );
+    assert!(
+        err.contains(
+            "runtime error: hilbert insert out of key order (new key 2 after \
+             last 5) — the sorted lane IS the index and slice 1 does not \
+             reorder; insert along the curve or await the rebuild-epoch \
+             policy (P1/P3) [E-SFC-ORDER]"
+        ),
+        "expected the verbatim [E-SFC-ORDER] refusal, got: {err}"
+    );
+}
+
+/// The morton bounds discipline, verbatim: an out-of-range coordinate
+/// is a program bug (the code space covers the power-of-two grid
+/// exactly — no padding cell to land in); the runtime fails fast with
+/// [E-SFC], exit 1.
+#[test]
+fn morton_oob_refused_verbatim() {
+    let (code, out, err) = compile_run("examples/morton_oob_fail.sn");
+    assert_eq!(code, 1, "the process must die at the out-of-bounds read");
+    assert!(
+        out.is_empty(),
+        "nothing may print before the refusal, got: {out}"
+    );
+    assert!(
+        err.contains(
+            "runtime error: morton index (9, 0) out of bounds for dims \
+             [8, 8] — SFC addressing is bounds-checked, never wraps [E-SFC]"
+        ),
+        "expected the verbatim [E-SFC] bounds refusal, got: {err}"
+    );
+}
+
+/// The T5b warning, verbatim, on the provable shape: a counted for
+/// over i, a nested counted for over j, both indexing the morton list
+/// directly (morton_get(m, i, j)) — the lexicographic pair over SFC
+/// storage (A2 §3/T5(b): Θ(N) misses, a factor B/w over the stride-1
+/// curve scan). A WARNING, never an error — the build succeeds.
+#[test]
+fn sfc_t5b_warning_fires_verbatim() {
+    let warn = compile_ok_stderr("examples/sfc_t5b_warn.sn");
+    assert!(
+        warn.contains(
+            "W-SFC-T5B: lexicographic iteration ('i' then 'j') over morton \
+             list 'm' wastes the space-filling layout — iterate the curve \
+             order (morton_scan_get over the code) or use soa for \
+             axis-committed access [W-SFC-T5B]"
+        ),
+        "expected the verbatim W-SFC-T5B warning, got: {warn}"
+    );
+}
+
+/// The T5b no-false-positive side: curve-ordered iteration (the code
+/// IS the linear index; the scan strides through the buffer in
+/// storage order) compiles SILENT and runs correct — the warning
+/// fires on the lexicographic pair only.
+#[test]
+fn sfc_t5b_no_false_positive() {
+    assert_out("examples/sfc_t5b_ok.sn", "2016\nPASS: sfc_t5b_ok\n");
+    let warn = compile_ok_stderr("examples/sfc_t5b_ok.sn");
+    assert!(
+        !warn.contains("W-SFC-T5B"),
+        "curve-ordered iteration must not warn, got: {warn}"
+    );
+}
+
+/// The power-of-two discipline, verbatim (A2 §3): slice 1 maps the
+/// SQUARE power-of-two grid onto the code space exactly (no padding,
+/// every code an in-grid cell); unequal dims want the padded
+/// reservation / the hybrid 2^t tile floor — the slice-2 form.
+#[test]
+fn morton_dims_rejected_verbatim() {
+    let err = compile_err("examples/morton_dims_fail.sn");
+    assert!(
+        err.contains(
+            "E-SFC: morton dims must be equal powers of two (slice 1 maps the \
+             SQUARE grid onto the code space exactly — no padding; unequal dims \
+             want the padded reservation / the hybrid 2^t tile floor, the \
+             slice-2 form), got dims=[8, 12] [E-SFC]"
+        ),
+        "expected the verbatim E-SFC power-of-two diagnostic, got: {err}"
+    );
+}
+
+/// The dims-are-in-the-type rule, verbatim: the constructor's literal
+/// dims must agree with the declared morton list type — the type
+/// annotation must not lie about the bounds the runtime checks.
+#[test]
+fn morton_decl_mismatch_rejected_verbatim() {
+    let err = compile_err("examples/morton_mismatch_fail.sn");
+    assert!(
+        err.contains(
+            "E-SFC: morton_new's dims [16, 16] do not match the declared \
+             morton list type's dims=[8, 8] — the dims are in the type; the \
+             constructor must agree [E-SFC]"
+        ),
+        "expected the verbatim E-SFC dims-mismatch diagnostic, got: {err}"
+    );
+}
+
+/// The E-GC-IN-LANE store rule at the SFC boundary, verbatim: a
+/// lane-backed SFC collection cannot enter a GC-managed holder — the
+/// collector cannot trace lane memory and the holder's release would
+/// free lane bytes as heap.
+#[test]
+fn morton_store_into_gc_holder_rejected_verbatim() {
+    let err = compile_err("examples/morton_push_fail.sn");
+    assert!(
+        err.contains(
+            "E-GC-IN-LANE: cannot store 'm' into 'xs' — a lane-backed SFC \
+             collection cannot enter a GC-managed holder (the collector \
+             cannot trace lane memory and the holder's release would free \
+             it); SFC collections live in their region's lane and die at \
+             its rewind [E-GC-IN-LANE]"
+        ),
+        "expected the verbatim E-GC-IN-LANE SFC-store diagnostic, got: {err}"
+    );
+}
+
+/// The fixed-size element discipline, verbatim (A2 §3: "no directory
+/// for fixed-size T"): slice 1 implements morton list<int, ...> — the
+/// Morton-keyed directory lane for variable-size elements is the
+/// documented slice-2 form.
+#[test]
+fn morton_elem_type_rejected_verbatim() {
+    let err = compile_err("examples/morton_elem_fail.sn");
+    assert!(
+        err.contains(
+            "E-SFC: slice 1 implements morton list<int, dims=[n1, n2]> — \
+             fixed-size int elements only (no directory for fixed-size T; \
+             the Morton-keyed directory lane is the slice-2 form), got \
+             element type str [E-SFC]"
+        ),
+        "expected the verbatim E-SFC element-type diagnostic, got: {err}"
+    );
+}
+
+/// The hilbert map's slice-1 element discipline, verbatim: the d=2
+/// point key is the (x, y) int pair, the value is int; other
+/// key/value types are the slice-2 boundary.
+#[test]
+fn hilbert_kv_rejected_verbatim() {
+    let err = compile_err("examples/hilbert_kv_fail.sn");
+    assert!(
+        err.contains(
+            "E-SFC: slice 1 implements hilbert map<int, int> — the d=2 \
+             point key is the (x, y) int pair, the value is int; other \
+             key/value types are the slice-2 boundary, got hilbert \
+             map<str, int> [E-SFC]"
+        ),
+        "expected the verbatim E-SFC hilbert element-type diagnostic, got: {err}"
+    );
+}

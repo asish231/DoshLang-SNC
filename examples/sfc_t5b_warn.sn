@@ -1,0 +1,21 @@
+// SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the T5b
+// warning (A2 §3/T5(b): wrong-order iteration over SFC storage =
+// Θ(N) misses — a factor B/w over the stride-1 curve scan; the
+// language must bind iteration order to storage order). The
+// provable shape: a counted for over i, a nested counted for over
+// j, both indexing the morton list directly as morton_get(m, i, j)
+// — the lexicographic pair, fired as a WARNING (the program is
+// legal, the layout is wasted). Curve-ordered iteration stays
+// silent (examples/sfc_t5b_ok.sn).
+// MUST COMPILE (with the warning on stderr).
+
+fn main() {
+    morton list<int, dims=[8, 8]> m = morton_new(8, 8)
+    int s = 0
+    for (int i = 0, i < 8, i += 1) {
+        for (int j = 0, j < 8, j += 1) {
+            s = s + morton_get(m, i, j)   // the lexicographic pair — W-SFC-T5B
+        }
+    }
+    print(s)   // 0 — a fresh grid; the cost is the misses, not the values
+}
