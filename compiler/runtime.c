@@ -2926,10 +2926,16 @@ static void sn_morton_deinterleave_soft(uint64_t m, uint64_t *x, uint64_t *y) {
 
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((__target__("bmi2")))
+#endif
 static uint64_t sn_morton_interleave_bmi2(uint64_t x, uint64_t y) {
     return _pdep_u64(x, SN_SFC_EVEN_MASK)
          | _pdep_u64(y, SN_SFC_EVEN_MASK << 1);
 }
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((__target__("bmi2")))
+#endif
 static void sn_morton_deinterleave_bmi2(uint64_t m, uint64_t *x, uint64_t *y) {
     *x = _pext_u64(m, SN_SFC_EVEN_MASK);
     *y = _pext_u64(m, SN_SFC_EVEN_MASK << 1);

@@ -431,20 +431,20 @@ declare i64 @sn_lcell_len(ptr)
 declare i64 @sn_lcell_value(ptr)
 declare i64 @sn_lcell_has(ptr, i64)
 declare i64 @sn_lcell_carrier(ptr)
-/* SWARM RABBIT HOLE — Wave 13 (Impl-R): the wave region context
-   (W2B §4 — Thm WS made executable; the J2 batched canonical fold). */
+; SWARM RABBIT HOLE — Wave 13 (Impl-R): the wave region context
+; (W2B §4 — Thm WS made executable; the J2 batched canonical fold).
 declare ptr @sn_wave_new(i64)
 declare void @sn_wave_capture(ptr, i64, ptr)
 declare i64 @sn_wave_read_w(ptr, ptr)
 declare void @sn_wave_contrib(ptr, ptr, i64, i64)
 declare void @sn_wave_join(ptr)
-/* SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the SFC
-   layouts — A2's space-filling-geometry decision table executable
-   (morton list = tensor iteration; hilbert map = range queries).
-   The interleave/deinterleave is FEATURE-DISPATCHED once per process
-   inside the runtime (C2.8: PDEP/PEXT on x86-64 with BMI2, the
-   software shift-or path elsewhere — SN_SFC_FORCE_PATH forces the
-   software path for the equivalence probes). */
+; SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the SFC
+; layouts — A2's space-filling-geometry decision table executable
+; (morton list = tensor iteration; hilbert map = range queries).
+; The interleave/deinterleave is FEATURE-DISPATCHED once per process
+; inside the runtime (C2.8: PDEP/PEXT on x86-64 with BMI2, the
+; software shift-or path elsewhere — SN_SFC_FORCE_PATH forces the
+; software path for the equivalence probes).
 declare ptr @sn_morton_new(i64, i64)
 declare ptr @sn_morton_from_lex(ptr, i64, i64)
 declare ptr @sn_morton_from_bytes(ptr, i64, i64)
@@ -471,13 +471,13 @@ declare i64 @sn_hilbert_entry_val(ptr, i64)
 declare i64 @sn_hilbert_box_first(ptr, i64, i64, i64, i64)
 declare i64 @sn_hilbert_box_next(ptr, i64, i64, i64, i64, i64)
 declare i64 @sn_sfc_path()
-/* SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): the tape —
-   W2C's P5↔P2 elevation plan executable (§36–§38, §48 item 4). The
-   lane-backed chronicle header + the three record kinds; the two
-   record ABIs split by kind (kind 0's int payload vs kinds 1/2's
-   carrier pointers — the checker guarantees the kind literal). The
-   law checks (ILC on Tier-G triples, the mutator law on Tier-L
-   pairs) run inside sn_tape_record_p at the effect boundary. */
+; SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): the tape —
+; W2C's P5↔P2 elevation plan executable (§36–§38, §48 item 4). The
+; lane-backed chronicle header + the three record kinds; the two
+; record ABIs split by kind (kind 0's int payload vs kinds 1/2's
+; carrier pointers — the checker guarantees the kind literal). The
+; law checks (ILC on Tier-G triples, the mutator law on Tier-L
+; pairs) run inside sn_tape_record_p at the effect boundary.
 declare ptr @sn_tape_new(ptr)
 declare void @sn_tape_record_i(ptr, i64, i64)
 declare void @sn_tape_record_p(ptr, i64, ptr, ptr)
