@@ -1,0 +1,20 @@
+blueprint Animal {
+    str species
+
+    fn describe() -> str {
+        return "Animal:{self.species}"
+    }
+}
+
+blueprint Dog from Animal {
+    str breed
+
+    fn describe() -> str {
+        return "Dog:{super.describe()}:{self.breed}"
+    }
+}
+
+fn main() {
+    new Dog d(species: "Canine", breed: "Lab")
+    print(d.describe())
+}

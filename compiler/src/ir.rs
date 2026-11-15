@@ -2446,7 +2446,20 @@ impl Cx<'_> {
                     .and_then(|b| b.parent.clone())
                     .unwrap_or_default();
                 let llvm = format!("sn_m_{parent}_{method}");
-                let mut argv = vec!["ptr %v_self".to_string()];
+                let self_val = if let Some((an, _)) = self.locals.get("self").cloned() {
+                    if an.starts_with("%p_") {
+                        an
+                    } else {
+                        let r = self.t();
+                        self.line(&format!("{r} = load ptr, ptr {an}"));
+                        r
+                    }
+                } else {
+                    let r = self.t();
+                    self.line(&format!("{r} = load ptr, ptr %v_self"));
+                    r
+                };
+                let mut argv = vec![format!("ptr {self_val}")];
                 let mut vs = Vec::new();
                 for a in args {
                     match a {

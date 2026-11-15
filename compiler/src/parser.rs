@@ -275,9 +275,10 @@ impl Parser {
             } else if self.at(TokenKind::Fn)
                 || self.at(TokenKind::Async)
                 || self.at(TokenKind::Abstract)
-                || self.at(TokenKind::Open)
-                || self.at(TokenKind::Closed)
-                || self.at(TokenKind::Guarded)
+                || ((self.at(TokenKind::Open)
+                    || self.at(TokenKind::Closed)
+                    || self.at(TokenKind::Guarded))
+                    && matches!(self.peek_n(1), TokenKind::Fn | TokenKind::Async))
             {
                 methods.push(self.parse_fn()?);
             } else {

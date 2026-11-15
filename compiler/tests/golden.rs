@@ -126,6 +126,11 @@ fn blueprint_inherit() {
 }
 
 #[test]
+fn blueprint_super() {
+    assert_out("examples/blueprint_super.sn", "Dog:Animal:Canine:Lab\n");
+}
+
+#[test]
 fn contract_draw() {
     assert_out("examples/contract_draw.sn", "5\n");
 }
