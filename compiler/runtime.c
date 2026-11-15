@@ -423,7 +423,49 @@ typedef struct Sb {
     char *buf;
 } Sb;
 
-enum { KIND_BYTEARRAY = 20, KIND_POOL = 21, KIND_STRBUILDER = 22, KIND_ZSET = 23, KIND_LCELL = 24 };
+enum { KIND_BYTEARRAY = 20, KIND_POOL = 21, KIND_STRBUILDER = 22, KIND_ZSET = 23, KIND_LCELL = 24, KIND_ZFIX = 25 };
+
+/* Forward: the Salt-ζ engine's struct is defined with the Tier-L/G
+ * engines below, but gc_mark/gc_free/sn_release trace and free it by
+ * kind — the same forward-declaration discipline as Clos. */
+typedef struct SnZFix SnZFix;
+
+/* The body's join index: CSR adjacency, target b → the sources a with
+ * (a,b) ∈ E (the closure body reach(a) :- edge(a,b), reach(b) joins
+ * the recursive variable at the edge relation's TARGET column). Full
+ * comment with the engine below. */
+typedef struct SnZFixAdj {
+    int64_t len;    /* distinct targets */
+    int64_t cap;
+    int64_t hcap;
+    int64_t *nodes; /* the distinct targets b */
+    int64_t *cnt;   /* per target: in-edge count (fill cursor during build) */
+    int64_t *off;   /* per target: start offset into buf (len+1 entries) */
+    int64_t *buf;   /* the flat in-neighbor array */
+    uint64_t *hashes;
+    int64_t *buckets;
+    int64_t total;  /* the number of distinct packed edges */
+} SnZFixAdj;
+
+/* Salt ζ — the fixpoint-bracket engine (Wave 9, Impl-N; W2C §3). The
+ * struct lives here (before gc_mark) so the collector can trace its
+ * carriers; the engine, the round loop, and the convergence-theorem
+ * commentary live with the Tier-G/Tier-L engines below. */
+struct SnZFix {
+    int64_t rc;
+    int64_t kind;     /* KIND_ZFIX */
+    int64_t tier;     /* SN_ZFIX_TIER_G / SN_ZFIX_TIER_L */
+    SnZFixAdj adj;    /* the body's join index (target → sources) */
+    SnZSet *edges;    /* borrowed ref: the packed-pair edge relation */
+    SnZSet *seed;     /* borrowed ref: the base facts */
+    SnZSet *state;    /* Tier G: ∫ — the accumulated reach (owned) */
+    SnLCell *state_l; /* Tier L: ∫ — the accumulated reach (owned) */
+    SnZSet *delta;    /* Tier G: δ₀ — the NEXT round's delta (owned) */
+    SnLCell *delta_l; /* Tier L: δ₀ — the mutator-law fragment (owned) */
+    int64_t rounds;   /* productive rounds (empty round = the stop test) */
+    int64_t probes;   /* Σ adjacency visits — the per-round work observable */
+    int64_t done;     /* 1 once a round's delta was empty */
+};
 
 typedef struct SnPool {
     int64_t rc;
@@ -635,6 +677,23 @@ static void gc_mark(void *p) {
            MAX/LWW carriers hold inline scalars — nothing to trace. */
         break;
     }
+    case KIND_ZFIX: {
+        /* Salt-ζ fixpoint engine (Wave 9, Impl-N): a first-class
+           tracked object — SNlang programs can trigger a collection
+           mid-bracket (threshold-based), and the conservative stack
+           scan reaches the engine's raw ptr but NOT the carriers
+           behind that heap indirection. Tracing the six carrier
+           pointers keeps a live bracket's Z-sets/cells alive; an
+           abandoned engine is swept with its unreachable carriers. */
+        SnZFix *f = (SnZFix *)p;
+        gc_mark(f->edges);
+        gc_mark(f->seed);
+        gc_mark(f->state);
+        gc_mark(f->delta);
+        gc_mark(f->state_l);
+        gc_mark(f->delta_l);
+        break;
+    }
     case KIND_ERR: {
         Err *e = (Err *)p;
         gc_mark(e->msg);
@@ -681,8 +740,22 @@ static void gc_mark(void *p) {
     }
 }
 
-/* Mark any tracked object whose address appears in [lo, hi). */
-static void gc_scan_range(void *lo, void *hi) {
+/* Mark any tracked object whose address appears in [lo, hi).
+ *
+ * A CONSERVATIVE scanner: it deliberately reads arbitrary stack words
+ * (any of them may hold a tracked pointer), so under ASan it also
+ * reads stack-frame redzones — false positives intrinsic to the
+ * design, not bugs. Exempt the scan from ASan; every real object read
+ * (gc_mark/gc_free, the engines) stays instrumented. */
+#if defined(__has_feature)
+#  if __has_feature(address_sanitizer)
+#    define SN_NO_ASAN __attribute__((no_sanitize("address")))
+#  endif
+#endif
+#ifndef SN_NO_ASAN
+#  define SN_NO_ASAN
+#endif
+static SN_NO_ASAN void gc_scan_range(void *lo, void *hi) {
     uintptr_t *p = (uintptr_t *)lo;
     uintptr_t *end = (uintptr_t *)hi;
     if (p > end) {
@@ -730,6 +803,23 @@ static void gc_free(void *p) {
         free(c->elems);
         free(c->hashes);
         free(c->buckets);
+        break;
+    }
+    case KIND_ZFIX: {
+        /* Sweep of an abandoned engine: free the CSR adjacency — the
+           block itself is freed by the shared free(p) at the end of
+           gc_free (this arm must NOT free it: double free). The
+           carriers are tracked objects swept on their own (or kept
+           alive by other references); their refcounts are the GC's
+           business, not the sweep's — the same discipline as
+           List/Map children. */
+        SnZFix *f = (SnZFix *)p;
+        free(f->adj.nodes);
+        free(f->adj.cnt);
+        free(f->adj.off);
+        free(f->adj.buf);
+        free(f->adj.hashes);
+        free(f->adj.buckets);
         break;
     }
     case KIND_ERR: {
@@ -968,6 +1058,27 @@ void sn_release(void *p) {
         free(c->hashes);
         free(c->buckets);
         free(c);
+        break;
+    }
+    case KIND_ZFIX: {
+        /* The explicit-release path: drop the borrowed edge/seed refs
+           and the owned carriers, then the CSR adjacency and the
+           block. (The sweep path frees only the arrays — children are
+           swept on their own there; here the rc discipline owns them.) */
+        SnZFix *f = (SnZFix *)p;
+        sn_release(f->edges);
+        sn_release(f->seed);
+        sn_release(f->state);
+        sn_release(f->delta);
+        sn_release(f->state_l);
+        sn_release(f->delta_l);
+        free(f->adj.nodes);
+        free(f->adj.cnt);
+        free(f->adj.off);
+        free(f->adj.buf);
+        free(f->adj.hashes);
+        free(f->adj.buckets);
+        free(f);
         break;
     }
     case KIND_ERR: {
@@ -2254,6 +2365,443 @@ int64_t sn_lcell_carrier(void *p) {
     SnLCell *c = lcell_guard_one(p, "carrier");
     return c ? c->carrier : -1;
 }
+
+/* --------------------------------------------------------------------- */
+/*  SnZFix — Salt ζ: the fixpoint-bracket engine (SWARM RABBIT HOLE,     */
+/*  Wave 9, Impl-N, Cohort Delta; W2C §3, the δ₀/∫ bracket).             */
+/*                                                                       */
+/*  The ADMITTED body is TRANSITIVE CLOSURE: reach(a) :- edge(a,b),      */
+/*  reach(b) — MONOTONE in the recursive variable (adding reached        */
+/*  nodes can only add derived nodes) over a FINITE-HEIGHT per-key       */
+/*  carrier: presence {0,1} on the keys of the FINITE edge universe      */
+/*  (sets over a finite universe qualify; ℤ-valued recursion through    */
+/*  the recursive variable does not — the counting-through-recursion     */
+/*  rejection, E-ZADM). The convergence theorem therefore applies       */
+/*  (W2C §3.3): the bracket terminates in ≤ height rounds at the LEAST   */
+/*  fixpoint (Knaster–Tarski; Cousot–Cousot Pacific J. Math. 82(1)        */
+/*  1979). Correctness is conditional on termination (W2C §3.5): an      */
+/*  admitted body terminates, and what it terminates at is the least    */
+/*  fixpoint; divergent bodies never reach the runtime — refusals are    */
+/*  compile-time errors (E-ZADM), never silent divergence.               */
+/*                                                                       */
+/*  The round loop — the bracket, executed (W2C §3.2):                   */
+/*      δ₀ opens the round's delta; T^Δ applies against the accumulated  */
+/*      integral ∫; the next round's δ₀ carries only what is newly       */
+/*      derived. Each round is SEMI-NAÏVE (Thm 4b: the                  */
+/*      incrementalized fixpoint IS classical semi-naïve evaluation —   */
+/*      Bancilhon–Ramakrishnan SIGMOD 1986, derived from the calculus): */
+/*      derive only from the PREVIOUS round's delta, never the full     */
+/*      state. `probes` counts the adjacency visits — each round's      */
+/*      work is O(|δ^(r-1)| + Σ indeg over the delta), the per-round     */
+/*      term of W_μ = Σ_rounds c·(|δ₀^(r)| + Σ_v |Δv^(r)|) (W2C §3.4:    */
+/*      the ROUND-SUM, not bounded by |ΔDB| — one seed can trigger      */
+/*      Θ(n) re-derivation rounds).                                     */
+/*                                                                       */
+/*  The per-tier QUIESCENCE TESTS, both executable (W4C Repair 3's      */
+/*  per-tier form):                                                      */
+/*    Tier G: 𝒟(∫α) = 0 — the round's delta Z-set is empty (len 0).     */
+/*    Tier L: F(s) ⊑ s — the MUTATOR-LAW test: the round's state-       */
+/*      relative fragment (sn_lcell_delta; delta(x,x) = ⊥, no          */
+/*      inflation) is empty. The tests differ BECAUSE the algebras      */
+/*      differ: 𝒟 presupposes ⊖, which does not and cannot exist on     */
+/*      Tier L (Grothendieck triviality — E-LRET); the mutator law is   */
+/*      the semilattice tier's own honest form of "nothing new".        */
+/*                                                                       */
+/*  Tier L (sn_zfix_new_l): the same body over a GSET LCell carrier —   */
+/*  ⊔ (union) is the join, so the carrier qualifies BY CONSTRUCTION    */
+/*  (W2C §3.3's admission rule — the premise Impl-M's SnLCell landed). */
+/*  The round's true delta is extracted BY the mutator law itself       */
+/*  (lcell_delta between the folded state and its pre-round clone),     */
+/*  and quiescence is that fragment being ⊥.                             */
+/*                                                                       */
+/*  Representation: the edge relation is a Z-set of PACKED PAIRS —      */
+/*  key = a·2³² + b with a, b ∈ [0, 2³²) (plain int arithmetic on the   */
+/*  surface); coefficient ≠ 0 means present (the AGG_COUNT presence     */
+/*  convention). The constructor builds the body's join index — the    */
+/*  CSR adjacency target → sources — in one O(|E|) materialization      */
+/*  pass (outside every per-round claim, the sn_view_new ℐ precedent).  */
+/*                                                                       */
+/*  GC: unlike SnView (untracked; its C harness never collects         */
+/*  mid-circuit), the ζ engine is a FIRST-CLASS TRACKED OBJECT          */
+/*  (KIND_ZFIX): SNlang programs trigger threshold collections that    */
+/*  can fire mid-bracket, and the conservative stack scan sees the     */
+/*  engine's raw ptr but not the carriers behind the heap               */
+/*  indirection — the gc_mark arm traces them (see gc_mark above).     */
+/* --------------------------------------------------------------------- */
+
+enum {
+    SN_ZFIX_TIER_G = 0, /* reach is a Z-set: presence {0,1} coefficients  */
+    SN_ZFIX_TIER_L = 1  /* reach is a GSET LCell: ⊔ = union is the join  */
+};
+
+/* --------------------------------------------------------------------- */
+/* (The SnZFixAdj / SnZFix structs are defined before gc_mark, above —
+ *  the collector traces the engine's carriers by kind. The engine
+ *  proper starts here.)                                                   */
+
+static void zfix_adj_rehash(SnZFixAdj *j, int64_t new_hcap) {
+    int64_t *nb = (int64_t *)calloc((size_t)new_hcap, sizeof(int64_t));
+    if (!nb) {
+        fprintf(stderr, "out of memory\n");
+        exit(1);
+    }
+    uint64_t mask = (uint64_t)new_hcap - 1;
+    for (int64_t i = 0; i < j->len; i++) {
+        uint64_t slot = j->hashes[i] & mask;
+        while (nb[slot] != 0) {
+            slot = (slot + 1) & mask;
+        }
+        nb[slot] = i + 1;
+    }
+    free(j->buckets);
+    j->buckets = nb;
+    j->hcap = new_hcap;
+}
+
+static int64_t zfix_adj_find(SnZFixAdj *j, int64_t b, uint64_t h, uint64_t *out_bucket) {
+    uint64_t mask = (uint64_t)j->hcap - 1;
+    uint64_t slot = h & mask;
+    for (;;) {
+        int64_t bk = j->buckets[slot];
+        if (bk == 0) {
+            if (out_bucket) *out_bucket = slot;
+            return -1;
+        }
+        int64_t idx = bk - 1;
+        if (j->hashes[idx] == h && j->nodes[idx] == b) {
+            if (out_bucket) *out_bucket = slot;
+            return idx;
+        }
+        slot = (slot + 1) & mask;
+    }
+}
+
+/* One O(|E|) materialization of the join index from the packed-pair
+ * edge Z-set. Two passes over the edge support; cnt doubles as the
+ * backward fill cursor (it returns to the true counts). */
+static void zfix_adj_build(SnZFixAdj *j, SnZSet *edges) {
+    memset(j, 0, sizeof(*j));
+    j->cap = 8;
+    j->hcap = 16;
+    j->nodes = (int64_t *)xmalloc(sizeof(int64_t) * 8);
+    j->cnt = (int64_t *)xmalloc(sizeof(int64_t) * 8);
+    j->hashes = (uint64_t *)xmalloc(sizeof(uint64_t) * 8);
+    j->buckets = (int64_t *)calloc(16, sizeof(int64_t));
+    if (!j->buckets) {
+        fprintf(stderr, "out of memory\n");
+        exit(1);
+    }
+    if (!edges) return;
+    /* pass 1: count in-edges per target (find-or-insert targets) */
+    for (int64_t i = 0; i < edges->len; i++) {
+        if (edges->counts[i] == 0) continue; /* presence: coefficient ≠ 0 */
+        uint64_t u = (uint64_t)edges->keys[i];
+        int64_t b = (int64_t)(u & 0xFFFFFFFFULL);
+        if ((j->len + 1) * 4 >= j->hcap * 3) {
+            zfix_adj_rehash(j, j->hcap * 2);
+        }
+        uint64_t h = key_hash(0, b);
+        uint64_t bucket = 0;
+        int64_t idx = zfix_adj_find(j, b, h, &bucket);
+        if (idx < 0) {
+            if (j->len == j->cap) {
+                j->cap *= 2;
+                j->nodes = (int64_t *)realloc(j->nodes, sizeof(int64_t) * (size_t)j->cap);
+                j->cnt = (int64_t *)realloc(j->cnt, sizeof(int64_t) * (size_t)j->cap);
+                j->hashes = (uint64_t *)realloc(j->hashes, sizeof(uint64_t) * (size_t)j->cap);
+            }
+            j->nodes[j->len] = b;
+            j->cnt[j->len] = 0;
+            j->hashes[j->len] = h;
+            j->buckets[bucket] = j->len + 1;
+            idx = j->len;
+            j->len++;
+        }
+        j->cnt[idx]++;
+        j->total++;
+    }
+    /* prefix sums: off[b] .. off[b+1] bounds target b's in-neighbors */
+    j->off = (int64_t *)xmalloc(sizeof(int64_t) * (size_t)(j->len + 1));
+    int64_t acc = 0;
+    for (int64_t i = 0; i < j->len; i++) {
+        j->off[i] = acc;
+        acc += j->cnt[i];
+    }
+    j->off[j->len] = acc;
+    j->buf = (int64_t *)xmalloc(sizeof(int64_t) * (size_t)(acc > 0 ? acc : 1));
+    /* pass 2: fill backwards off cnt (the cursor returns to 0; the
+       true count is recovered as off[idx+1] - off[idx]) */
+    for (int64_t i = 0; i < edges->len; i++) {
+        if (edges->counts[i] == 0) continue;
+        uint64_t u = (uint64_t)edges->keys[i];
+        int64_t a = (int64_t)(u >> 32);
+        int64_t b = (int64_t)(u & 0xFFFFFFFFULL);
+        int64_t idx = zfix_adj_find(j, b, key_hash(0, b), NULL);
+        j->cnt[idx]--;
+        j->buf[j->off[idx] + j->cnt[idx]] = a;
+    }
+}
+
+/* --------------------------------------------------------------------- */
+
+static SnZFix *zfix_guard(void *p, const char *op) {
+    if (!p) return NULL;
+    Obj *o = (Obj *)p;
+    if (o->kind != KIND_ZFIX) {
+        fprintf(stderr,
+                "runtime error: zfix_%s expects a Salt-ζ fixpoint engine "
+                "(kind=%d), got kind=%lld [E-LKIND]\n",
+                op, KIND_ZFIX, (long long)o->kind);
+        exit(1);
+    }
+    return (SnZFix *)p;
+}
+
+static SnZFix *zfix_new_tiered(SnZSet *edges, SnZSet *seed, int64_t tier) {
+    if ((edges && edges->key_kind != 0) || (seed && seed->key_kind != 0)) {
+        fprintf(stderr,
+                "runtime error: the ζ bracket's node universe is int64 "
+                "(packed-pair edge keys a·2³² + b); a string-keyed Z-set "
+                "cannot be an edge relation or a seed [E-LKIND]\n");
+        exit(1);
+    }
+    SnZFix *f = (SnZFix *)xmalloc(sizeof(SnZFix));
+    f->rc = 1;
+    f->kind = KIND_ZFIX;
+    f->tier = tier;
+    gc_track(f, (int64_t)sizeof(SnZFix));
+    zfix_adj_build(&f->adj, edges);
+    f->edges = edges;
+    if (edges) sn_retain(f->edges);
+    f->seed = seed;
+    if (seed) sn_retain(f->seed);
+    f->state = NULL;
+    f->delta = NULL;
+    f->state_l = NULL;
+    f->delta_l = NULL;
+    f->rounds = 0;
+    f->probes = 0;
+    f->done = 0;
+    if (tier == SN_ZFIX_TIER_G) {
+        f->state = (SnZSet *)sn_zset_new(0);
+        f->delta = (SnZSet *)sn_zset_new(0);
+        if (seed) {
+            for (int64_t i = 0; i < seed->len; i++) {
+                if (seed->counts[i] == 0) continue; /* presence ≠ 0 */
+                if (sn_zset_count(f->state, seed->keys[i]) == 0) {
+                    sn_zset_add(f->state, seed->keys[i], 1); /* ∫ */
+                    sn_zset_add(f->delta, seed->keys[i], 1); /* δ₀ */
+                }
+            }
+        }
+    } else {
+        f->state_l = (SnLCell *)sn_lcell_new(LCELL_GSET);
+        f->delta_l = (SnLCell *)sn_lcell_new(LCELL_GSET);
+        if (seed) {
+            for (int64_t i = 0; i < seed->len; i++) {
+                if (seed->counts[i] == 0) continue;
+                lcell_gset_insert(f->state_l, seed->keys[i]);
+                lcell_gset_insert(f->delta_l, seed->keys[i]);
+            }
+        }
+    }
+    return f;
+}
+
+void *sn_zfix_new(void *edges, void *seed) {
+    return zfix_new_tiered((SnZSet *)edges, (SnZSet *)seed, SN_ZFIX_TIER_G);
+}
+
+void *sn_zfix_new_l(void *edges, void *seed) {
+    return zfix_new_tiered((SnZSet *)edges, (SnZSet *)seed, SN_ZFIX_TIER_L);
+}
+
+/* One Tier-G round — semi-naïve (Thm 4b): derive ONLY from the
+ * previous round's delta. Returns |δ^(r)| — the Tier-G quiescence
+ * test 𝒟(∫α) = 0 is exactly this being 0. */
+static int64_t zfix_round_g(SnZFix *f) {
+    SnZSet *d = f->delta;
+    SnZSet *next = (SnZSet *)sn_zset_new(0);
+    for (int64_t i = 0; i < d->len; i++) {
+        int64_t b = d->keys[i];
+        int64_t idx = zfix_adj_find(&f->adj, b, key_hash(0, b), NULL);
+        if (idx < 0) continue; /* no in-edges: nothing derives */
+        for (int64_t k = f->adj.off[idx]; k < f->adj.off[idx + 1]; k++) {
+            f->probes++; /* one adjacency visit — the counted work unit */
+            int64_t a = f->adj.buf[k];
+            if (sn_zset_count(f->state, a) == 0) { /* presence: 0→1 only */
+                sn_zset_add(f->state, a, 1); /* ∫: the integral fold */
+                sn_zset_add(next, a, 1);      /* δ₀ of the next round */
+            }
+        }
+    }
+    sn_release(d);
+    f->delta = next;
+    return next->len;
+}
+
+/* One Tier-L round — the same semi-naïve mechanics over the GSET
+ * carrier. The round's delta is the STATE-RELATIVE fragment (the
+ * mutator law's m^δ): each candidate joins the state by ⊔ ONLY if new
+ * (the F(s) ⊑ s guard), so the fragment collects exactly what moved —
+ * which is precisely lcell_delta(state_after, state_before), computed
+ * membership-guarded in O(|δ|) (the Thm 4b round) instead of by the
+ * O(|state|) scan the ⊖-less carrier would otherwise need. Tier L has
+ * no ⊖ (Grothendieck triviality — E-LRET), so 𝒟(∫α) = 0 is not the
+ * test here; the stop condition is the mutator-law form: the fragment
+ * being ⊥ (no inflation ⟺ F(s) ⊑ s ⟺ delta(x,x) = ⊥). */
+static int64_t zfix_round_l(SnZFix *f) {
+    SnLCell *d = f->delta_l;
+    SnLCell *frag = (SnLCell *)sn_lcell_new(LCELL_GSET); /* the round's m^δ */
+    for (int64_t i = 0; i < d->len; i++) {
+        int64_t b = d->elems[i];
+        int64_t idx = zfix_adj_find(&f->adj, b, key_hash(0, b), NULL);
+        if (idx < 0) continue;
+        for (int64_t k = f->adj.off[idx]; k < f->adj.off[idx + 1]; k++) {
+            f->probes++;
+            int64_t a = f->adj.buf[k];
+            if (!sn_lcell_has(f->state_l, a)) { /* only NEW facts move */
+                lcell_gset_insert(f->state_l, a); /* ⊔: the integral fold */
+                lcell_gset_insert(frag, a);       /* the state-relative fragment */
+            }
+        }
+    }
+    sn_release(d);
+    f->delta_l = frag;
+    return sn_lcell_len(frag);
+}
+
+/* Advance ONE round. Returns the round's derived count (0 = the stop
+ * test fired). `rounds` counts PRODUCTIVE rounds only: the terminating
+ * empty round is the quiescence observation, not a derivation — so a
+ * seed-only graph reports 0 rounds and the ≤ height bound holds with
+ * equality on a chain. */
+int64_t sn_zfix_round(void *p) {
+    SnZFix *f = zfix_guard(p, "round");
+    if (!f || f->done) return 0;
+    int64_t derived = (f->tier == SN_ZFIX_TIER_G) ? zfix_round_g(f)
+                                                  : zfix_round_l(f);
+    if (derived > 0) {
+        f->rounds++;
+    } else {
+        f->done = 1;
+    }
+    return derived;
+}
+
+/* The full δ₀/∫ bracket: rounds until quiescence. Returns the
+ * productive round count (≤ the carrier height; for closure, exactly
+ * the longest derivation chain). */
+int64_t sn_zfix_run(void *p) {
+    SnZFix *f = zfix_guard(p, "run");
+    if (!f) return 0;
+    while (!f->done) {
+        sn_zfix_round(f);
+    }
+    return f->rounds;
+}
+
+/* -------------------------------- readouts ---------------------------- */
+
+int64_t sn_zfix_rounds(void *p) {
+    SnZFix *f = zfix_guard(p, "rounds");
+    return f ? f->rounds : 0;
+}
+
+int64_t sn_zfix_probes(void *p) {
+    SnZFix *f = zfix_guard(p, "probes");
+    return f ? f->probes : 0;
+}
+
+/* |reach| — the least fixpoint's support size, per tier. */
+int64_t sn_zfix_len(void *p) {
+    SnZFix *f = zfix_guard(p, "len");
+    if (!f) return 0;
+    return (f->tier == SN_ZFIX_TIER_G) ? sn_zset_len(f->state)
+                                       : sn_lcell_len(f->state_l);
+}
+
+int64_t sn_zfix_has(void *p, int64_t node) {
+    SnZFix *f = zfix_guard(p, "has");
+    if (!f) return 0;
+    return (f->tier == SN_ZFIX_TIER_G) ? (sn_zset_count(f->state, node) != 0)
+                                       : sn_lcell_has(f->state_l, node);
+}
+
+/* A copy of the reach state, owned by the caller (Tier G: a Z-set;
+ * Tier L: an LCell clone) — the read-side for tests and checksums. */
+void *sn_zfix_state(void *p) {
+    SnZFix *f = zfix_guard(p, "state");
+    if (!f) return NULL;
+    return (f->tier == SN_ZFIX_TIER_G) ? (void *)sn_zset_copy(f->state)
+                                       : (void *)lcell_clone(f->state_l);
+}
+
+/* ---------------------- the per-tier stop tests ----------------------- */
+/* Diagnostic predicates — they do NOT perturb the bracket's probe
+ * counter (the bracket's own stop condition is the round's delta
+ * size; these are the same tests in their direct whole-state forms). */
+
+/* Tier G: 𝒟(∫α) = 0 — one full-state body step (the naive
+ * re-derivation over EVERY state fact) derives an empty delta. */
+int64_t sn_zfix_quiescent_g(void *p) {
+    SnZFix *f = zfix_guard(p, "quiescent_g");
+    if (!f) return 1;
+    if (f->tier != SN_ZFIX_TIER_G) {
+        fprintf(stderr,
+                "runtime error: zfix_quiescent_g is the Tier-G stop test "
+                "(𝒟(∫α) = 0); this bracket is Tier-L — use "
+                "zfix_quiescent_l [E-LKIND]\n");
+        exit(1);
+    }
+    for (int64_t i = 0; i < f->state->len; i++) {
+        int64_t b = f->state->keys[i];
+        int64_t idx = zfix_adj_find(&f->adj, b, key_hash(0, b), NULL);
+        if (idx < 0) continue;
+        for (int64_t k = f->adj.off[idx]; k < f->adj.off[idx + 1]; k++) {
+            if (sn_zset_count(f->state, f->adj.buf[k]) == 0) return 0;
+        }
+    }
+    return 1;
+}
+
+/* Tier L: F(s) ⊑ s via the MUTATOR LAW — one full-state body step
+ * joined into a candidate s ⊔ F(s), then the state-relative fragment
+ * delta(s ⊔ F(s), s) must be ⊥ (no inflation). Tier L has no ⊖
+ * (Grothendieck triviality — E-LRET), so the 𝒟 form is not
+ * expressible there; this is the semilattice tier's own test. */
+int64_t sn_zfix_quiescent_l(void *p) {
+    SnZFix *f = zfix_guard(p, "quiescent_l");
+    if (!f) return 1;
+    if (f->tier != SN_ZFIX_TIER_L) {
+        fprintf(stderr,
+                "runtime error: zfix_quiescent_l is the Tier-L stop test "
+                "(F(s) ⊑ s via the mutator law); this bracket is Tier-G — "
+                "use zfix_quiescent_g [E-LKIND]\n");
+        exit(1);
+    }
+    SnLCell *cand = lcell_clone(f->state_l); /* s ⊔ F(s), built */
+    for (int64_t i = 0; i < f->state_l->len; i++) {
+        int64_t b = f->state_l->elems[i];
+        int64_t idx = zfix_adj_find(&f->adj, b, key_hash(0, b), NULL);
+        if (idx < 0) continue;
+        for (int64_t k = f->adj.off[idx]; k < f->adj.off[idx + 1]; k++) {
+            lcell_gset_insert(cand, f->adj.buf[k]);
+        }
+    }
+    SnLCell *frag = (SnLCell *)sn_lcell_delta(cand, f->state_l);
+    int64_t q = (sn_lcell_len(frag) == 0) ? 1 : 0;
+    sn_release(frag);
+    sn_release(cand);
+    return q;
+}
+
+/* The explicit release (the tracked-object discipline: sn_release at
+ * rc 0 frees; this alias reads clearly in the C harnesses). */
+void sn_zfix_release(void *p) {
+    sn_release(p);
+}
+
 
 /* --------------------------------------------------------------------- */
 /*  SnView — the incremental view engine (Problem-5 second slice).        */

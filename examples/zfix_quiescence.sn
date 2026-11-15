@@ -1,0 +1,41 @@
+// SWARM RABBIT HOLE — Wave 9 (Impl-N): the quiescence observables of
+// the ζ bracket — the stop conditions, the round counter, and the
+// readouts, on two graphs:
+//
+//   seed-only — no edges: the bracket is quiescent at once (0
+//   productive rounds; the seed facts ARE the fixpoint), and the
+//   Tier-G stop test 𝒟(∫α) = 0 fires immediately.
+//
+//   diamond   — edges s→a, s→b, a→t, b→t, seed {t}: backward reach
+//   covers all 5 nodes in 2 rounds (t ← {a,b} ← s), and the probe
+//   count is EXACT: 2 (in-neighbors of t) + 1 (of a) + 1 (of b) = 4
+//   adjacency probes — each round touched only the previous round's
+//   delta (Thm 4b), never the full state.
+
+fn main() {
+    // ---- seed-only: quiescent at construction
+    ptr e0 = zset_new(0)
+    ptr s0 = zset_new(0)
+    zset_add(s0, 42, 1)
+    ptr f0 = zfix_new(e0, s0)
+    print(zfix_run(f0))          // 0 — no productive rounds
+    print(zfix_len(f0))          // 1 — the seed is a fact of the fixpoint
+    print(zfix_has(f0, 42))      // true
+    print(zfix_quiescent_g(f0))  // true — 𝒟(∫α) = 0 at once
+
+    // ---- diamond: 2 rounds, exact semi-naïve probe count
+    ptr e1 = zset_new(0)
+    zset_add(e1, 0 * 4294967296 + 1, 1)  // s→a
+    zset_add(e1, 0 * 4294967296 + 2, 1)  // s→b
+    zset_add(e1, 1 * 4294967296 + 3, 1)  // a→t
+    zset_add(e1, 2 * 4294967296 + 3, 1)  // b→t
+    ptr s1 = zset_new(0)
+    zset_add(s1, 3, 1)
+    ptr f1 = zfix_new(e1, s1)
+    print(zfix_run(f1))          // 2 (t ← {a,b} ← s)
+    print(zfix_len(f1))          // 4 — s, a, b, t (t is the seed itself)
+    print(zfix_probes(f1))       // 4 — exact: only the deltas were touched
+    print(zfix_quiescent_g(f1))  // true
+
+    print("PASS: zfix_quiescence")
+}

@@ -3146,6 +3146,25 @@ impl Checker<'_> {
                     || n == "lcell_has"
                     || n == "lcell_carrier"
                     || n == "lcell_retract"
+                    /* Salt-ζ fixpoint builtins (SWARM RABBIT HOLE, Wave 9,
+                       Impl-N; W2C §3.3–§3.5). zfix_count / zfix_negate —
+                       the two named divergence classes — are RECOGNIZED
+                       but ALWAYS rejected in check_call with E-ZADM (the
+                       admission checker: refusals are compile-time
+                       errors, never silent divergence). */
+                    || n == "zfix_new"
+                    || n == "zfix_new_l"
+                    || n == "zfix_round"
+                    || n == "zfix_run"
+                    || n == "zfix_rounds"
+                    || n == "zfix_len"
+                    || n == "zfix_has"
+                    || n == "zfix_probes"
+                    || n == "zfix_state"
+                    || n == "zfix_quiescent_g"
+                    || n == "zfix_quiescent_l"
+                    || n == "zfix_count"
+                    || n == "zfix_negate"
                 {
                     Type::Named(format!("builtin:{n}"))
                 } else {
@@ -3976,6 +3995,79 @@ impl Checker<'_> {
                      Grothendieck triviality; retraction on Tier L is tombstoned \
                      or none, never exact); use a Tier-G Z-set (zset_*) for exact \
                      retraction [E-LRET]",
+                );
+                Type::Void
+            }
+            /* THE SALT-ζ ADMISSION CHECKER (E-ZADM) — the convergence
+               theorem's sufficient condition made executable (SWARM
+               RABBIT HOLE, Wave 9, Impl-N; W2C §3.3–§3.5).
+               THEOREM (convergence): a MONOTONE body (in the recursive
+               variable) over a FINITE-HEIGHT per-key lattice ⇒ the
+               δ₀/∫ bracket terminates in ≤ height rounds at the LEAST
+               fixpoint (Knaster–Tarski; Cousot–Cousot Pacific J. Math.
+               82(1) 1979). Both premises are REQUIRED — monotone alone
+               is not enough (counting-through-recursion is monotone
+               and diverges on the infinite-height carrier), and
+               finite-height alone is not enough (negation-through-
+               recursion oscillates on any carrier). ADMISSION IS
+               UNDECIDABLE IN GENERAL — the check below is the
+               SUFFICIENT CONDITION priced at expressiveness ("arbitrary
+               SQL/Datalog" shrinks to the stratified-monotone fragment),
+               mandatory per the mandate's no-handwaving rule (W2C §3.5:
+               refusals are compile-time errors, never silent
+               divergence). HONEST SCOPE: the surface has no user-
+               defined fixpoint bodies yet, so the check is per-mode on
+               the built-in body; a user-body certifier (the Propel-
+               style checked-not-proven class, W2C §6.4) is a later
+               slice.
+               ADMITTED — zfix_new (transitive closure reach(a) :-
+               edge(a,b), reach(b)): the body is monotone in the
+               recursive variable, and the carrier is presence {0,1}
+               over the keys of the FINITE edge universe (sets over a
+               finite universe qualify; ℤ-valued recursion through the
+               recursive variable does not). ADMITTED — zfix_new_l (the
+               Tier-L GSET-closure variant): Tier-L carriers qualify BY
+               CONSTRUCTION (W2C §3.3's admission rule — the premise
+               Impl-M's SnLCell landed). REJECTED, always, with the
+               divergence class named: zfix_count and zfix_negate below
+               — recognized intrinsics in the E-LRET shape (a named,
+               checked diagnostic; no IR lowering, no runtime fn). */
+            "zfix_new" | "zfix_new_l" | "zfix_state" => Type::Ptr,
+            "zfix_round" | "zfix_run" | "zfix_rounds" | "zfix_len" | "zfix_probes" => Type::Int,
+            "zfix_has" | "zfix_quiescent_g" | "zfix_quiescent_l" => Type::Bool,
+            /* DIVERGENCE CLASS 1 — counting-through-recursion
+               (r(a) :- r(a) with seed 1, generalized to r(a) += incr
+               every round): monotone, but the per-key carrier is ℤ —
+               INFINITE height — so the convergence theorem's premise
+               fails and the bracket would never quiesce. ALWAYS
+               REJECTED (W2C §3.3's first named divergence class). */
+            "zfix_count" => {
+                self.diag.error(
+                    span,
+                    "fixpoint body diverges: counting-through-recursion — \
+                     the body increments a ℤ-valued count through the recursive \
+                     variable each round, so the per-key carrier has infinite \
+                     height and the convergence theorem's premise fails \
+                     (monotone ≠ finite-height, both required); the bracket \
+                     would never quiesce [E-ZADM]",
+                );
+                Type::Void
+            }
+            /* DIVERGENCE CLASS 2 — negation-through-recursion
+               (μy. 1⊖y): ⊖/negation through the recursive variable
+               makes the body NON-MONOTONE, so Knaster–Tarski does not
+               apply and the iterates oscillate. The failure is the
+               non-monotone BODY, tier-orthogonal (1⊖y is group
+               arithmetic — no carrier choice repairs it). ALWAYS
+               REJECTED (W2C §3.3's second named divergence class). */
+            "zfix_negate" => {
+                self.diag.error(
+                    span,
+                    "fixpoint body diverges: negation-through-recursion — \
+                     the body applies ⊖/negation through the recursive variable, \
+                     so it is NOT monotone in the recursive variable and \
+                     Knaster–Tarski does not apply (μy. 1⊖y oscillates; the \
+                     failure is the non-monotone body, tier-orthogonal) [E-ZADM]",
                 );
                 Type::Void
             }

@@ -1,0 +1,23 @@
+// SWARM RABBIT HOLE — Wave 9 (Impl-N): divergence class 1 made
+// executable — counting-through-recursion, the E-ZADM rejection.
+//
+// The body r(a) :- r(a) with seed 1 (generalized: r(a) += incr every
+// round) is MONOTONE but diverges: the per-key carrier is ℤ, an
+// INFINITE-HEIGHT lattice, so the convergence theorem's premise fails
+// — monotone ≠ finite-height, BOTH are required (W2C §3.3's first
+// named divergence class). The bracket would never quiesce: every
+// round's delta re-derives a strictly larger count.
+//
+// `zfix_count` is the surface's counting-through-recursion mode: a
+// RECOGNIZED intrinsic (a named, checked diagnostic — not "unknown
+// function") that the checker ALWAYS rejects with E-ZADM. Admission
+// is undecidable in general; the checker is the sufficient condition
+// priced at expressiveness, and refusals are compile-time errors,
+// never silent divergence (W2C §3.5). This file is a compile-FAIL
+// golden case (tests/golden.rs).
+
+fn main() {
+    ptr seed = zset_new(0)
+    zset_add(seed, 1, 1)
+    zfix_count(seed, 1) // must be rejected: E-ZADM
+}

@@ -1,0 +1,50 @@
+BENCH row=timer ns_per_op=10 phase_ms=1 ops=100000 checksum=179470193143207702 rounds=0 probes=0
+BENCH row=zfix_build ns_per_op=26 phase_ms=52 ops=2000000 checksum=2020000 rounds=0 probes=0
+BENCH row=zfix_run ns_per_op=123 phase_ms=247 ops=2000000 checksum=2020000 rounds=100 probes=100000
+BENCH row=zfix_l_run ns_per_op=110 phase_ms=220 ops=2000000 checksum=2020000 rounds=100 probes=100000
+BENCH row=naive_run ns_per_op=17 phase_ms=361 ops=20200000 checksum=202000 rounds=101 probes=0
+zfix_len=101000 naive_len=101000
+zfix_sum=5100449500 naive_sum=5100449500
+agree=true
+nodes=101000 edges=100000
+ZFIX_BENCH_DONE
+BENCH row=timer ns_per_op=10 phase_ms=1 ops=100000 checksum=179470193232860705 rounds=0 probes=0
+BENCH row=zfix_build ns_per_op=26 phase_ms=53 ops=2000000 checksum=2020000 rounds=0 probes=0
+BENCH row=zfix_run ns_per_op=119 phase_ms=238 ops=2000000 checksum=2020000 rounds=100 probes=100000
+BENCH row=zfix_l_run ns_per_op=117 phase_ms=234 ops=2000000 checksum=2020000 rounds=100 probes=100000
+BENCH row=naive_run ns_per_op=17 phase_ms=360 ops=20200000 checksum=202000 rounds=101 probes=0
+zfix_len=101000 naive_len=101000
+zfix_sum=5100449500 naive_sum=5100449500
+agree=true
+nodes=101000 edges=100000
+ZFIX_BENCH_DONE
+BENCH row=timer ns_per_op=10 phase_ms=1 ops=100000 checksum=179470193323531206 rounds=0 probes=0
+BENCH row=zfix_build ns_per_op=26 phase_ms=52 ops=2000000 checksum=2020000 rounds=0 probes=0
+BENCH row=zfix_run ns_per_op=125 phase_ms=251 ops=2000000 checksum=2020000 rounds=100 probes=100000
+BENCH row=zfix_l_run ns_per_op=116 phase_ms=232 ops=2000000 checksum=2020000 rounds=100 probes=100000
+BENCH row=naive_run ns_per_op=17 phase_ms=361 ops=20200000 checksum=202000 rounds=101 probes=0
+zfix_len=101000 naive_len=101000
+zfix_sum=5100449500 naive_sum=5100449500
+agree=true
+nodes=101000 edges=100000
+ZFIX_BENCH_DONE
+BENCH row=timer ns_per_op=10 phase_ms=1 ops=100000 checksum=179470193414983906 rounds=0 probes=0
+BENCH row=zfix_build ns_per_op=26 phase_ms=52 ops=2000000 checksum=2020000 rounds=0 probes=0
+BENCH row=zfix_run ns_per_op=119 phase_ms=239 ops=2000000 checksum=2020000 rounds=100 probes=100000
+BENCH row=zfix_l_run ns_per_op=113 phase_ms=227 ops=2000000 checksum=2020000 rounds=100 probes=100000
+BENCH row=naive_run ns_per_op=17 phase_ms=363 ops=20200000 checksum=202000 rounds=101 probes=0
+zfix_len=101000 naive_len=101000
+zfix_sum=5100449500 naive_sum=5100449500
+agree=true
+nodes=101000 edges=100000
+ZFIX_BENCH_DONE
+BENCH row=timer ns_per_op=10 phase_ms=1 ops=100000 checksum=179470193504576542 rounds=0 probes=0
+BENCH row=zfix_build ns_per_op=26 phase_ms=52 ops=2000000 checksum=2020000 rounds=0 probes=0
+BENCH row=zfix_run ns_per_op=118 phase_ms=236 ops=2000000 checksum=2020000 rounds=100 probes=100000
+BENCH row=zfix_l_run ns_per_op=120 phase_ms=240 ops=2000000 checksum=2020000 rounds=100 probes=100000
+BENCH row=naive_run ns_per_op=17 phase_ms=362 ops=20200000 checksum=202000 rounds=101 probes=0
+zfix_len=101000 naive_len=101000
+zfix_sum=5100449500 naive_sum=5100449500
+agree=true
+nodes=101000 edges=100000
+ZFIX_BENCH_DONE

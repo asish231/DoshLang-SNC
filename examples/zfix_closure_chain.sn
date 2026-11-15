@@ -1,0 +1,53 @@
+// SWARM RABBIT HOLE — Wave 9 (Impl-N): Salt ζ, the ADMITTED body —
+// transitive closure reach(a) :- edge(a,b), reach(b), end-to-end.
+//
+// The convergence theorem's sufficient condition (W2C §3.3), made
+// executable: a MONOTONE body (in the recursive variable) over a
+// FINITE-HEIGHT per-key carrier ⇒ the δ₀/∫ bracket terminates in
+// ≤ height rounds at the LEAST fixpoint (Knaster–Tarski; Cousot–Cousot
+// Pacific J. Math. 82(1) 1979). Both premises hold for this body:
+//   monotone       — adding reached nodes can only add derived nodes;
+//   finite-height  — the carrier is presence {0,1} over the keys of
+//                    the FINITE edge universe (sets over a finite
+//                    universe qualify; ℤ-valued recursion through the
+//                    recursive variable does not — that is the
+//                    counting-through-recursion rejection, E-ZADM).
+//
+// Each round is SEMI-NAÏVE (Thm 4b: the incrementalized fixpoint IS
+// classical semi-naïve evaluation — Bancilhon–Ramakrishnan SIGMOD
+// 1986, derived from the calculus): derive only from the previous
+// round's delta δ₀^(r), fold into the integral ∫, then test
+// quiescence — Tier G's test is 𝒟(∫α) = 0, the round's delta Z-set
+// being empty.
+//
+// The edge relation is a Z-set of packed pairs: key = a·2³² + b with
+// a, b ∈ [0, 2³²) — the same i64 keys the engine's adjacency index
+// unpacks. The chain 0→1→…→9 seeded at the far end reaches every node
+// in exactly 9 rounds — the ≤ height bound with EQUALITY on a chain
+// (the longest derivation chain = the diameter), and the probe count
+// is exact: one adjacency probe per round (each round's delta is one
+// node, each with one in-neighbor).
+
+fn main() {
+    ptr edges = zset_new(0)
+    int i = 0
+    while (i < 9) {
+        zset_add(edges, i * 4294967296 + (i + 1), 1)
+        i = i + 1
+    }
+    ptr seed = zset_new(0)
+    zset_add(seed, 9, 1)
+
+    ptr f = zfix_new(edges, seed)
+    int rounds = zfix_run(f) // the δ₀/∫ bracket, to quiescence
+    print(zfix_len(f))          // 10 — every node reached (the least fixpoint)
+    print(rounds)               // 9 — the diameter (≤ height, equality on a chain)
+    print(zfix_rounds(f))       // 9 — the round counter readout
+    print(zfix_has(f, 0))       // true — the far end of the chain
+    print(zfix_has(f, 5))       // true
+    print(zfix_has(f, 10))      // false — nothing outside the universe
+    print(zfix_probes(f))       // 9 — one adjacency probe per round: semi-naïve
+    print(zfix_quiescent_g(f))  // true — 𝒟(∫α) = 0 at the stop
+
+    print("PASS: zfix_closure_chain")
+}

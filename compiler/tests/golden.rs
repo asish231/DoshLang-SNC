@@ -1172,3 +1172,131 @@ fn lcell_stdlib_surface() {
         "10\n1\n3\ntrue\nfalse\n1\n2\ntrue\n200\n2\nPASS: lcell_stdlib\n",
     );
 }
+
+// ---------------------------------------------------------------------
+// SWARM RABBIT HOLE — Wave 9 (Impl-N, Cohort Delta): Salt ζ — the
+// fixpoint-bracket semantics and the admission checker made executable
+// (W2C §3.3–§3.5). The convergence theorem's sufficient condition as
+// a checked, runtime-executable bracket: monotone body (in the
+// recursive variable) + finite-height per-key carrier ⇒ the δ₀/∫
+// bracket terminates in ≤ height rounds at the LEAST fixpoint
+// (Knaster–Tarski; Cousot–Cousot Pacific J. Math. 82(1) 1979). The
+// two canonical divergence classes are recognized intrinsics, ALWAYS
+// rejected with E-ZADM at compile time (refusals are compile-time
+// errors, never silent divergence — W2C §3.5).
+// ---------------------------------------------------------------------
+
+/// The ADMITTED body end-to-end: transitive closure
+/// reach(a) :- edge(a,b), reach(b) over the chain 0→1→…→9 seeded at
+/// the far end — monotone in the recursive variable, carrier =
+/// presence {0,1} over the finite node universe. Converges at the
+/// least fixpoint in exactly the diameter many rounds (the ≤ height
+/// bound observable, equality on a chain), with the semi-naïve probe
+/// count exact (Thm 4b: each round derives only from the previous
+/// round's delta).
+#[test]
+fn zfix_closure_chain() {
+    assert_out(
+        "examples/zfix_closure_chain.sn",
+        "10\n9\n9\ntrue\ntrue\nfalse\n9\ntrue\nPASS: zfix_closure_chain\n",
+    );
+}
+
+/// Divergence class 1 — counting-through-recursion (r(a) :- r(a)
+/// with seed 1): the body increments a ℤ-valued count through the
+/// recursive variable each round, so the per-key carrier has INFINITE
+/// height and the convergence theorem's premise fails (monotone ≠
+/// finite-height, BOTH required). `zfix_count` is a RECOGNIZED
+/// intrinsic (a named, checked rejection — not "unknown function")
+/// that the checker ALWAYS rejects with E-ZADM.
+#[test]
+fn zfix_count_rejected_e_zadm() {
+    let err = compile_err("examples/zfix_count_fail.sn");
+    assert!(err.contains("[E-ZADM]"), "expected E-ZADM, got: {err}");
+    assert!(
+        err.contains("fixpoint body diverges: counting-through-recursion"),
+        "expected the E-ZADM headline, got: {err}"
+    );
+    assert!(
+        err.contains("infinite height"),
+        "expected the infinite-height carrier argument in the diagnostic, got: {err}"
+    );
+    assert!(
+        err.contains("monotone ≠ finite-height, both required"),
+        "expected the both-premises-required argument in the diagnostic, got: {err}"
+    );
+    assert!(
+        err.contains("the bracket would never quiesce"),
+        "expected the non-quiescence verdict in the diagnostic, got: {err}"
+    );
+}
+
+/// Divergence class 2 — negation-through-recursion (μy. 1⊖y): the
+/// body applies ⊖/negation through the recursive variable, so it is
+/// NOT monotone in the recursive variable and Knaster–Tarski does not
+/// apply — the failure is the non-monotone body, tier-orthogonal
+/// (1⊖y is group arithmetic). `zfix_negate` is a RECOGNIZED intrinsic
+/// that the checker ALWAYS rejects with E-ZADM.
+#[test]
+fn zfix_negate_rejected_e_zadm() {
+    let err = compile_err("examples/zfix_negate_fail.sn");
+    assert!(err.contains("[E-ZADM]"), "expected E-ZADM, got: {err}");
+    assert!(
+        err.contains("fixpoint body diverges: negation-through-recursion"),
+        "expected the E-ZADM headline, got: {err}"
+    );
+    assert!(
+        err.contains("NOT monotone in the recursive variable"),
+        "expected the non-monotone-body argument in the diagnostic, got: {err}"
+    );
+    assert!(
+        err.contains("Knaster–Tarski does not apply"),
+        "expected the Knaster–Tarski refutation in the diagnostic, got: {err}"
+    );
+    assert!(
+        err.contains("μy. 1⊖y oscillates"),
+        "expected the oscillation example in the diagnostic, got: {err}"
+    );
+    assert!(
+        err.contains("tier-orthogonal"),
+        "expected the tier-orthogonality note in the diagnostic, got: {err}"
+    );
+}
+
+/// The Tier-L variant — the same closure body over a GSET LCell
+/// carrier (⊔ = union is the join): Tier-L carriers qualify BY
+/// CONSTRUCTION (W2C §3.3's admission rule), so the bracket converges
+/// at the same least fixpoint in the same number of rounds, and the
+/// Tier-L stop condition F(s) ⊑ s (the mutator-law test — 𝒟
+/// presupposes ⊖, absent on Tier L) is exercised end-to-end.
+#[test]
+fn zfix_lcell_closure() {
+    assert_out(
+        "examples/zfix_lcell_closure.sn",
+        "10\n9\ntrue\nfalse\ntrue\n10\n9\ntrue\nPASS: zfix_lcell_closure\n",
+    );
+}
+
+/// The quiescence observables: a seed-only graph (0 productive
+/// rounds — quiescent at once, 𝒟(∫α) = 0) and the diamond (2 rounds,
+/// 4 facts, exact probe count) — the per-tier stop conditions and the
+/// rounds/len readouts of the bracket.
+#[test]
+fn zfix_quiescence() {
+    assert_out(
+        "examples/zfix_quiescence.sn",
+        "0\n1\ntrue\ntrue\n2\n4\n4\ntrue\nPASS: zfix_quiescence\n",
+    );
+}
+
+/// The std.zeta surface: the ZFix blueprint over the runtime SnZFix
+/// engine (the std.delta/ZSet wrapper pattern). No divergent body
+/// exists on the surface: zfix_count/zfix_negate have no methods —
+/// they are recognized intrinsics always rejected with E-ZADM.
+#[test]
+fn zfix_stdlib_surface() {
+    assert_out(
+        "examples/zfix_stdlib.sn",
+        "9\n10\ntrue\nfalse\n9\nPASS: zfix_stdlib\n",
+    );
+}

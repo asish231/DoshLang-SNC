@@ -1,0 +1,285 @@
+// SWARM RABBIT HOLE — Wave 9 / Impl-N (Cohort Delta): the Salt-ζ
+// fixpoint-bracket benchmark, in-language — the incremental
+// semi-naïve ζ rounds vs the NAIVE fixpoint (recompute from the full
+// state every round — no delta tracking) at N=100K edges over a
+// layered graph with known diameter (W2C §3.2–§3.4; Thm 4b).
+//
+// Shape (the lcell_bench.sn / W2F discipline): SNlang's only clock is
+// the ms-resolution time_now_ms, so every timed phase below totals
+// >= 100x that; the driver (bench/run_bench.sh, ZFIX_ONLY=1) runs one
+// warmup at ROUNDS/10 then RUNS timed runs and takes the median;
+// every row prints its own checksum, and the protocol checksums must
+// match across all runs.
+//
+// GC discipline (the lcell_bench one, verbatim): gc_set_threshold
+// pinned to 2e9 keeps threshold collections out of every timed
+// phase; an explicit gc_collect() runs BETWEEN phases only. Loop-
+// scoped pointer locals are NOT pushed as collection roots (their
+// storage does not dominate the collect point), so the sweep reclaims
+// the last iteration's objects while the loop-local slot still holds
+// them — every phase therefore uses FRESH variable names and never
+// touches a previous phase's loop locals again (reassigning a swept
+// slot would double-release it).
+//
+// The graph: 1000 chains x 100 edges = 100,000 edges; node id =
+// c*101 + l (l = 0..100), edges (c,l) -> (c,l+1); seeds = each
+// chain's far end (c,100). Backward reach (reach(a) :- edge(a,b),
+// reach(b)) covers all 101,000 nodes in exactly 100 rounds — the
+// diameter (the <= height bound with equality; the known-depth
+// control). Edge keys are packed pairs: a*2^32 + b.
+//
+// Rows (per timed run; R_ZFIX = rounds, R_NAIVE = rounds/10 — the
+// naive engine is ~100x the per-round work, so it runs 10x fewer
+// brackets per phase and its per-op numbers stay comparable):
+//   timer        — 100_000 time_now_ms() call pairs: the clock row.
+//   zfix_build   — R x { fresh edge Z-set + 100K packed-pair adds +
+//                  the 1000-node seed Z-set } — the relation's
+//                  construction cost (the one-time O(|E|)
+//                  materialization, outside the per-round claim).
+//   zfix_run     — R x { zfix_new + zfix_run } — THE ROW: the full
+//                  delta/0/integral bracket, semi-naive (Thm 4b):
+//                  per round the engine touches only the previous
+//                  round's delta — ~1000 nodes/round, ~1000 adjacency
+//                  probes/round, never the 101K-node state.
+//                  ops = 100_000 derivations per bracket (each
+//                  non-seed node derived exactly once).
+//   zfix_l_run   — R x { zfix_new_l + zfix_run } — the Tier-L
+//                  GSET-closure variant at the same shape: the same
+//                  semi-naïve rounds over the semilattice carrier
+//                  (union joins + the membership-guarded fragment),
+//                  priced against the Tier-G row.
+//   naive_run    — R/10 x { the naive fixpoint in-language: scan ALL
+//                  100K edges every round until no change } — the
+//                  honest O(|state|)-per-round twin: no delta
+//                  tracking, (rounds+1) x |E| edge visits per
+//                  bracket. ops = edge scans.
+//   The checksum cross-check: BOTH engines must agree on the least
+//   fixpoint (|reach| = 101_000 and the same node-id sum) — printed
+//   by both rows and asserted by the agree= line.
+//
+// THE HONEST CLAIM (W2C §3.4): the per-round work is O(|delta|) vs
+// the naive O(|E|) — but the TOTAL is the ROUND-SUM
+// W_mu = sum_rounds c*(|delta0^(r)| + sum_v |Delta_v^(r)|), NOT
+// bounded by |DeltaDB|: one seed batch of 1000 facts here drives 100
+// rounds and 100_000 derivations — a 100x amplification, the
+// fraud-propagation shape. Convergence bounds bound the ROUNDS (the
+// lattice height); per-round work remains data-dependent.
+
+use std.os
+
+fn report(str row, int ns_per_op, int phase_ms, int ops, int ck, int rounds, int probes) {
+    print("BENCH row=" + row + " ns_per_op=" + cast(ns_per_op, str)
+        + " phase_ms=" + cast(phase_ms, str)
+        + " ops=" + cast(ops, str)
+        + " checksum=" + cast(ck, str)
+        + " rounds=" + cast(rounds, str)
+        + " probes=" + cast(probes, str))
+}
+
+fn main() {
+    int chains = 1000
+    int layers = 100          // edges per chain; nodes per chain = layers + 1
+    int n = chains * layers   // 100_000 edges
+    int nodes = chains * (layers + 1)
+    int rounds = 20
+    list<str> a = args()
+    if (a.length() > 1) {
+        int v = cast(a[1], int)
+        if (v > 0) {
+            rounds = v
+        }
+    }
+    int rzfix = rounds
+    int rnaive = rounds / 10
+    if (rnaive < 1) {
+        rnaive = 1
+    }
+    int rz1 = rzfix
+    if (rz1 < 1) { rz1 = 1 }
+    int rn1 = rnaive
+    if (rn1 < 1) { rn1 = 1 }
+    gc_set_threshold(2000000000)
+
+    // ---- timer overhead: 100_000 time_now_ms() call pairs
+    int t0 = time_now_ms()
+    int kt = 0
+    int acct = 0
+    while (kt < 100000) {
+        acct = acct + time_now_ms()
+        kt = kt + 1
+    }
+    int t1 = time_now_ms()
+    report("timer", (t1 - t0) * 1000000 / 100000, t1 - t0, 100000, acct, 0, 0)
+
+    // ---- zfix_build: R x { the 100K-edge relation + the seed set }
+    int ck = 0
+    int r = 0
+    int tb0 = time_now_ms()
+    while (r < rzfix) {
+        ptr eb = zset_new(0)
+        int c = 0
+        while (c < chains) {
+            int l = 0
+            while (l < layers) {
+                zset_add(eb, (c * 101 + l) * 4294967296 + (c * 101 + l + 1), 1)
+                l = l + 1
+            }
+            c = c + 1
+        }
+        ptr sb = zset_new(0)
+        c = 0
+        while (c < chains) {
+            zset_add(sb, c * 101 + layers, 1)
+            c = c + 1
+        }
+        ck = ck + zset_len(eb) + zset_len(sb)
+        r = r + 1
+    }
+    int tb1 = time_now_ms()
+    report("zfix_build", (tb1 - tb0) * 1000000 / (rzfix * n), tb1 - tb0, rzfix * n, ck, 0, 0)
+    gc_collect()
+
+    // The PREBUILT relation (outside every timed phase — the
+    // lcell_bench prebuilt-source pattern): both engines consume the
+    // SAME edge Z-set and seed Z-set; the ζ engine only retains them
+    // (read-only: the CSR materialization + the seed fold), and the
+    // naive engine only reads the key list. What the rows below time
+    // is the FIXPOINT alone.
+    ptr pre_e = zset_new(0)
+    int pc = 0
+    while (pc < chains) {
+        int pl = 0
+        while (pl < layers) {
+            zset_add(pre_e, (pc * 101 + pl) * 4294967296 + (pc * 101 + pl + 1), 1)
+            pl = pl + 1
+        }
+        pc = pc + 1
+    }
+    ptr pre_s = zset_new(0)
+    pc = 0
+    while (pc < chains) {
+        zset_add(pre_s, pc * 101 + layers, 1)
+        pc = pc + 1
+    }
+    list<int> pre_k = zset_keys(pre_e)
+
+    // ---- zfix_run: R x { zfix_new + zfix_run } — the semi-naïve row.
+    //      Per bracket: the one-time O(|E|) CSR materialization (the
+    //      bracket's ℐ step) + the semi-naïve rounds (Thm 4b): per
+    //      round the engine touches only the previous round's delta
+    //      — ~1000 nodes/round, ~1000 adjacency probes/round, never
+    //      the 101K-node state. ops = 100_000 derivations per
+    //      bracket (each non-seed node derived exactly once).
+    ck = 0
+    int zg_rounds = 0
+    int zg_probes = 0
+    int len_seen = 0
+    ptr fg_last = zfix_new(pre_e, pre_s)
+    r = 0
+    int tc0 = time_now_ms()
+    while (r < rzfix) {
+        ptr fg = zfix_new(pre_e, pre_s)
+        zg_rounds = zg_rounds + zfix_run(fg)
+        zg_probes = zg_probes + zfix_probes(fg)
+        len_seen = zfix_len(fg)
+        fg_last = fg
+        ck = ck + len_seen
+        r = r + 1
+    }
+    int tc1 = time_now_ms()
+    // the value checksum (untimed): the node-id sum over the reached set
+    int zg_sum = 0
+    ptr stg = zfix_state(fg_last)
+    list<int> kg = zset_keys(stg)
+    int ig = 0
+    while (ig < kg.length()) {
+        zg_sum = zg_sum + kg[ig]
+        ig = ig + 1
+    }
+    report("zfix_run", (tc1 - tc0) * 1000000 / (rzfix * n), tc1 - tc0, rzfix * n, ck, zg_rounds / rz1, zg_probes / rz1)
+    gc_collect()
+
+    // ---- zfix_l_run: R x { zfix_new_l + zfix_run } — the Tier-L row:
+    //      the same semi-naïve rounds over the GSET semilattice
+    //      carrier (union joins + the membership-guarded
+    //      state-relative fragment), priced against the Tier-G row.
+    ck = 0
+    int zl_rounds = 0
+    int zl_probes = 0
+    r = 0
+    int td0 = time_now_ms()
+    while (r < rzfix) {
+        ptr fl = zfix_new_l(pre_e, pre_s)
+        zl_rounds = zl_rounds + zfix_run(fl)
+        zl_probes = zl_probes + zfix_probes(fl)
+        len_seen = zfix_len(fl)
+        ck = ck + len_seen
+        r = r + 1
+    }
+    int td1 = time_now_ms()
+    report("zfix_l_run", (td1 - td0) * 1000000 / (rzfix * n), td1 - td0, rzfix * n, ck, zl_rounds / rz1, zl_probes / rz1)
+    gc_collect()
+
+    // ---- naive_run: R/10 x { the naive fixpoint } — scan ALL edges
+    //      every round until no change. No delta tracking: the
+    //      O(|state|)-per-round twin. The relation and its key list
+    //      are the same PREBUILT ones (loop-invariant — read once,
+    //      scanned O(rounds) times per bracket).
+    ck = 0
+    int naive_scans = 0
+    int naive_rounds = 0
+    int naive_sum = 0
+    r = 0
+    int te0 = time_now_ms()
+    while (r < rnaive) {
+        ptr rn = zset_new(0)
+        int c = 0
+        while (c < chains) {
+            zset_add(rn, c * 101 + layers, 1)
+            c = c + 1
+        }
+        int changed = 1
+        while (changed == 1) {
+            changed = 0
+            int i = 0
+            while (i < pre_k.length()) {
+                int e = pre_k[i]
+                int src = e / 4294967296
+                int dst = e - src * 4294967296
+                if (zset_count(rn, dst) != 0) {
+                    if (zset_count(rn, src) == 0) {
+                        zset_add(rn, src, 1)
+                        changed = 1
+                    }
+                }
+                i = i + 1
+            }
+            naive_scans = naive_scans + pre_k.length()
+            naive_rounds = naive_rounds + 1
+        }
+        ck = ck + zset_len(rn)
+        // the value checksum (untimed, once): over the last reach
+        if (r == rnaive - 1) {
+            int ir = 0
+            list<int> kr = zset_keys(rn)
+            while (ir < kr.length()) {
+                naive_sum = naive_sum + kr[ir]
+                ir = ir + 1
+            }
+        }
+        r = r + 1
+    }
+    int te1 = time_now_ms()
+    int scans = naive_scans
+    if (scans < 1) { scans = 1 }
+    report("naive_run", (te1 - te0) * 1000000 / scans, te1 - te0, naive_scans, ck, naive_rounds / rn1, 0)
+
+    // ---- the fixpoint agreement cross-check: both engines must
+    //      reach the SAME least fixpoint (same size, same id sum)
+    int naive_len = ck / rn1
+    print("zfix_len=" + cast(len_seen, str) + " naive_len=" + cast(naive_len, str))
+    print("zfix_sum=" + cast(zg_sum, str) + " naive_sum=" + cast(naive_sum, str))
+    print("agree=" + cast(len_seen == naive_len && zg_sum == naive_sum, str))
+    print("nodes=" + cast(nodes, str) + " edges=" + cast(n, str))
+    print("ZFIX_BENCH_DONE")
+}

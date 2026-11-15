@@ -535,9 +535,63 @@ else
 fi
 
 echo ""
+
+# 17. Salt ζ — the fixpoint-bracket engine's runtime mechanics
+#     (SWARM RABBIT HOLE, Wave 9, Impl-N; W2C §3.2–§3.5). The bracket
+#     over randomized seeded-LCG graphs AND known shapes (the chain,
+#     the star), both tiers (Tier-G Z-set presence / Tier-L GSET ⊔):
+#     closure correctness vs a reference bitset BFS, the semi-naïve
+#     claim probe-counted (each round's delta == the BFS level EXACTLY;
+#     each round's adjacency probes == the delta's indeg sum — Thm 4b),
+#     rounds ≤ height with equality on the chain, the per-tier
+#     quiescence tests (𝒟(∫α)=0 / F(s) ⊑ s via the mutator law), a
+#     collection fired mid-bracket (the tracked-engine design), and
+#     the E-LKIND guard probes. Built twice: plain, then ASan.
+echo "-----------------------------------------------------------------"
+echo "17. SALT ZETA FIXPOINT BRACKET, RUNTIME MECHANICS (test_zfix.c)"
+echo "-----------------------------------------------------------------"
+OUT_ZFIX_C="/tmp/snc_test_zfix_c"
+rm -f "$OUT_ZFIX_C"
+if clang -O1 -g -o "$OUT_ZFIX_C" "$DIR/test_zfix.c" "$ROOT/compiler/runtime.c" -lpthread 2>/dev/null; then
+    OUTPUT=$("$OUT_ZFIX_C")
+    echo "$OUTPUT"
+    if echo "$OUTPUT" | grep -q "PASS:"; then
+        echo ">>> test_zfix(.c): PASSED"
+    else
+        echo ">>> test_zfix(.c): FAILED"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> test_zfix(.c): BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+echo ""
+
+# 17b. The ASan stress pass of the same Salt-ζ bracket test
+echo "-----------------------------------------------------------------"
+echo "17b. SALT ZETA FIXPOINT BRACKET, ASAN STRESS (test_zfix.c)"
+echo "-----------------------------------------------------------------"
+OUT_ZFIX_ASAN="/tmp/snc_test_zfix_c_asan"
+rm -f "$OUT_ZFIX_ASAN"
+if clang -O1 -g -fsanitize=address -o "$OUT_ZFIX_ASAN" "$DIR/test_zfix.c" "$ROOT/compiler/runtime.c" -lpthread 2>/dev/null; then
+    OUTPUT=$(ASAN_OPTIONS=detect_leaks=0 "$OUT_ZFIX_ASAN" 2>&1)
+    echo "$OUTPUT"
+    if echo "$OUTPUT" | grep -q "PASS:"; then
+        echo ">>> test_zfix(.c ASan): PASSED (no ASan reports over the CSR build / round loop / mutator-law fragments)"
+    else
+        echo ">>> test_zfix(.c ASan): FAILED"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> test_zfix(.c ASan): BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+echo ""
 echo "================================================================="
 if [ $FAILURES -eq 0 ]; then
-    echo "  ALL SYSTEMS & SECURITY TESTS PASSED (23 checks)"
+    echo "  ALL SYSTEMS & SECURITY TESTS PASSED (25 checks)"
     exit 0
 else
     echo "  $FAILURES SYSTEMS TESTS FAILED"

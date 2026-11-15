@@ -3921,6 +3921,70 @@ impl Cx<'_> {
                 self.line(&format!("{r} = call i64 @sn_lcell_has(ptr {p}, i64 {eb})"));
                 (r, Type::Bool)
             }
+            /* Salt-ζ fixpoint builtins (SWARM RABBIT HOLE, Wave 9,
+               Impl-N; W2C §3.3–§3.5): the admitted closure bracket over
+               Tier-G (zfix_new) and Tier-L (zfix_new_l) carriers, the
+               semi-naïve round/run primitives, and the readouts.
+               NO zfix_count / zfix_negate arms exist: the admission
+               checker ALWAYS rejects them (E-ZADM — the two named
+               divergence classes: infinite-height carrier;
+               non-monotone body), so lowering never sees the names. */
+            "zfix_new" | "zfix_new_l" => {
+                let e0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let edges = self.as_ptr(e0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let s1 = vs.get(1).map(|x| x.0.clone()).unwrap_or("null".into());
+                let seed = self.as_ptr(s1, vs.get(1).map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let r = self.t();
+                let f = if n == "zfix_new" {
+                    "sn_zfix_new"
+                } else {
+                    "sn_zfix_new_l"
+                };
+                self.line(&format!("{r} = call ptr @{f}(ptr {edges}, ptr {seed})"));
+                (r, Type::Ptr)
+            }
+            "zfix_round" | "zfix_run" | "zfix_rounds" | "zfix_len" | "zfix_probes" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let p = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let r = self.t();
+                let f = match n {
+                    "zfix_round" => "sn_zfix_round",
+                    "zfix_run" => "sn_zfix_run",
+                    "zfix_rounds" => "sn_zfix_rounds",
+                    "zfix_len" => "sn_zfix_len",
+                    _ => "sn_zfix_probes",
+                };
+                self.line(&format!("{r} = call i64 @{f}(ptr {p})"));
+                (r, Type::Int)
+            }
+            "zfix_has" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let p = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let e = vs.get(1).cloned().unwrap_or(("0".into(), Type::Int));
+                let eb = self.as_bits(e.0, &e.1);
+                let r = self.t();
+                self.line(&format!("{r} = call i64 @sn_zfix_has(ptr {p}, i64 {eb})"));
+                (r, Type::Bool)
+            }
+            "zfix_quiescent_g" | "zfix_quiescent_l" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let p = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let r = self.t();
+                let f = if n == "zfix_quiescent_g" {
+                    "sn_zfix_quiescent_g"
+                } else {
+                    "sn_zfix_quiescent_l"
+                };
+                self.line(&format!("{r} = call i64 @{f}(ptr {p})"));
+                (r, Type::Bool)
+            }
+            "zfix_state" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let p = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let r = self.t();
+                self.line(&format!("{r} = call ptr @sn_zfix_state(ptr {p})"));
+                (r, Type::Ptr)
+            }
             "alloc" => {
                 let r = self.t();
                 self.line(&format!("{r} = call ptr @sn_alloc(i64 {})", vs[0].0));

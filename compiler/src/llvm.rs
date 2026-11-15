@@ -399,6 +399,22 @@ declare i64 @sn_lcell_len(ptr)
 declare i64 @sn_lcell_value(ptr)
 declare i64 @sn_lcell_has(ptr, i64)
 declare i64 @sn_lcell_carrier(ptr)
+; Salt ζ — the fixpoint-bracket engine (SWARM RABBIT HOLE, Wave 9, Impl-N;
+; W2C §3.3–§3.5). No sn_zfix_count / sn_zfix_negate exist at runtime: the
+; admission checker ALWAYS rejects the two named divergence classes with
+; E-ZADM at compile time — refusals are compile-time errors, never silent
+; divergence.
+declare ptr @sn_zfix_new(ptr, ptr)
+declare ptr @sn_zfix_new_l(ptr, ptr)
+declare i64 @sn_zfix_round(ptr)
+declare i64 @sn_zfix_run(ptr)
+declare i64 @sn_zfix_rounds(ptr)
+declare i64 @sn_zfix_len(ptr)
+declare i64 @sn_zfix_has(ptr, i64)
+declare i64 @sn_zfix_probes(ptr)
+declare ptr @sn_zfix_state(ptr)
+declare i64 @sn_zfix_quiescent_g(ptr)
+declare i64 @sn_zfix_quiescent_l(ptr)
 declare i64 @sn_euclid_mod_i64(i64, i64)
 declare void @sn_rf_trigger(i64, i64, i64)
 declare i64 @sn_rf_active()

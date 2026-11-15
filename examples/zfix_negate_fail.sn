@@ -1,0 +1,22 @@
+// SWARM RABBIT HOLE — Wave 9 (Impl-N): divergence class 2 made
+// executable — negation-through-recursion, the E-ZADM rejection.
+//
+// The body μy. 1⊖y oscillates: applying ⊖ (negation) through the
+// recursive variable makes the body NON-MONOTONE in the recursive
+// variable, so Knaster–Tarski does not apply and there is no least
+// fixpoint to converge to (W2C §3.3's second named divergence class).
+// The failure is the non-monotone BODY, tier-orthogonal — 1⊖y is
+// group arithmetic, so this is not a Tier-L vs Tier-G question; no
+// carrier choice repairs a body that flips its input.
+//
+// `zfix_negate` is the surface's negation-through-recursion mode: a
+// RECOGNIZED intrinsic that the checker ALWAYS rejects with E-ZADM
+// (the same checked-refusal discipline as zfix_count — refusals are
+// compile-time errors, never silent divergence, W2C §3.5). This file
+// is a compile-FAIL golden case (tests/golden.rs).
+
+fn main() {
+    ptr seed = zset_new(0)
+    zset_add(seed, 1, 1)
+    zfix_negate(seed) // must be rejected: E-ZADM
+}

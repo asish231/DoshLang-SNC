@@ -1,0 +1,32 @@
+// SWARM RABBIT HOLE — Wave 9 (Impl-N): the std.zeta surface — the
+// ZFix blueprint over the runtime SnZFix engine (the std.delta/ZSet
+// wrapper pattern). The admitted closure body through the wrapper,
+// with the rounds ≤ height bound, the exact semi-naïve probe count,
+// and the Tier-G quiescence predicate observable end-to-end.
+//
+// No divergent body exists on this surface: zfix_count/zfix_negate
+// have no methods — they are recognized intrinsics always rejected
+// with E-ZADM at the intrinsic level.
+
+use std.delta
+use std.zeta
+
+fn main() {
+    let edges = ZSet.new()
+    int i = 0
+    while (i < 9) {
+        edges.add(i * 4294967296 + (i + 1), 1) // edge i → i+1 (packed)
+        i = i + 1
+    }
+    let seed = ZSet.new()
+    seed.add(9, 1)
+
+    let f = ZFix.new(edges.raw, seed.raw)
+    print(f.run())          // 9 — the diameter (≤ height, equality on a chain)
+    print(f.len())          // 10 — the least fixpoint
+    print(f.has(0))         // true
+    print(f.has(10))        // false
+    print(f.probes())       // 9 — one adjacency probe per round (semi-naïve)
+
+    print("PASS: zfix_stdlib")
+}

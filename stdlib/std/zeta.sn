@@ -1,0 +1,114 @@
+// Salt ζ — the fixpoint-bracket surface over the runtime SnZFix
+// engine (SWARM RABBIT HOLE, Wave 9, Impl-N; W2C §3.3–§3.5).
+//
+// The ADMITTED body: transitive closure
+//   reach(a) :- edge(a,b), reach(b)
+// — monotone in the recursive variable; the carrier is presence {0,1}
+// over the keys of the FINITE edge universe, so the convergence
+// theorem applies (Knaster–Tarski; Cousot–Cousot Pacific J. Math.
+// 82(1) 1979): the δ₀/∫ bracket terminates in ≤ height rounds at the
+// LEAST fixpoint. Each round is semi-naïve (Thm 4b — the
+// incrementalized fixpoint IS classical semi-naïve evaluation,
+// Bancilhon–Ramakrishnan SIGMOD 1986): only the previous round's
+// delta is re-derived, never the full state.
+//
+// The edge relation is a Z-set of packed pairs: key = a·2³² + b with
+// a, b ∈ [0, 2³²) (build with plain int arithmetic). Seeds are a
+// Z-set of nodes. Tier G (new) carries reach as a Z-set with presence
+// coefficients and stops at 𝒟(∫α) = 0; Tier L (new_l) carries reach as
+// a GSET semilattice cell (⊔ = union — carriers qualify by
+// construction) and stops at F(s) ⊑ s via the mutator law
+// (lcell_delta's delta(x,x) = ⊥).
+//
+// The DIVERGENT bodies are not on this surface: zfix_count
+// (counting-through-recursion — infinite-height carrier) and
+// zfix_negate (negation-through-recursion — non-monotone body,
+// μy. 1⊖y oscillates) are recognized intrinsics ALWAYS rejected at
+// compile time with E-ZADM. Admission is undecidable in general; the
+// check is the sufficient condition priced at expressiveness, and
+// refusals are compile-time errors, never silent divergence
+// (W2C §3.5). Honest scope: the surface has no user-defined fixpoint
+// bodies yet — the admission check is per-mode on the built-in body;
+// a user-body certifier (the Propel-style checked-not-proven class,
+// W2C §6.4) is a later slice.
+//
+//   use std.delta
+//   use std.zeta
+//   let edges = ZSet.new()
+//   edges.add(src * 4294967296 + dst, 1)
+//   let seed = ZSet.new()
+//   seed.add(node, 1)
+//   let f = ZFix.new(edges.raw, seed.raw)
+//   int rounds = f.run()        // the bracket, to quiescence (≤ height)
+//   f.len() / f.has(node) / f.probes() / f.rounds()
+//   f.quiescent_g() / f.quiescent_l()
+//
+// The wrapper is the std.delta pattern: a blueprint over the runtime
+// raw pointer. Like ZSet, the raw engine is freed with the process (no
+// close()); the runtime test (tests/systems/test_zfix.c) owns the
+// explicit sn_zfix_release/ASan story.
+
+blueprint ZFix {
+    ptr raw
+
+    static fn new(ptr edges, ptr seed) -> ZFix {
+        new ZFix p()
+        p.raw = zfix_new(edges, seed)
+        return p
+    }
+
+    // The Tier-L GSET-closure variant: the same admitted body over a
+    // join-semilattice carrier (⊔ = union).
+    static fn new_l(ptr edges, ptr seed) -> ZFix {
+        new ZFix p()
+        p.raw = zfix_new_l(edges, seed)
+        return p
+    }
+
+    static fn wrap(ptr raw) -> ZFix {
+        new ZFix p()
+        p.raw = raw
+        return p
+    }
+
+    // The δ₀/∫ bracket: semi-naïve rounds until quiescence. Returns
+    // the productive round count — ≤ the carrier height, and exactly
+    // the longest derivation chain for closure.
+    fn run() -> int {
+        return zfix_run(self.raw)
+    }
+
+    fn rounds() -> int {
+        return zfix_rounds(self.raw)
+    }
+
+    // |reach| — the least fixpoint's support size.
+    fn len() -> int {
+        return zfix_len(self.raw)
+    }
+
+    fn has(int node) -> bool {
+        return zfix_has(self.raw, node)
+    }
+
+    // Σ adjacency probes across all rounds — the per-round work
+    // observable: each round touched only the previous round's delta
+    // (Thm 4b). The per-update cost is the ROUND-SUM
+    // W_μ = Σ_rounds c·(|δ₀^(r)| + Σ_v |Δv^(r)|) — NOT bounded by
+    // |ΔDB| (W2C §3.4).
+    fn probes() -> int {
+        return zfix_probes(self.raw)
+    }
+
+    // The Tier-G stop condition as a standalone predicate:
+    // 𝒟(∫α) = 0 — one full-state body step derives nothing.
+    fn quiescent_g() -> bool {
+        return zfix_quiescent_g(self.raw)
+    }
+
+    // The Tier-L stop condition as a standalone predicate:
+    // F(s) ⊑ s via the mutator law (delta(x,x) = ⊥, no inflation).
+    fn quiescent_l() -> bool {
+        return zfix_quiescent_l(self.raw)
+    }
+}

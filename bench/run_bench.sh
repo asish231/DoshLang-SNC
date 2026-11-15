@@ -219,6 +219,63 @@ if [ -n "${LCELL_ONLY:-}" ]; then
     exit 0
 fi
 
+# ---------- zfix rows (Wave 9, Impl-N) ----------
+# bench/zfix_bench.sn — Salt ζ: the incremental semi-naïve fixpoint
+# bracket vs the NAIVE fixpoint (recompute from the full state every
+# round — no delta tracking) at N=100K edges over a layered graph with
+# known diameter (1000 chains x 100 edges; backward reach covers all
+# 101K nodes in exactly 100 rounds — the ≤ height bound with
+# equality). Rows: the bracket (zfix_run: the CSR materialization +
+# semi-naïve rounds), the Tier-L GSET-closure variant (zfix_l_run),
+# the naive twin (naive_run: (rounds+1) x |E| edge scans per
+# bracket), and the relation build (zfix_build). The honest §3.4
+# caveat: W_μ is the ROUND-SUM, not |ΔDB|-bounded — one 1000-fact
+# seed batch drives 100 rounds and 100K derivations here (a 100x
+# amplification). Results: bench/RESULTS_ZFIX.md.
+# ZFIX_ONLY=1 ./run_bench.sh runs just these rows.
+zfix_rows() {
+    echo "-- building zfix bench (Wave 9, Impl-N)"
+    "$SNC" zfix_bench.sn -o "$OUT/sn_zfix_bench" || exit 1
+    local rounds="${ZFIX_ROUNDS:-20}"
+    local warm=$((rounds / 10))
+    if [ "$warm" -lt 2 ]; then warm=2; fi
+    local f r b spec
+    b=sn_zfix_bench
+    f="$OUT/$b.txt"
+    : > "$f"
+    echo "-- warmup $b (rounds=$warm)" >&2
+    "$OUT/$b" "$warm" >/dev/null 2>&1
+    echo "-- timed $b x$RUNS (rounds=$rounds)" >&2
+    for r in $(seq "$RUNS"); do
+        "$OUT/$b" "$rounds" >> "$f" 2>/dev/null
+    done
+    echo "-- zfix medians (rounds=$rounds, median of $RUNS):"
+    for spec in \
+        "timer ns_per_op" \
+        "zfix_build ns_per_op" \
+        "zfix_run ns_per_op" \
+        "zfix_run phase_ms" \
+        "zfix_run probes" \
+        "zfix_l_run ns_per_op" \
+        "zfix_l_run phase_ms" \
+        "naive_run ns_per_op" \
+        "naive_run phase_ms"; do
+        set -- $spec
+        echo "  $1.$2 = $(median_row "$OUT/sn_zfix_bench.txt" "$1" "$2")"
+    done
+    echo "-- fixpoint agreement (must be identical across all runs):"
+    grep -h "^agree=" "$OUT/sn_zfix_bench.txt" | sort | uniq -c
+    grep -h "^zfix_len=" "$OUT/sn_zfix_bench.txt" | sort | uniq -c
+    grep -h "^zfix_sum=" "$OUT/sn_zfix_bench.txt" | sort | uniq -c
+}
+
+if [ -n "${ZFIX_ONLY:-}" ]; then
+    zfix_rows
+    echo
+    echo "== done (ZFIX_ONLY). raw runs in $OUT/sn_zfix_bench.txt ; see RESULTS_ZFIX.md =="
+    exit 0
+fi
+
 # ---------- run + collect ----------
 collect() {  # collect NAME -- cmd...
     local name="$1"; shift; shift
@@ -244,6 +301,9 @@ pinned_lane_rows
 
 # lcell rows (Wave 9, Impl-M): see lcell_rows above
 lcell_rows
+
+# zfix rows (Wave 9, Impl-N): see zfix_rows above
+zfix_rows
 
 # per-run peak RSS (one run each; RSS is stable)
 echo "-- peak RSS (KB)"

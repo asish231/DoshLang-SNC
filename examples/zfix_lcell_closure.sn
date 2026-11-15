@@ -1,0 +1,48 @@
+// SWARM RABBIT HOLE — Wave 9 (Impl-N): the Tier-L ζ bracket — the
+// GSET-closure variant. The SAME admitted body (transitive closure
+// reach(a) :- edge(a,b), reach(b)) over an SnLCell GSET carrier: ⊔
+// (union) is the join, so Tier-L carriers qualify BY CONSTRUCTION
+// (W2C §3.3's admission rule — the premise Impl-M's SnLCell landed).
+//
+// The per-tier stop conditions differ because the algebras differ
+// (W4C Repair 3's per-tier form): Tier G tests 𝒟(∫α) = 0 — but 𝒟
+// presupposes ⊖, which does not and cannot exist on Tier L
+// (Grothendieck triviality — the E-LRET rejection). Tier L therefore
+// tests F(s) ⊑ s via the MUTATOR LAW: the round's state-relative
+// fragment (sn_lcell_delta — delta(x,x) = ⊥, no inflation) is empty.
+// Both tests are executable in the engine: the Tier-L bracket extracts
+// each round's true delta with lcell_delta itself (the mutator law
+// IS the round-delta extractor), and zfix_quiescent_l runs the direct
+// F(s) ⊑ s form.
+//
+// Both tiers converge at the SAME least fixpoint in the SAME number
+// of rounds — semi-naïve is body-mechanical, carrier-independent.
+
+fn main() {
+    ptr edges = zset_new(0)
+    int i = 0
+    while (i < 9) {
+        zset_add(edges, i * 4294967296 + (i + 1), 1)
+        i = i + 1
+    }
+    ptr seed = zset_new(0)
+    zset_add(seed, 9, 1)
+
+    // Tier-L GSET-closure: the bracket over the semilattice carrier.
+    ptr fl = zfix_new_l(edges, seed)
+    int rounds_l = zfix_run(fl)
+    print(zfix_len(fl))             // 10 — the least fixpoint, by construction
+    print(rounds_l)                  // 9 — the same diameter bound
+    print(zfix_has(fl, 0))          // true
+    print(zfix_has(fl, 10))         // false
+    print(zfix_quiescent_l(fl))     // true — F(s) ⊑ s, the mutator-law stop test
+
+    // The Tier-G twin: both tiers reach the same least fixpoint.
+    ptr fg = zfix_new(edges, seed)
+    int rounds_g = zfix_run(fg)
+    print(zfix_len(fg))             // 10
+    print(rounds_g)                  // 9
+    print(zfix_len(fg) == zfix_len(fl))  // true — one fixpoint, two carriers
+
+    print("PASS: zfix_lcell_closure")
+}
