@@ -2211,3 +2211,223 @@ fn hilbert_kv_rejected_verbatim() {
         "expected the verbatim E-SFC hilbert element-type diagnostic, got: {err}"
     );
 }
+
+// ---------------------------------------------------------------------
+// SWARM RABBIT HOLE — Wave 15 (Impl-T, Cohort Delta): Salt ε — the
+// numeric contract layer (requires/ensures clauses on fn
+// declarations; A4's Presburger decidable ladder + the final report
+// §7.3's boundary rule, executable). The engine is the facts table
+// (Go-prove-style: sound, not complete) over the DBM zone layer
+// (Floyd CACM 1962; Dill CAV'89; Bengtsson–Yi; Miné HOSC 2006); the
+// tiers are L (linear), D (divisibility ledge: the remainder range
+// axiom only — the EPAD/Lipshitz solver is a later rung), N
+// (nonlinear: E0701 in a verified fn, a typed runtime assertion in a
+// plain fn). An atom the engine proves is discharged at compile
+// time; an atom it cannot prove degrades to a typed runtime
+// assertion at the boundary (the call site / fn entry for requires,
+// the fn exit for ensures) — never silently dropped, priced per
+// atom.
+// ---------------------------------------------------------------------
+
+/// The DISCHARGE tier, end to end: every atom proved at compile
+/// time, the emitted code carries NO contract assertion, and the
+/// compile is warning-free (the discharge's whole point — the
+/// loop-index-vs-len classic with a literal caller, the call-chain
+/// propagation of the caller's own requires, the ensures discharge
+/// over the return-value binding, the mod range axiom (Tier D), and
+/// the mod-by-literal fold).
+#[test]
+fn contract_discharge() {
+    let (code, stdout, stderr) = compile_run("examples/contract_discharge.sn");
+    assert_eq!(code, 0, "contract_discharge failed ({code}): {stderr}\n{stdout}");
+    assert_eq!(stdout, "10\n30\n40\n50\n3\n1\n");
+    let w = compile_ok_stderr("examples/contract_discharge.sn");
+    assert!(
+        !w.contains("W-CONTRACT"),
+        "a discharged contract must be silent, got warnings: {w}"
+    );
+}
+
+/// The DEGRADE tier, warning verbatim (the boundary rule's honest
+/// degradation, priced per atom): the mod-term caller fact
+/// discharges 'i < xs.length()' (the axiom gives i ≤ 2, the literal
+/// list's length is 3 — the DBM closure derives i − len ≤ −1) but
+/// cannot discharge '0 <= i' (the axiom gives i ≥ −2, not i ≥ 0);
+/// the Tier D mod-by-variable atom '0 <= x % m' degrades under the
+/// remainder range axiom. Both runtime assertions pass on the valid
+/// input.
+#[test]
+fn contract_degrade_warn_verbatim() {
+    let (code, stdout, stderr) = compile_run("examples/contract_degrade.sn");
+    assert_eq!(code, 0, "contract_degrade failed ({code}): {stderr}\n{stdout}");
+    assert_eq!(stdout, "ok\n");
+    let w = compile_ok_stderr("examples/contract_degrade.sn");
+    assert!(
+        w.contains(
+            "W-CONTRACT: requires atom '0 <= i' of 'get' was not \
+             discharged at the call in 'main' (tier L: linear) — a typed \
+             runtime assertion now sits at the call site; the facts table + \
+             DBM zones are sound, not complete. [W-CONTRACT]"
+        ),
+        "expected the verbatim W-CONTRACT tier-L degrade warning, got: {w}"
+    );
+    assert!(
+        w.contains(
+            "W-CONTRACT: requires atom '0 <= x % m' of 'rmod' was not \
+             discharged at the call in 'main' (tier D: divisibility ledge — \
+             the remainder-range axiom is a range fact, never a divisibility \
+             solve; the EPAD solver tier is a later rung) — a typed runtime \
+             assertion now sits at the call site; the facts table + DBM zones \
+             are sound, not complete. [W-CONTRACT]"
+        ),
+        "expected the verbatim W-CONTRACT tier-D degrade warning, got: {w}"
+    );
+}
+
+/// The REFUTED arm, verbatim: the literal 99 against the 3-element
+/// list — the engine proves the negation (the conjoined atom closes
+/// to a negative diagonal cycle), the warning says the assertion will
+/// always fail, and the runtime assertion still fires: the process
+/// dies with the [E-0702] fail-fast message (soundness never rests on
+/// the refutation alone — the caller's facts are enforced elsewhere).
+#[test]
+fn contract_degrade_refuted_fail_verbatim() {
+    let w = compile_ok_stderr("examples/contract_degrade_fail.sn");
+    assert!(
+        w.contains(
+            "W-CONTRACT: requires atom 'i < xs.length()' of 'get' is \
+             REFUTED at the call in 'main' — the engine proved the negation \
+             from the caller's facts; the runtime assertion will always \
+             fail here. [W-CONTRACT]"
+        ),
+        "expected the verbatim W-CONTRACT refutation warning, got: {w}"
+    );
+    let (code, _stdout, stderr) = compile_run("examples/contract_degrade_fail.sn");
+    assert_ne!(code, 0, "the refuted call must die");
+    assert!(
+        stderr.contains(
+            "runtime error: contract requires 'i < xs.length()' of 'get' \
+             violated at the call in 'main' (a typed runtime assertion — \
+             the compile-time engine proved the negation) [E-0702]"
+        ),
+        "expected the verbatim [E-0702] fail-fast message, got: {stderr}"
+    );
+}
+
+/// The ensures DEGRADE at the fn exit, verbatim: the coefficient-2
+/// return binding (result := 2x) is not a difference bound (the
+/// octagon rung is a later rung), so 'result <= 100' has no exit-zone
+/// bound; the assertion sits at every return of 'double' and fires on
+/// the 120.
+#[test]
+fn contract_ensures_degrade_fail_verbatim() {
+    let w = compile_ok_stderr("examples/contract_ensures_degrade_fail.sn");
+    assert!(
+        w.contains(
+            "W-CONTRACT: ensures atom 'result <= 100' of 'double' was not \
+             discharged at the fn exit (tier L: linear) — a typed runtime \
+             assertion now sits at every return of 'double'. [W-CONTRACT]"
+        ),
+        "expected the verbatim W-CONTRACT ensures-degrade warning, got: {w}"
+    );
+    let (code, _stdout, stderr) = compile_run("examples/contract_ensures_degrade_fail.sn");
+    assert_ne!(code, 0, "the violated ensures must die");
+    assert!(
+        stderr.contains(
+            "runtime error: contract ensures 'result <= 100' of 'double' \
+             violated at the exit of 'double' (a typed runtime assertion — \
+             the compile-time engine could not discharge this atom) [E-0702]"
+        ),
+        "expected the verbatim [E-0702] ensures fail-fast message, got: {stderr}"
+    );
+}
+
+/// E0701, the PRODUCT arm, verbatim (A4 §4 rule 1: the verified tier
+/// is all-or-nothing — a variable×variable product inside a verified
+/// fn's contract is Tier N, never dischargeable, and the diagnostic
+/// must name the atom, the rule, and the bounded-degree redemption
+/// clause: degrade is a total function of (atom shape × known
+/// bounds), not a blanket rule).
+#[test]
+fn contract_e0701_product_verbatim() {
+    let err = compile_err("examples/contract_e0701_fail.sn");
+    assert!(
+        err.contains(
+            "E0701: the contract atom 'w * h > 0' in verified fn 'area' is \
+             Tier N (nonlinear: a variable\u{d7}variable product) — the \
+             verified tier is all-or-nothing: every atom must be \
+             dischargeable by a terminating decision procedure, and a \
+             product is off the decidable ladder (MRDP). Degrade is a \
+             total function of (atom shape \u{d7} known bounds), not a \
+             blanket rule: DBM-bounded variables redeem by enumeration and \
+             univariate atoms by root bounds (A4 \u{a7}4 rule 3) — a \
+             two-variable product has no bounded-degree redemption here. \
+             Drop 'verified' from 'area' and the atom becomes a typed \
+             runtime assertion. [E0701]"
+        ),
+        "expected the verbatim E0701 product diagnostic, got: {err}"
+    );
+}
+
+/// E0701, the QUOTIENT-BY-VARIABLE arm, verbatim: q = x / y binds the
+/// product q·y = x — division, not mod, is the undecidability vector
+/// (the final report §7.2; mod-by-variable is the allowed Tier D
+/// ledge, div-by-variable is not).
+#[test]
+fn contract_e0701_quotient_verbatim() {
+    let err = compile_err("examples/contract_e0701_div_fail.sn");
+    assert!(
+        err.contains(
+            "E0701: the contract atom 'x / y >= 0' in verified fn 'quot' is \
+             Tier N (nonlinear: quotient by a variable — q = x / y binds the \
+             product q\u{b7}y = x, and division, not mod, is the \
+             undecidability vector) — the verified tier is all-or-nothing: \
+             every atom must be dischargeable by a terminating decision \
+             procedure. Degrade is a total function of (atom shape \u{d7} \
+             known bounds), not a blanket rule: DBM-bounded variables \
+             redeem by enumeration and univariate atoms by root bounds (A4 \
+             \u{a7}4 rule 3). Drop 'verified' from 'quot' and the atom \
+             becomes a typed runtime assertion. [E0701]"
+        ),
+        "expected the verbatim E0701 quotient diagnostic, got: {err}"
+    );
+}
+
+/// The TYPED degradation of a Tier N atom in a PLAIN fn (A4 §4 rule
+/// 2, the mirror of E0701): the warning names the tier (nonlinear
+/// product — never dischargeable), the assertion carries the
+/// classification, and the valid input runs clean.
+#[test]
+fn contract_nonlinear_degrade_verbatim() {
+    let (code, stdout, stderr) = compile_run("examples/contract_nonlinear.sn");
+    assert_eq!(code, 0, "contract_nonlinear failed ({code}): {stderr}\n{stdout}");
+    assert_eq!(stdout, "ok\n");
+    let w = compile_ok_stderr("examples/contract_nonlinear.sn");
+    assert!(
+        w.contains(
+            "W-CONTRACT: requires atom 'x * y >= 0' of 'area3' was not \
+             discharged at the call in 'main' (tier N: nonlinear product — \
+             never dischargeable) — a typed runtime assertion now sits at \
+             the call site. [W-CONTRACT]"
+        ),
+        "expected the verbatim typed-degradation warning, got: {w}"
+    );
+}
+
+/// The typed Tier N runtime assertion FIRING, verbatim: the violating
+/// input dies with the message naming the atom, the callee and the
+/// typed classification.
+#[test]
+fn contract_nonlinear_fail_verbatim() {
+    let (code, _stdout, stderr) = compile_run("examples/contract_nonlinear_fail.sn");
+    assert_ne!(code, 0, "the violated nonlinear assertion must die");
+    assert!(
+        stderr.contains(
+            "runtime error: contract requires 'x * y >= 0' of 'area3' \
+             violated at the call in 'main' (a typed runtime assertion — \
+             the atom is Tier N: nonlinear product, never dischargeable) \
+             [E-0702]"
+        ),
+        "expected the verbatim [E-0702] typed-degradation message, got: {stderr}"
+    );
+}

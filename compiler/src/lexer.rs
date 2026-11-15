@@ -476,6 +476,11 @@ fn keyword(text: &str) -> TokenKind {
         // `hilbert map<K, V>` (A2 §2.4's decision table, executable).
         "morton" => TokenKind::MortonKw,
         "hilbert" => TokenKind::HilbertKw,
+        // SWARM RABBIT HOLE — Wave 15 (Impl-T, Cohort Delta): Salt ε —
+        // the numeric contract layer's clause heads (requires/ensures
+        // on fn declarations; `result` stays a contextual ident).
+        "requires" => TokenKind::Requires,
+        "ensures" => TokenKind::Ensures,
         _ => TokenKind::Ident,
     }
 }

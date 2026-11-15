@@ -1325,3 +1325,51 @@ while (i != -1) { use(hilbert_entry_val(h, i)); i = hilbert_box_next(h, x0, y0, 
 **Position independence.** A morton holds VALUES ONLY — no absolute pointers anywhere in the layout — so `to_bytes`/`from_bytes` round-trips with ZERO fixups by construction (the `link<T, u16>` seam needs its O(N) self-containedness scan for exactly the self-relative bytes this layout does not have).
 
 **The honest boundary (slice-1).** d=2 first — d=3 (the `0x9249…`/`0x2492…`/`0x4924…` magic-mask interleave) is the slice-2 boundary; pure Morton (the hybrid 2^t tile floor — Morton above the tile, row-major inside, Chatterjee TPDS 13(11) 2002 — is the documented slice-2 form for arbitrary dims and the padding discipline); the segment advance scans the full key range (the Lawder–King in-box-key jump is the slice-2 refinement for off-aligned boxes); out-of-order inserts refuse rather than rebuild (the rebuild-epoch policy is the future form); the `foreach` lowering shape is the explicit `hilbert_box_first`/`next` iterator intrinsic (the FUR-Hilbert compiler-generated curve loop — non-recursive, O(1) worst per iteration, arbitrary bounds — is the documented future lowering). Benchmarked in `bench/RESULTS_SFC.md` (the honest direction report: row-major wins the flat 5-point stencil — Abel–Mark's mean-neighbor-gap; the segment advance wins the query direction 26–122×; the from_lex reshape ≈ one build pass, the ICS'99 2–5% window); runtime mechanics in `tests/systems/test_sfc.c` (checks 22/22b); the compile-time arms in `examples/morton_*.sn` + `examples/hilbert_*.sn` + `examples/sfc_*.sn` + `compiler/tests/golden.rs`.
+
+---
+
+## 29. Salt ε — the Numeric Contract Layer: requires/ensures, the decidable ladder, and the typed boundary (implemented)
+
+**`fn f(params) requires(cond) ensures(cond) { ... }`** — the numeric contract layer (SWARM RABBIT HOLE, Wave 15, Impl-T, Cohort Delta; A4's Presburger decidable ladder + the final report §7.3's boundary rule, slice 1). NOTE: the `contract` keyword is the trait/interface system (§15) — the numeric layer's surface is the two clause heads. Multiple clauses are allowed and conjoin; the requires condition is checked at every call site (the caller proves it or the call degrades), the ensures condition is the function's own proof obligation over its parameters and `result` (the contextual return-value name, allowed in ensures only, not a keyword).
+
+```text
+fn get(list<int> xs, int i) -> int requires(0 <= i < xs.length()) {
+    return xs[i]
+}
+fn clamp(int x) -> int requires(0 <= x <= 100) ensures(0 <= result <= 100) {
+    return x
+}
+fn rem(int x, int m) -> int requires(m > 0) ensures(result < m) {
+    return x % m          // discharged by the remainder-range axiom
+}
+```
+
+Conditions are int-valued boolean expressions over the int parameters, `param.length()` on list parameters (the opaque len symbol), and — in ensures — `result`: literals, `+ -`, literal-scaled `*`, `%` and `/`, comparisons, `and/or/not`. **Comparison chains desugar**: the parser is left-associative (`0 <= i < n` would parse as `(0 <= i) < n`, a bool against an int), so inside a clause the standard mathematical reading is restored — `0 <= i and i < n` (the runtime lowering sees the chain semantics; that is what keeps a degraded assertion sound).
+
+### The atom classifier (A4 §4 — a total function of atom shape × known bounds, stamped at extraction)
+
+| Tier | Shape | Discharge |
+|---|---|---|
+| **L — linear** | ℤ-linear terms, `len()`/`capacity`-style opaque symbols, mod/div by literals | the facts table + DBM zones (the ladder's rungs (i)/(ii)); termination guaranteed |
+| **D — divisibility ledge** | mod by a VARIABLE with a known interval | the remainder-range axiom ONLY in slice 1 (see below); the EPAD/Bel'tyukov–Lipshitz solver tier is a later rung — named, not claimed |
+| **N — nonlinear** | variable×variable products (MRDP); div-by-variable quotient binding (`q = x / y` binds the product `q·y = x` — division, not mod, is the undecidability vector) | never dischargeable |
+
+**E0701** — a Tier N atom inside a **`verified fn`** is a hard error, all-or-nothing by design: the diagnostic names the offending atom, the rule, and the bounded-degree redemption clause ("degrade is a total function of (atom shape × known bounds), not a blanket rule": DBM-bounded variables redeem by enumeration, univariate atoms by root bounds — a two-variable product has no bounded-degree redemption here). In a plain `fn` the same atom degrades to a typed runtime assertion (below). A site whose operands ALL fold to constants discharges by plain constant evaluation — sound for every tier.
+
+### The engine (slice 1: the facts table over the DBM zone layer)
+
+- **The facts table** (Go-prove-style — sound, but not complete): a per-function table of known facts: declared bounds (a local's literal/copy/mod initializer, valid until its first assignment — loop-entry facts are a later rung), the requires clauses propagated from call chains (the caller's own entry zone is the proof context the callee's atoms are tested against), literal-folded values, and list-literal lengths.
+- **The DBM zone layer** (A4's rung (i): Floyd CACM 5(6):345 1962; Dill CAV'89 LNCS 407; Bengtsson–Yi LNCS 3098): difference-bound matrices over the function's int variables — `x − y ≤ c` edges, with vertex 0 the zero constant, so interval facts (`x ≤ c`) are zero-var difference edges; Floyd–Warshall all-pairs closure (O(V³) — the pipeline floor, §7.3: "closure is the floor, not the budget"); emptiness ⟺ a negative diagonal cycle (Bellman 1958); **∩ exact but requiring re-closure for emptiness detection, and ∪ NOT closed — zones are convex** (Miné HOSC 19(1) Thms 4.1/4.2, A4 C4.1's correction): the branch/return-site merge is the OVER-APPROXIMATING lattice join only (the pointwise max of closed matrices) — exact unions need DBM federations (named, not claimed). The closure is the classic index-vs-len discharge: `i ≤ 2` + `len = 3` closes to `i − len ≤ −1`.
+- **The memoized fast path** (§7.3): the entry zone is closed once per function and every call site inside reads the closed matrix; two sites with identical fact signatures share one closure (the signature-keyed memo). Benchmarked in `bench/RESULTS_CONTRACT.md`: the memo hit is ~4 ns against ~21,200 ns for the naive re-closure (~5,300×); the per-atom discharge test is an O(1) edge lookup (~2 ns).
+
+### The remainder-range axiom (Tier D) — stated for the semantics that actually run
+
+For `r = x % m` with m's interval known positive, the engine injects **two DBM edges given m's interval**: `r − m ≤ −1` (r < m, against the modulus VERTEX) plus the interval edges from m's upper bound — **a RANGE FACT, never a divisibility solve** (Strata's rule). NOTE the honest deviation: Strata's Euclidean-% form is `0 ≤ r < m`; this language's runtime `%` is C-**truncating** (`sn_mod_i64` — r has the dividend's sign), so the axiom here is stated as `−(m−1) ≤ r ≤ m−1` for m > 0 — discharging `0 <= x % m` under the Euclidean constants would be UNSOUND against the semantics that run, and it correctly does NOT follow (it degrades unless the dividend's non-negativity is itself a fact).
+
+### The boundary rule (executable)
+
+- **Discharged** — the engine proves the atom from the caller's facts (or the fn's own entry facts, at the ensures exit): compile-time OK, nothing lowered, no warning.
+- **DEGRADED — W-CONTRACT** — the engine cannot prove it: a WARNING (never a gate) names the atom, its tier, and where the typed runtime assertion now sits (the call site for requires — or the fn entry, for atoms over defaulted-out params — and every return, for ensures), and the assertion is lowered through the fail-fast convention (`sn_contract_assert`: fprintf + exit(1)) with the [E-0702] message carrying the atom text and the typed classification. **Never silently dropped; priced per atom.** A REFUTED atom (the engine proved the negation — the conjoined atom closed to a negative diagonal) says so in both the warning and the runtime message: the assertion will always fail there.
+- At the fn exit, the ensures test runs against the JOINED exit zone (per-return-site result bindings — `result := x`, `result := c`, `result := x % m` via the axiom — joined per Miné Thm 4.2, with the fall-through exit modeled as `result := 0`); a coefficient-2 binding (`result := x * 2`) is NOT a difference bound and honestly degrades (the octagon rung is later).
+
+**The honest slice-1 boundary.** Contracts live on top-level non-generic functions (clauses on generic/abstract/nested fns and methods are refused, never silently dropped). The discharge test covers the zone shapes — the interval bound (x ≤ c), THE DIFFERENCE BOUND (x − y ≤ c), equalities, constant folds, and the mod range axiom; multi-variable sums, |coeff| ≠ 1 bindings, `!=` and `or` (non-convex — parity is not a zone), div-quotient terms, and loop-carried values honestly degrade. The **QF-PA solver (rung iii — NP-complete, poly at fixed #vars)** and the **EPAD/Z3 oracle tiers** are LATER RUNGS — named, not claimed; so are the octagon rung (ii), loop-entry facts, and bounded-degree redemption by enumeration. Pinned by the golden suite (`examples/contract_*.sn` + `compiler/tests/golden.rs` — the discharge, the degrade, the refutation, the E0701 product/quotient arms, the typed nonlinear degrade, all verbatim); the engine's math properties by the `dbm` unit tests + `tests/systems/test_contract.c` (checks 23/23b — the line-matched C twin: the closure vs the brute-force relax-to-fixpoint reference over randomized zones, emptiness, ∩ exact by enumeration, the join over-approximates sound-not-exact, the facts-table hit/miss, the fork-probed [E-0702] fail-fast); the price by `bench/RESULTS_CONTRACT.md` (the O(V³) floor at V=25/50/100, the memoized fast path's payoff, the ~0.96 ns/call runtime price of the degrade against zero for the discharge).

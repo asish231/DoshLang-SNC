@@ -98,6 +98,12 @@ impl Parser {
             type_params: Vec::new(),
             params,
             ret,
+            // Wave 15 (Impl-T): extern declarations take no contract
+            // clauses (there is no body to lower an entry/exit
+            // assertion into; the parser stops after the return type,
+            // so a clause here is a parse error by construction).
+            requires: Vec::new(),
+            ensures: Vec::new(),
             body: Vec::new(),
             span: start_span.merge(self.prev_span()),
         })
@@ -147,6 +153,22 @@ impl Parser {
         } else {
             None
         };
+        // SWARM RABBIT HOLE — Wave 15 (Impl-T, Cohort Delta): Salt ε —
+        // the contract clause heads: zero or more requires/ensures
+        // clauses between the signature and the body (conjunction;
+        // each is one parenthesized condition over the existing
+        // expression grammar — no new expression forms).
+        let mut requires = Vec::new();
+        let mut ensures = Vec::new();
+        loop {
+            if self.eat_if(TokenKind::Requires) {
+                requires.push(self.parse_contract_clause()?);
+            } else if self.eat_if(TokenKind::Ensures) {
+                ensures.push(self.parse_contract_clause()?);
+            } else {
+                break;
+            }
+        }
         // `abstract fn f() -> T` declares a signature with no body.
         let body = if is_abstract {
             Vec::new()
@@ -171,9 +193,29 @@ impl Parser {
             type_params,
             params,
             ret,
+            requires,
+            ensures,
             body,
             span: start_span.merge(self.prev_span()),
         })
+    }
+
+    /// Wave 15 (Impl-T): one parenthesized contract condition. The
+    /// grammar is the existing expression grammar; the one clause-level
+    /// rewrite is the COMPARISON-CHAIN desugar — the parser is
+    /// left-associative, so `0 <= i < xs.length()` parses as
+    /// `(0 <= i) < xs.length()` (a bool compared against an int);
+    /// inside a contract clause the standard mathematical reading is
+    /// the conjunction `0 <= i and i < xs.length()`, so nested
+    /// comparison chains are re-joined into `and` trees (the middle
+    /// term is shared, not re-evaluated — the runtime lowering sees
+    /// the correct chain semantics, which is what makes the degraded
+    /// runtime assertion sound).
+    fn parse_contract_clause(&mut self) -> Result<Expr, String> {
+        self.eat(TokenKind::LParen)?;
+        let e = self.parse_expr()?;
+        self.eat(TokenKind::RParen)?;
+        Ok(desugar_compare_chains(e))
     }
 
     fn parse_param(&mut self) -> Result<Param, String> {
@@ -2297,4 +2339,87 @@ fn is_type_start(k: TokenKind) -> bool {
             | TokenKind::MortonKw
             | TokenKind::HilbertKw
     )
+}
+
+// ---------------------------------------------------------------------
+// SWARM RABBIT HOLE — Wave 15 (Impl-T, Cohort Delta): Salt ε's
+// clause-level comparison-chain desugar. The expression grammar is
+// left-associative, so `0 <= i < xs.length()` parses as
+// `(0 <= i) < xs.length()` — a bool compared against an int. Inside a
+// requires/ensures clause the standard mathematical reading is the
+// conjunction `0 <= i and i < xs.length()`, and that is the semantics
+// both the discharge engine and the degraded runtime assertion must
+// see (evaluating the raw left-associated tree would compare 0/1
+// against the length — the runtime check would be wrong, i.e. the
+// desugar is what keeps the degrade path SOUND). Only fires on nested
+// comparison-of-comparison shapes inside clauses; ordinary expression
+// code is untouched.
+// ---------------------------------------------------------------------
+
+fn is_cmp_op(op: BinOp) -> bool {
+    matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge)
+}
+
+fn desugar_compare_chains(e: Expr) -> Expr {
+    match &e.kind {
+        ExprKind::Binary { op, lhs, rhs }
+            if is_cmp_op(*op) && matches!(&lhs.kind, ExprKind::Binary { op: o2, .. } if is_cmp_op(*o2)) =>
+        {
+            // (a ⊲ b) ⊳ c  ⟹  (a ⊲ b) and (b ⊳ c), recursively: the
+            // middle term b is the shared operand (cloned, not
+            // re-evaluated — the IR evaluates each conjunct's own
+            // copy, which is correct for pure comparisons).
+            let mid = match &lhs.kind {
+                ExprKind::Binary { rhs: b, .. } => desugar_compare_chains(b.as_ref().clone()),
+                _ => unreachable!("guarded by the match arm"),
+            };
+            let new_lhs = desugar_compare_chains(lhs.as_ref().clone());
+            let mut new_rhs = Expr {
+                kind: ExprKind::Binary {
+                    op: *op,
+                    lhs: Box::new(mid),
+                    rhs: Box::new(desugar_compare_chains(rhs.as_ref().clone())),
+                },
+                span: e.span,
+            };
+            // The re-joined right leg may itself end up a comparison
+            // whose LEFT is the shared middle term compared against a
+            // further chain — no: the right leg's left is the middle
+            // term (already an atom), so one recursive pass suffices.
+            new_rhs = desugar_compare_chains(new_rhs);
+            let span = new_lhs.span.merge(new_rhs.span);
+            Expr {
+                kind: ExprKind::Binary {
+                    op: BinOp::And,
+                    lhs: Box::new(new_lhs),
+                    rhs: Box::new(new_rhs),
+                },
+                span,
+            }
+        }
+        ExprKind::Binary { op, lhs, rhs } => {
+            let l = desugar_compare_chains(lhs.as_ref().clone());
+            let r = desugar_compare_chains(rhs.as_ref().clone());
+            let span = l.span.merge(r.span);
+            Expr {
+                kind: ExprKind::Binary {
+                    op: *op,
+                    lhs: Box::new(l),
+                    rhs: Box::new(r),
+                },
+                span,
+            }
+        }
+        ExprKind::Unary { op, expr } => {
+            let inner = desugar_compare_chains(expr.as_ref().clone());
+            Expr {
+                kind: ExprKind::Unary {
+                    op: *op,
+                    expr: Box::new(inner),
+                },
+                span: e.span,
+            }
+        }
+        _ => e,
+    }
 }

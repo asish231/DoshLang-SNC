@@ -1,0 +1,19 @@
+// SWARM RABBIT HOLE — Wave 15 (Impl-T, Cohort Delta): Salt ε — the
+// typed runtime assertion of a degraded Tier N atom FIRING. The
+// caller passes a runtime x in [−100, −1] and y = 3: the product is
+// negative, the assertion at the call site evaluates the atom,
+// fails, and the process dies with the [E-0702] fail-fast message
+// naming the atom, the callee and the typed classification
+// (nonlinear product — never dischargeable).
+
+fn area3(int x, int y) -> int requires(x * y >= 0) {
+    return x * y
+}
+
+fn main() {
+    // a runtime value in [−100, −1]: the product is negative — the
+    // typed runtime assertion fires deterministically
+    int xv = -(time_now_ms() % 100) - 1
+    area3(xv, 3)
+    print("unreachable")
+}

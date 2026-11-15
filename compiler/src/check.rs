@@ -1,4 +1,5 @@
 use crate::ast::*;
+use crate::dbm::{Dbm, ZoneMemo, INF};
 use crate::diag::Diagnostics;
 use crate::span::Span;
 use crate::types::*;
@@ -159,6 +160,151 @@ pub struct SccAccumSite {
     pub span: Span,
 }
 
+/// SWARM RABBIT HOLE — Wave 15 (Impl-T, Cohort Delta): Salt ε — the
+/// numeric contract layer (A4's Presburger decidable ladder + the
+/// final report §7.3's boundary rule, executable). requires/ensures
+/// clauses on fn declarations; the `contract` keyword stays the
+/// trait/interface system's.
+///
+/// THE CLASSIFIER (A4 §4: "every atom gets one tier", stamped at
+/// extraction into the obligation record — the stamp governs both
+/// E0701 and the degrade's typed classification):
+/// - Tier L (linear): ℤ-linear terms, mod/div by literals,
+///   len()/capacity()-style opaque symbols — dischargeable by the
+///   facts table + DBM zones (rungs (i)/(ii)); termination
+///   guaranteed.
+/// - Tier D (divisibility ledge): atoms with mod by a VARIABLE with a
+///   known interval — dischargeable in slice 1 only via the remainder
+///   range axiom (r = x % m, m > 0 ⟹ −(m−1) ≤ r ≤ m−1 against the
+///   runtime's truncating % — two DBM edges given m's interval; a
+///   RANGE FACT, never a divisibility solve). The EPAD/Bel'tyukov–
+///   Lipshitz solver tier is a later rung — named, not claimed.
+/// - Tier N (nonlinear): variable×variable products (MRDP) and
+///   div-by-variable quotient binding (q = x / y needs the product
+///   q·y = x — division, not mod, is the undecidability vector) —
+///   never dischargeable: E0701 inside a verified fn (all-or-nothing
+///   by design), a typed runtime assertion in a plain fn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContractTier {
+    Linear,
+    Divisibility,
+    Nonlinear(NonlinearKind),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NonlinearKind {
+    /// A variable×variable product (off the decidable ladder — MRDP).
+    Product,
+    /// q = x / y binds the product q·y = x.
+    QuotientByVariable,
+}
+
+impl ContractTier {
+    /// The typed classification the degrade warning and the runtime
+    /// assertion carry (A4 §4 rule 2: the obligation carries its
+    /// tier, so a fired assertion names WHY it was not discharged).
+    pub fn label(&self) -> &'static str {
+        match self {
+            ContractTier::Linear => "tier L: linear",
+            ContractTier::Divisibility => {
+                "tier D: divisibility ledge — the remainder-range axiom \
+                 is a range fact, never a divisibility solve; the EPAD \
+                 solver tier is a later rung"
+            }
+            ContractTier::Nonlinear(NonlinearKind::Product) => {
+                "tier N: nonlinear product — never dischargeable"
+            }
+            ContractTier::Nonlinear(NonlinearKind::QuotientByVariable) => {
+                "tier N: quotient by a variable — never dischargeable"
+            }
+        }
+    }
+}
+
+/// One conjunct of one clause, with its stamped tier (A4 §4: the
+/// classification is part of the obligation record).
+#[derive(Clone, Debug)]
+pub struct ContractAtom {
+    pub expr: Expr,
+    pub span: Span,
+    pub tier: ContractTier,
+    /// The rendered atom text (diagnostics + runtime messages) —
+    /// captured once so the compile-time warning and the runtime
+    /// fail-fast name the identical atom.
+    pub text: String,
+}
+
+/// A function's collected contract: the requires atoms (the caller's
+/// obligation, checked at every call site) and the ensures atoms (the
+/// function's own obligation, discharged at the fn exit).
+#[derive(Clone, Debug, Default)]
+pub struct FnContract {
+    pub requires: Vec<ContractAtom>,
+    pub ensures: Vec<ContractAtom>,
+}
+
+/// One atom the engine could not prove (or refuted), with the
+/// fail-fast message the lowered assertion prints — consumed by the
+/// ir.rs lowering. The expr is over the CALLEE's parameter names at a
+/// call site (the IR binds each param to the evaluated argument
+/// value), and over the function's own params + `result` at the fn
+/// entry/exit.
+#[derive(Clone, Debug)]
+pub struct ContractCheck {
+    pub expr: Expr,
+    pub message: String,
+}
+
+/// The per-function contract context, computed once at collect and
+/// read by every call-site discharge inside the function — THE
+/// MEMOIZED FAST PATH (§7.3: the entry zone's closure is paid once
+/// per function, not per atom per call site; the repeated queries hit
+/// the closed matrix).
+#[derive(Clone, Debug)]
+pub struct FnContractCtx {
+    /// The fn's entry zone: its own requires atoms conjoined, over
+    /// the fn's int params + len terms, closed (Floyd–Warshall — the
+    /// O(V³) floor paid once). None when the fn has no requires
+    /// atoms (the trivially-full zone — nothing to project).
+    pub entry_zone: Option<Dbm>,
+    /// vertex name → entry-zone index (params, len terms, mod terms).
+    pub vertices: HashMap<String, usize>,
+    /// The fn's int-typed parameter names (site-term resolution).
+    pub int_params: HashSet<String>,
+    /// The fn's list-typed parameter names (len vertices / literal
+    /// length facts).
+    pub list_params: HashSet<String>,
+    /// The syntactic local-facts pre-walk: a local's declared value
+    /// when the local is never re-assigned in the fn (the "declared
+    /// bounds" facts-table row; loop-entry facts are a later rung —
+    /// named, not claimed).
+    pub facts: HashMap<String, LocalFact>,
+    /// Every return expression in the fn (the ensures pass's
+    /// per-return-site result bindings); empty for void fns.
+    pub returns: Vec<Expr>,
+    /// True when control can fall off the end (no return on some
+    /// path) — the IR's default exit (result := 0 for non-void fns).
+    pub has_fallthrough: bool,
+}
+
+/// One local's known fact (the facts table's per-function rows). A
+/// fact is recorded only at a declaration whose binding is never
+/// re-assigned in the function — flow-insensitive but conservative
+/// (an assignment anywhere kills the fact).
+#[derive(Clone, Debug)]
+pub enum LocalFact {
+    /// A literal-foldable constant value.
+    Known(i64),
+    /// A list literal's exact length (the len() symbol's value).
+    Len(usize),
+    /// r = a % m with the operand exprs (the remainder range axiom's
+    /// subject; the modulus interval gates the axiom).
+    Mod(Box<Expr>, Box<Expr>),
+    /// A copy of another binding (`int j = i`) — resolved through
+    /// the alias at query time.
+    Alias(String),
+}
+
 pub struct CheckDb {
     pub funcs: HashMap<String, FuncSig>,
     pub blueprints: HashMap<String, BlueprintInfo>,
@@ -243,6 +389,33 @@ pub struct CheckDb {
     /// a wall-clock read one call away would inject the schedule
     /// into 𝒰_W undetected (Lemma WD's premise, E0812's purpose).
     pub wave_pure_fns: HashSet<String>,
+    /// SWARM RABBIT HOLE — Wave 15 (Impl-T, Cohort Delta): Salt ε —
+    /// the numeric contract layer's tables. (1) The fn table: every
+    /// contracted function's atoms with their stamped tiers (the
+    /// clause collection at collect-time; keyed by the bare fn name —
+    /// slice 1 admits contracts on top-level non-generic fns only).
+    pub fn_contracts: HashMap<String, FnContract>,
+    /// (2) The per-fn discharge context — the memoized entry zone
+    /// (closed once per function), the local-facts pre-walk, and the
+    /// return-expression set the ensures pass binds. THE FAST PATH:
+    /// call-site queries read this instead of re-closing.
+    pub fn_contract_ctx: HashMap<String, FnContractCtx>,
+    /// (3) The degraded requires atoms that lower AT THE CALL SITE
+    /// (the atom's params are all bound there), keyed by the call
+    /// span — the ir.rs lowering looks the site up exactly like
+    /// resolved_calls.
+    pub contract_site_checks: HashMap<(u32, u32, u32), Vec<ContractCheck>>,
+    /// (4) The degraded requires atoms that lower AT THE FN ENTRY —
+    /// the atom references a parameter the caller defaulted out (the
+    /// call site cannot evaluate the default cheaply; the callee's
+    /// prologue has every param bound, defaults resolved).
+    pub contract_entry_checks: HashMap<String, Vec<ContractCheck>>,
+    /// (5) The degraded ensures atoms that lower AT THE FN EXIT —
+    /// the typed runtime assertion sits at every return.
+    pub contract_exit_checks: HashMap<String, Vec<ContractCheck>>,
+    /// (6) The zone-closure memo (the second memoization layer: two
+    /// sites with identical fact signatures share one closure).
+    pub contract_zone_memo: ZoneMemo,
 }
 
 impl CheckDb {
@@ -545,6 +718,12 @@ pub fn check_programs(programs: &[Program], diag: &mut Diagnostics) -> CheckDb {
         wave_claims: HashMap::new(),
         wave_captures: HashMap::new(),
         wave_pure_fns: HashSet::new(),
+        fn_contracts: HashMap::new(),
+        fn_contract_ctx: HashMap::new(),
+        contract_site_checks: HashMap::new(),
+        contract_entry_checks: HashMap::new(),
+        contract_exit_checks: HashMap::new(),
+        contract_zone_memo: ZoneMemo::default(),
     };
     collect(&mut db, programs, diag);
     check_contracts(&mut db, diag);
@@ -1849,6 +2028,18 @@ fn collect(db: &mut CheckDb, programs: &[Program], diag: &mut Diagnostics) {
             if let Item::Extension(e) = item {
                 let key = extension_key(&e.ty);
                 for m in &e.methods {
+                    // SWARM RABBIT HOLE — Wave 15 (Impl-T): the same
+                    // slice-1 refusal at the extension surface.
+                    if !m.requires.is_empty() || !m.ensures.is_empty() {
+                        diag.error(
+                            m.span,
+                            format!(
+                                "contract clauses on an extension method are not \
+                                 supported in slice 1: '{name}'",
+                                name = m.name
+                            ),
+                        );
+                    }
                     let ext_name = format!("__ext_{}_{}", key, m.name);
                     let mut sig = fn_sig(m, None, db);
                     sig.name = ext_name.clone();
@@ -1870,14 +2061,72 @@ fn collect(db: &mut CheckDb, programs: &[Program], diag: &mut Diagnostics) {
             match item {
                 Item::Fn(f) => {
                     if !f.type_params.is_empty() {
+                        // SWARM RABBIT HOLE — Wave 15 (Impl-T): Salt ε's
+                        // slice-1 boundary — contract clauses on a
+                        // generic function are rejected, not silently
+                        // dropped (a monomorphized contract would
+                        // multiply the per-site machinery per
+                        // instantiation; the honest slice-1 refusal).
+                        if !f.requires.is_empty() || !f.ensures.is_empty() {
+                            diag.error(
+                                f.span,
+                                format!(
+                                    "contract clauses on a generic function are not \
+                                     supported in slice 1: '{name}' — the \
+                                     monomorphized instances would each need their \
+                                     own discharge walk; drop the type parameters \
+                                     or the clauses",
+                                    name = f.name
+                                ),
+                            );
+                        }
                         db.fn_templates.insert(f.name.clone(), f.clone());
                     } else {
                         let sig = fn_sig(f, None, db);
                         db.funcs.insert(f.name.clone(), sig);
+                        // SWARM RABBIT HOLE — Wave 15 (Impl-T, Cohort
+                        // Delta): Salt ε — the clause collection at
+                        // collect-time (the fn table): validate the
+                        // clauses against the signature, split to
+                        // atoms, stamp the tiers (A4 §4), fire E0701
+                        // for Tier N in a verified fn, then build the
+                        // per-fn context (the memoized entry zone +
+                        // the local-facts pre-walk) and run the
+                        // ensures exit pass.
+                        if !f.requires.is_empty() || !f.ensures.is_empty() {
+                            contract_collect_fn(f, db, diag);
+                        }
+                        contract_build_ctx(f, db);
+                        if db.fn_contracts.contains_key(&f.name)
+                            && db
+                                .fn_contracts
+                                .get(&f.name)
+                                .map(|c| !c.ensures.is_empty())
+                                .unwrap_or(false)
+                        {
+                            contract_ensures_pass(f, db, diag);
+                        }
                     }
                 }
                 Item::Blueprint(b) if b.type_params.is_empty() => {
                     for m in &b.methods {
+                        // SWARM RABBIT HOLE — Wave 15 (Impl-T): Salt
+                        // ε's slice-1 boundary — contract clauses on
+                        // blueprint methods are rejected (the method
+                        // lowering carries the self param and the
+                        // vtable dispatch; the honest slice-1
+                        // refusal, never a silent drop).
+                        if !m.requires.is_empty() || !m.ensures.is_empty() {
+                            diag.error(
+                                m.span,
+                                format!(
+                                    "contract clauses on a blueprint method are not \
+                                     supported in slice 1: '{name}' — contracts live \
+                                     on top-level functions in slice 1",
+                                    name = m.name
+                                ),
+                            );
+                        }
                         let mut sig = fn_sig(m, Some(b.name.clone()), db);
                         sig.is_method = true;
                         sig.blueprint = Some(b.name.clone());
@@ -1981,7 +2230,1549 @@ fn collect(db: &mut CheckDb, programs: &[Program], diag: &mut Diagnostics) {
 }
 
 // ---------------------------------------------------------------------
-// SWARM RABBIT HOLE — Wave 13 (Impl-R, Cohort Delta): the wave
+// SWARM RABBIT HOLE — Wave 15 (Impl-T, Cohort Delta): Salt ε — the
+// numeric contract layer (A4's Presburger decidable ladder, the
+// final report §7.3's boundary rule, slice 1). The engine is the
+// FACTS TABLE (a per-function table of known facts: declared bounds,
+// the requires clauses propagated from call chains, literal-folded
+// values) over the DBM ZONE LAYER (compiler/src/dbm.rs — rung
+// (i)/(ii): x−y ≤ c edges, Floyd–Warshall closure, emptiness ⟺ a
+// negative diagonal cycle). THE BOUNDARY RULE, executable:
+//   - an atom the engine proves is DISCHARGED (compile-time OK,
+//     nothing lowered);
+//   - an atom the engine cannot prove but that is Tier L/D DEGRADES
+//     to a typed runtime assertion at the boundary — the call site
+//     (or the fn entry, for atoms over defaulted params) for
+//     requires, the fn exit for ensures — lowered through the
+//     fail-fast convention, never silently dropped, priced per atom;
+//   - a Tier N atom is E0701 inside a verified fn (all-or-nothing by
+//     design, A4 §4 rule 1) and a typed runtime assertion in a
+//     plain fn (rule 2).
+// The QF-PA solver (rung iii) and the EPAD/Z3 oracle tiers are LATER
+// RUNGS — named, not claimed; the classifier and the discharge walk
+// below are the slice-1 surface of the ladder.
+// ---------------------------------------------------------------------
+
+/// The atom text renderer (the diagnostics and the runtime messages
+/// name the identical atom — captured once at extraction).
+fn contract_atom_text(e: &Expr) -> String {
+    match &e.kind {
+        ExprKind::Int(v) => v.to_string(),
+        ExprKind::Bool(b) => b.to_string(),
+        ExprKind::Ident(n) => n.clone(),
+        ExprKind::Self_ => "self".into(),
+        ExprKind::Unary { op, expr } => match op {
+            UnOp::Neg => format!("-{}", contract_atom_text(expr)),
+            UnOp::Not => format!("not {}", contract_atom_text(expr)),
+            UnOp::BitNot => format!("~{}", contract_atom_text(expr)),
+        },
+        ExprKind::Binary { op, lhs, rhs } => {
+            let sop = match op {
+                BinOp::Add => " + ",
+                BinOp::Sub => " - ",
+                BinOp::Mul => " * ",
+                BinOp::Div => " / ",
+                BinOp::Mod => " % ",
+                BinOp::Pow => " ** ",
+                BinOp::Eq => " == ",
+                BinOp::Ne => " != ",
+                BinOp::Lt => " < ",
+                BinOp::Gt => " > ",
+                BinOp::Le => " <= ",
+                BinOp::Ge => " >= ",
+                BinOp::And => " and ",
+                BinOp::Or => " or ",
+                _ => " ? ",
+            };
+            format!(
+                "{}{}{}",
+                contract_atom_text(lhs),
+                sop,
+                contract_atom_text(rhs)
+            )
+        }
+        ExprKind::Call { callee, .. } => {
+            if let ExprKind::Member { base, name } = &callee.kind {
+                if name == "length" {
+                    return format!("{}.length()", contract_atom_text(base));
+                }
+            }
+            "?".into()
+        }
+        _ => "?".into(),
+    }
+}
+
+/// Split a clause into conjunctive ATOMS (the top-level `and`s,
+/// including the comparison chains the parser already desugared into
+/// `and` trees). Each atom is classified and discharged/priced
+/// independently — the boundary rule's "priced per atom".
+fn contract_split_conjuncts(e: &Expr, out: &mut Vec<Expr>) {
+    match &e.kind {
+        ExprKind::Binary { op: BinOp::And, lhs, rhs } => {
+            contract_split_conjuncts(lhs, out);
+            contract_split_conjuncts(rhs, out);
+        }
+        _ => out.push(e.clone()),
+    }
+}
+
+/// THE CLASSIFIER (A4 §4: a total function of atom shape × known
+/// bounds — the tier stamp recorded at extraction). Pure walk over
+/// the atom's expression:
+/// - mod by a non-literal divisor → Tier D (the divisibility ledge);
+/// - div by a non-literal divisor → Tier N QuotientByVariable
+///   (q = x / y binds q·y = x — division, not mod, is the
+///   undecidability vector, the final report §7.2);
+/// - a product of two non-literal terms → Tier N Product (MRDP);
+/// - everything else in the clause grammar (literals, params, ±,
+///   literal-scaled products, mod/div by literals, len() symbols,
+///   comparisons, and/or/not) → Tier L.
+pub fn contract_classify(e: &Expr) -> ContractTier {
+    match &e.kind {
+        ExprKind::Int(_) | ExprKind::Ident(_) | ExprKind::Self_ | ExprKind::Bool(_) => {
+            ContractTier::Linear
+        }
+        ExprKind::Unary { op: _, expr } => contract_classify(expr),
+        ExprKind::Binary { op, lhs, rhs } => match op {
+            BinOp::Mod => {
+                if int_lit_of(rhs).is_some() {
+                    contract_classify(lhs).max_tier(ContractTier::Linear)
+                } else {
+                    // mod by a variable: the divisibility ledge (A4 §2)
+                    ContractTier::Divisibility
+                }
+            }
+            BinOp::Div => {
+                if int_lit_of(rhs).is_some() {
+                    contract_classify(lhs).max_tier(ContractTier::Linear)
+                } else {
+                    ContractTier::Nonlinear(NonlinearKind::QuotientByVariable)
+                }
+            }
+            BinOp::Mul => {
+                let l_const = is_const_foldable(lhs);
+                let r_const = is_const_foldable(rhs);
+                if l_const || r_const {
+                    // a literal-scaled product is linear (a·x)
+                    let other = if l_const { rhs } else { lhs };
+                    contract_classify(other).max_tier(ContractTier::Linear)
+                } else {
+                    ContractTier::Nonlinear(NonlinearKind::Product)
+                }
+            }
+            _ => contract_classify(lhs).max_tier(contract_classify(rhs)),
+        },
+        ExprKind::Call { callee, .. } => {
+            if let ExprKind::Member { base, name } = &callee.kind {
+                if name == "length" {
+                    // len()/capacity()-style opaque symbols: Tier L as
+                    // graph vertices (A4 §2's expressiveness map)
+                    return contract_classify(base).max_tier(ContractTier::Linear);
+                }
+            }
+            // an unclassified call shape is not in the slice-1 clause
+            // grammar (the validator rejects it first)
+            ContractTier::Linear
+        }
+        _ => ContractTier::Linear,
+    }
+}
+
+impl ContractTier {
+    /// The lattice the classifier composes over: L ⊑ D ⊔ N.
+    fn max_tier(self, other: ContractTier) -> ContractTier {
+        use ContractTier as C;
+        match (self, other) {
+            (a, b) if a == b => a,
+            (C::Nonlinear(k), _) => C::Nonlinear(k),
+            (_, C::Nonlinear(k)) => C::Nonlinear(k),
+            (C::Divisibility, _) | (_, C::Divisibility) => C::Divisibility,
+            _ => C::Linear,
+        }
+    }
+}
+
+fn int_lit_of(e: &Expr) -> Option<i64> {
+    match &e.kind {
+        ExprKind::Int(v) => Some(*v),
+        ExprKind::Unary { op: UnOp::Neg, expr } => int_lit_of(expr).map(|v| -v),
+        _ => None,
+    }
+}
+
+/// Constant-foldable for the classifier's literal test (the operand
+/// side of a product/div/mod): int literals (and their negations).
+fn is_const_foldable(e: &Expr) -> bool {
+    int_lit_of(e).is_some()
+}
+
+/// The clause-grammar validator: the condition must be a boolean
+/// expression over int-valued terms — literals, the function's int
+/// parameters, arithmetic (+, −, literal-scaled *), % and / (by any
+/// int-valued divisor — the tier decides discharge), comparisons,
+/// and/or/not, and `param.length()` on list parameters. `result` is
+/// the ensures-only return-value name. Anything else (strings,
+/// calls, member loads, shifts, pow) is rejected — the slice-1
+/// boundary, stated in the diagnostic.
+fn contract_validate_atom(
+    e: &Expr,
+    int_params: &HashSet<String>,
+    list_params: &HashSet<String>,
+    allow_result: bool,
+    fn_name: &str,
+    clause: &str,
+) -> Result<(), String> {
+    let bad = |what: &str| {
+        format!(
+            "the {clause} clause of '{fn_name}' must be an int-valued boolean \
+             expression over the function's int parameters (and 'result', in \
+             ensures): {what} is outside the slice-1 clause grammar — \
+             arithmetic (+, -, literal-scaled *), %, /, comparisons, \
+             and/or/not, and param.length() on list parameters"
+        )
+    };
+    match &e.kind {
+        ExprKind::Int(_) => Ok(()),
+        ExprKind::Ident(n) => {
+            if n == "result" {
+                if allow_result {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "the {clause} clause of '{fn_name}' references \
+                         'result' — the return-value name is allowed in \
+                         ensures clauses only"
+                    ))
+                }
+            } else if int_params.contains(n) || list_params.contains(n) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "the {clause} clause of '{fn_name}' references unknown \
+                     name '{n}' — clause conditions are int-valued boolean \
+                     expressions over the function's parameters (and \
+                     'result', in ensures)"
+                ))
+            }
+        }
+        ExprKind::Bool(_) => Ok(()),
+        ExprKind::Unary { op, expr } => match op {
+            UnOp::Neg | UnOp::Not => {
+                contract_validate_atom(expr, int_params, list_params, allow_result, fn_name, clause)
+            }
+            UnOp::BitNot => Err(bad("bitwise ~")),
+        },
+        ExprKind::Binary { op, lhs, rhs } => match op {
+            BinOp::Add
+            | BinOp::Sub
+            | BinOp::Mul
+            | BinOp::Div
+            | BinOp::Mod
+            | BinOp::Eq
+            | BinOp::Ne
+            | BinOp::Lt
+            | BinOp::Gt
+            | BinOp::Le
+            | BinOp::Ge
+            | BinOp::And
+            | BinOp::Or => {
+                contract_validate_atom(lhs, int_params, list_params, allow_result, fn_name, clause)?;
+                contract_validate_atom(rhs, int_params, list_params, allow_result, fn_name, clause)
+            }
+            _ => Err(bad(&format!("the {op:?} operator"))),
+        },
+        ExprKind::Call { callee, args, .. } => {
+            if let ExprKind::Member { base, name } = &callee.kind {
+                if name == "length" && args.is_empty() {
+                    return match &base.kind {
+                        ExprKind::Ident(n) if list_params.contains(n) => Ok(()),
+                        _ => Err(bad("a .length() term not on a list parameter")),
+                    };
+                }
+            }
+            Err(bad("a call"))
+        }
+        _ => Err(bad("the term")),
+    }
+}
+
+/// The E0701 diagnostic (A4 §4 rule 1: the verified tier is
+/// all-or-nothing — a Tier N atom inside a verified fn is a hard
+/// error, never a silent degradation; the text names the atom, the
+/// rule, and the bounded-degree redemption clause: degrade is a
+/// total function of (atom shape × known bounds), not a blanket
+/// rule).
+fn contract_e0701(atom: &ContractAtom, fn_name: &str) -> String {
+    let kind = match atom.tier {
+        ContractTier::Nonlinear(NonlinearKind::Product) => {
+            "Tier N (nonlinear: a variable\u{d7}variable product) — the \
+             verified tier is all-or-nothing: every atom must be \
+             dischargeable by a terminating decision procedure, and a \
+             product is off the decidable ladder (MRDP). Degrade is a \
+             total function of (atom shape \u{d7} known bounds), not a \
+             blanket rule: DBM-bounded variables redeem by enumeration and \
+             univariate atoms by root bounds (A4 \u{a7}4 rule 3) — a \
+             two-variable product has no bounded-degree redemption here. \
+             Drop 'verified' from '"
+        }
+        ContractTier::Nonlinear(NonlinearKind::QuotientByVariable) => {
+            "Tier N (nonlinear: quotient by a variable — q = x / y binds the \
+             product q\u{b7}y = x, and division, not mod, is the \
+             undecidability vector) — the verified tier is all-or-nothing: \
+             every atom must be dischargeable by a terminating decision \
+             procedure. Degrade is a total function of (atom shape \u{d7} \
+             known bounds), not a blanket rule: DBM-bounded variables \
+             redeem by enumeration and univariate atoms by root bounds (A4 \
+             \u{a7}4 rule 3). Drop 'verified' from '"
+        }
+        _ => unreachable!("E0701 is the Tier N arm"),
+    };
+    format!(
+        "E0701: the contract atom '{text}' in verified fn '{fn_name}' is {kind}\
+         {fn_name}' and the atom becomes a typed runtime assertion. [E0701]",
+        text = atom.text,
+    )
+}
+
+/// Collect one function's contract: validate the clauses against the
+/// fn's signature, split to atoms, stamp the tiers, fire E0701 for
+/// Tier N in a verified fn, and record the fn table entry.
+fn contract_collect_fn(f: &FnItem, db: &mut CheckDb, diag: &mut Diagnostics) {
+    if f.is_abstract {
+        diag.error(
+            f.span,
+            format!(
+                "contract clauses on an abstract function are not supported \
+                 in slice 1: '{name}' declares no body, so an ensures \
+                 obligation has nothing to discharge against and a requires \
+                 entry assertion has no prologue to lower into",
+                name = f.name
+            ),
+        );
+        return;
+    }
+    let mut int_params = HashSet::new();
+    let mut list_params = HashSet::new();
+    for p in &f.params {
+        let t = resolve_type_ast(&p.ty, db);
+        match &t {
+            Type::Int | Type::I8 | Type::I16 | Type::I32 | Type::U8 | Type::U16 | Type::U32
+            | Type::U64 => {
+                int_params.insert(p.name.clone());
+            }
+            Type::List(_) => {
+                list_params.insert(p.name.clone());
+            }
+            _ => {}
+        }
+    }
+    // ensures over 'result' requires an int return.
+    if !f.ensures.is_empty() {
+        let rt = f.ret.as_ref().map(|t| resolve_type_ast(t, db)).unwrap_or(Type::Void);
+        let ret_int = matches!(
+            rt,
+            Type::Int | Type::I8 | Type::I16 | Type::I32 | Type::U8 | Type::U16 | Type::U32
+                | Type::U64
+        );
+        if !ret_int {
+            diag.error(
+                f.span,
+                format!(
+                    "the ensures clause of '{name}' references 'result' but \
+                     the function does not return an int — ensures \
+                     conditions are int-valued boolean expressions over the \
+                     parameters and the return value",
+                    name = f.name
+                ),
+            );
+            return;
+        }
+    }
+    let mut contract = FnContract::default();
+    let mut collect_clause = |exprs: &[Expr], clause: &str, out: &mut Vec<ContractAtom>| {
+        for clause_expr in exprs {
+            let mut atoms = Vec::new();
+            contract_split_conjuncts(clause_expr, &mut atoms);
+            for a in atoms {
+                let text = contract_atom_text(&a);
+                if let Err(msg) = contract_validate_atom(
+                    &a,
+                    &int_params,
+                    &list_params,
+                    clause == "ensures",
+                    &f.name,
+                    clause,
+                ) {
+                    diag.error(a.span, msg);
+                    continue;
+                }
+                let tier = contract_classify(&a);
+                out.push(ContractAtom {
+                    expr: a,
+                    span: clause_expr.span,
+                    tier,
+                    text,
+                });
+            }
+        }
+    };
+    collect_clause(&f.requires, "requires", &mut contract.requires);
+    collect_clause(&f.ensures, "ensures", &mut contract.ensures);
+    // A4 §4 rule 1: Tier N inside a verified fn is E0701, all-or-nothing
+    // by design — the stamp fires once per contract, not per call site.
+    if f.is_verified {
+        for atom in contract.requires.iter().chain(contract.ensures.iter()) {
+            if matches!(atom.tier, ContractTier::Nonlinear(_)) {
+                diag.error(atom.span, contract_e0701(atom, &f.name));
+            }
+        }
+    }
+    db.fn_contracts.insert(f.name.clone(), contract);
+}
+
+/// The per-fn context build: the local-facts pre-walk, the return set,
+/// the fall-through flag, and (for contracted fns) the entry zone —
+/// the caller-side fast path every call site inside the fn reads.
+fn contract_build_ctx(f: &FnItem, db: &mut CheckDb) {
+    let mut int_params = HashSet::new();
+    let mut list_params = HashSet::new();
+    for p in &f.params {
+        let t = resolve_type_ast(&p.ty, db);
+        match &t {
+            Type::Int | Type::I8 | Type::I16 | Type::I32 | Type::U8 | Type::U16 | Type::U32
+            | Type::U64 => {
+                int_params.insert(p.name.clone());
+            }
+            Type::List(_) => {
+                list_params.insert(p.name.clone());
+            }
+            _ => {}
+        }
+    }
+    let mut facts: HashMap<String, LocalFact> = HashMap::new();
+    let mut assigned: HashSet<String> = HashSet::new();
+    let mut returns: Vec<Expr> = Vec::new();
+    contract_walk_stmts(&f.body, &int_params, &mut facts, &mut assigned, &mut returns, true);
+    for name in assigned.iter() {
+        facts.remove(name);
+    }
+    let has_fallthrough = !matches!(f.body.last(), Some(Stmt::Return { .. }));
+    // The entry zone: the fn's own requires atoms conjoined over its
+    // int params + len terms, closed ONCE (the memoized fast path —
+    // §7.3: the O(V³) closure is the floor, paid once per function,
+    // not per atom per call site).
+    let mut entry_zone = None;
+    let mut vertices: HashMap<String, usize> = HashMap::new();
+    if let Some(contract) = db.fn_contracts.get(&f.name).cloned() {
+        if !contract.requires.is_empty() {
+            let mut sv = SiteSolver::new(None, &HashMap::new(), &int_params, &list_params, false);
+            for atom in &contract.requires {
+                sv.seed_atom_edges(&atom.expr);
+            }
+            let mut zone = sv.finish();
+            zone = db.contract_zone_memo.close(zone);
+            vertices = sv.vmap.clone();
+            entry_zone = Some(zone);
+        }
+    }
+    db.fn_contract_ctx.insert(
+        f.name.clone(),
+        FnContractCtx {
+            entry_zone,
+            vertices,
+            int_params,
+            list_params,
+            facts,
+            returns,
+            has_fallthrough,
+        },
+    );
+}
+
+/// The syntactic per-fn pre-walk (the "declared bounds" facts-table
+/// rows + the return set for the ensures pass). A fact is recorded
+/// only at a declaration whose binding is never re-assigned anywhere
+/// in the fn — flow-insensitive but conservative (an assignment
+/// anywhere kills the fact; loop-carried variables therefore carry no
+/// facts — loop-entry facts are a later rung, named, not claimed).
+fn contract_walk_stmts(
+    stmts: &[Stmt],
+    int_params: &HashSet<String>,
+    facts: &mut HashMap<String, LocalFact>,
+    assigned: &mut HashSet<String>,
+    returns: &mut Vec<Expr>,
+    top: bool,
+) {
+    for s in stmts {
+        contract_walk_stmt(s, int_params, facts, assigned, returns, top);
+    }
+}
+
+fn contract_walk_stmt(
+    s: &Stmt,
+    int_params: &HashSet<String>,
+    facts: &mut HashMap<String, LocalFact>,
+    assigned: &mut HashSet<String>,
+    returns: &mut Vec<Expr>,
+    _top: bool,
+) {
+    match s {
+        Stmt::Decl { names, value, .. } => {
+            if let (Some(name), Some(v)) = (names.first(), value) {
+                if let Some(fact) = local_fact_of(v, facts, int_params) {
+                    facts.insert(name.clone(), fact);
+                }
+            }
+        }
+        Stmt::Assign { target, .. } => {
+            if let Some(root) = root_ident_of(target) {
+                assigned.insert(root);
+            }
+        }
+        Stmt::Return { value, .. } => {
+            if let Some(v) = value {
+                returns.push(v.clone());
+            }
+        }
+        Stmt::If { cond, then_body, else_ifs, else_body, .. } => {
+            contract_walk_expr(cond, assigned);
+            contract_walk_stmts(then_body, int_params, facts, assigned, returns, false);
+            for (c, b) in else_ifs {
+                contract_walk_expr(c, assigned);
+                contract_walk_stmts(b, int_params, facts, assigned, returns, false);
+            }
+            if let Some(b) = else_body {
+                contract_walk_stmts(b, int_params, facts, assigned, returns, false);
+            }
+        }
+        Stmt::While { cond, body, .. } => {
+            contract_walk_expr(cond, assigned);
+            contract_walk_stmts(body, int_params, facts, assigned, returns, false);
+        }
+        Stmt::ForCount { init, cond, step, body, .. } => {
+            contract_walk_stmt(init, int_params, facts, assigned, returns, false);
+            contract_walk_expr(cond, assigned);
+            contract_walk_stmt(step, int_params, facts, assigned, returns, false);
+            contract_walk_stmts(body, int_params, facts, assigned, returns, false);
+        }
+        Stmt::ForIn { name, iter, body, .. } => {
+            assigned.insert(name.clone());
+            contract_walk_expr(iter, assigned);
+            contract_walk_stmts(body, int_params, facts, assigned, returns, false);
+        }
+        Stmt::Match { expr, arms, default, .. } => {
+            contract_walk_expr(expr, assigned);
+            for (_, b) in arms {
+                contract_walk_stmts(b, int_params, facts, assigned, returns, false);
+            }
+            if let Some(d) = default {
+                contract_walk_stmts(d, int_params, facts, assigned, returns, false);
+            }
+        }
+        Stmt::Guard { cond, else_body, .. } => {
+            contract_walk_expr(cond, assigned);
+            contract_walk_stmts(else_body, int_params, facts, assigned, returns, false);
+        }
+        Stmt::Expr(e) => contract_walk_expr(e, assigned),
+        // The remaining block statements are walked for RETURNS (an
+        // exit inside a region/nursery/frozen/wave/lock/defer block is
+        // a real fn exit — the ensures exit zone must model it or a
+        // discharge could rest on an unmodeled path = UNSOUND) and for
+        // assignments (a fact killed inside a block is killed).
+        Stmt::Region { body, .. }
+        | Stmt::NurseryBlock { body, .. }
+        | Stmt::Frozen { body, .. }
+        | Stmt::Unfrozen { body, .. }
+        | Stmt::SpawnBlock { body, .. }
+        | Stmt::GoroutineBlock { body, .. }
+        | Stmt::Defer { body, .. }
+        | Stmt::ErrDefer { body, .. }
+        | Stmt::Wave { body, .. }
+        | Stmt::LockBlock { body, .. } => {
+            contract_walk_stmts(body, int_params, facts, assigned, returns, false);
+        }
+        _ => {}
+    }
+}
+
+/// Any assignment target root inside an expression context (compound
+/// assignment, calls taking inout) invalidates the fact; also collects
+/// nested returns inside closures.
+fn contract_walk_expr(e: &Expr, assigned: &mut HashSet<String>) {
+    match &e.kind {
+        ExprKind::Ident(_) => {}
+        ExprKind::Binary { lhs, rhs, .. } => {
+            contract_walk_expr(lhs, assigned);
+            contract_walk_expr(rhs, assigned);
+        }
+        ExprKind::Unary { expr, .. } => contract_walk_expr(expr, assigned),
+        ExprKind::Call { callee, args, .. } => {
+            contract_walk_expr(callee, assigned);
+            for a in args {
+                match a {
+                    Arg::Pos(e) | Arg::Named { value: e, .. } => contract_walk_expr(e, assigned),
+                    Arg::Inout(e) => {
+                        if let Some(root) = root_ident_of(e) {
+                            assigned.insert(root);
+                        }
+                    }
+                }
+            }
+        }
+        ExprKind::Index { base, index } => {
+            contract_walk_expr(base, assigned);
+            contract_walk_expr(index, assigned);
+        }
+        ExprKind::Member { base, .. } => contract_walk_expr(base, assigned),
+        ExprKind::Lambda { body, .. } => {
+            // a closure's body is its own function: assignments inside
+            // it may capture, so be conservative for captured names —
+            // the fact machinery is slice-1-local.
+            let mut dummy_facts: HashMap<String, LocalFact> = HashMap::new();
+            let mut inner_assigned: HashSet<String> = HashSet::new();
+            let mut dummy_returns = Vec::new();
+            contract_walk_stmts(
+                body,
+                &HashSet::new(),
+                &mut dummy_facts,
+                &mut inner_assigned,
+                &mut dummy_returns,
+                false,
+            );
+            for n in inner_assigned {
+                assigned.insert(n);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn root_ident_of(e: &Expr) -> Option<String> {
+    match &e.kind {
+        ExprKind::Ident(n) => Some(n.clone()),
+        ExprKind::Index { base, .. } | ExprKind::Member { base, .. } => root_ident_of(base),
+        _ => None,
+    }
+}
+
+/// The declared-bound fact of one initializer (None when the value is
+/// not slice-1 fact-shaped).
+fn local_fact_of(v: &Expr, facts: &HashMap<String, LocalFact>, int_params: &HashSet<String>) -> Option<LocalFact> {
+    match &v.kind {
+        ExprKind::Int(c) => Some(LocalFact::Known(*c)),
+        ExprKind::Unary { op: UnOp::Neg, expr } => match &expr.kind {
+            ExprKind::Int(c) => Some(LocalFact::Known(-*c)),
+            _ => None,
+        },
+        ExprKind::Ident(n) => {
+            if int_params.contains(n) {
+                // an alias of a param resolves through the param's vertex
+                Some(LocalFact::Alias(n.clone()))
+            } else if let Some(f) = facts.get(n) {
+                match f {
+                    LocalFact::Known(c) => Some(LocalFact::Known(*c)),
+                    LocalFact::Len(n) => Some(LocalFact::Len(*n)),
+                    LocalFact::Alias(a) => Some(LocalFact::Alias(a.clone())),
+                    LocalFact::Mod(_, _) => None,
+                }
+            } else {
+                None
+            }
+        }
+        ExprKind::List(items) => Some(LocalFact::Len(items.len())),
+        ExprKind::Binary { op, lhs, rhs } => match op {
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div => {
+                let l = local_fact_of(lhs, facts, int_params)?;
+                let r = local_fact_of(rhs, facts, int_params)?;
+                match (l, r) {
+                    (LocalFact::Known(a), LocalFact::Known(b)) => {
+                        let v = match op {
+                            BinOp::Add => a.wrapping_add(b),
+                            BinOp::Sub => a.wrapping_sub(b),
+                            BinOp::Mul => a.wrapping_mul(b),
+                            BinOp::Div => {
+                                if b == 0 {
+                                    return None;
+                                }
+                                a.wrapping_div(b)
+                            }
+                            _ => unreachable!(),
+                        };
+                        Some(LocalFact::Known(v))
+                    }
+                    _ => None,
+                }
+            }
+            // r = a % m: keep the operand exprs — the remainder range
+            // axiom's subject (the modulus interval gates the axiom at
+            // query time).
+            BinOp::Mod => Some(LocalFact::Mod(
+                    Box::new(lhs.as_ref().clone()),
+                    Box::new(rhs.as_ref().clone()),
+                )),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------
+// Wave 15 (Impl-T): the discharge engine. One solver serves the three
+// discharge contexts — the fn-entry zone build (the callee's own
+// requires atoms seeded as facts), the call-site test (the callee's
+// atoms substituted with the caller's argument terms, read against
+// the caller's projected entry zone + local facts), and the ensures
+// exit test (the entry zone + per-return-site result bindings,
+// joined per Miné Thm 4.2 — the over-approximating lattice join,
+// sound not exact). Discharge-what-you-can, watch-the-rest.
+// ---------------------------------------------------------------------
+
+/// A normalized linear form over site vertices. The DBM-testable
+/// shapes are: no vertex (a constant — folded), or exactly one vertex
+/// with coefficient ±1 (a difference/interval bound). Multi-vertex
+/// sums and |coeff| ≠ 1 are the octagon/Presburger rungs — named, not
+/// claimed; opaque terms (calls, unknown locals) are never
+/// discharged, only degraded — sound but not complete, priced per
+/// atom.
+#[derive(Clone, Debug)]
+struct NormForm {
+    terms: Vec<(String, i64)>,
+    konst: i64,
+    opaque: bool,
+}
+
+impl NormForm {
+    fn konst(c: i64) -> Self {
+        NormForm { terms: Vec::new(), konst: c, opaque: false }
+    }
+    fn vert(name: &str, coeff: i64) -> Self {
+        NormForm { terms: vec![(name.to_string(), coeff)], konst: 0, opaque: false }
+    }
+    fn opaque() -> Self {
+        NormForm { terms: Vec::new(), konst: 0, opaque: true }
+    }
+    fn add(self, other: NormForm, sign: i64) -> NormForm {
+        let mut terms = self.terms;
+        for (v, c) in other.terms {
+            if let Some(slot) = terms.iter_mut().find(|(t, _)| t == &v) {
+                slot.1 += sign * c;
+            } else {
+                terms.push((v, sign * c));
+            }
+        }
+        terms.retain(|(_, c)| *c != 0);
+        NormForm {
+            terms,
+            konst: self.konst + sign * other.konst,
+            opaque: self.opaque || other.opaque,
+        }
+    }
+}
+
+enum AtomVerdict {
+    Discharged,
+    /// The engine proved the negation (the conjoined atom closed to a
+    /// negative diagonal cycle): the assertion will always fail.
+    Refuted,
+    /// The engine could not prove it: the typed runtime assertion
+    /// carries the atom (the boundary rule's degradation).
+    Degraded,
+}
+
+/// The per-site solver: resolves terms to vertices, seeds the zone
+/// (caller-zone projection + len seeds + the mod range axiom), and
+/// tests atoms against the closed matrix.
+struct SiteSolver {
+    /// The context zone (closed): the caller's entry zone at a call
+    /// site, the fn's own entry zone at the ensures pass, None at the
+    /// entry-zone build itself.
+    context: Option<(Dbm, HashMap<String, usize>)>,
+    facts: HashMap<String, LocalFact>,
+    int_params: HashSet<String>,
+    list_params: HashSet<String>,
+    allow_result: bool,
+    vmap: HashMap<String, usize>,
+    names: Vec<String>,
+    edges: Vec<(usize, usize, i64)>,
+}
+
+impl SiteSolver {
+    fn new(
+        context: Option<(Dbm, HashMap<String, usize>)>,
+        facts: &HashMap<String, LocalFact>,
+        int_params: &HashSet<String>,
+        list_params: &HashSet<String>,
+        allow_result: bool,
+    ) -> Self {
+        // vertex 0 is the zero constant (dbm.rs's convention) — it is
+        // in the vmap so the context projection copies the interval
+        // edges (x ≤ c bounds live on the 0-column/row)
+        let mut vmap = HashMap::new();
+        vmap.insert("0".to_string(), 0usize);
+        SiteSolver {
+            context,
+            facts: facts.clone(),
+            int_params: int_params.clone(),
+            list_params: list_params.clone(),
+            allow_result,
+            vmap,
+            names: vec!["0".into()],
+            edges: Vec::new(),
+        }
+    }
+
+    fn vert(&mut self, name: &str) -> usize {
+        if let Some(i) = self.vmap.get(name) {
+            return *i;
+        }
+        let i = self.names.len();
+        self.names.push(name.to_string());
+        self.vmap.insert(name.to_string(), i);
+        i
+    }
+
+    fn seed(&mut self, i: usize, j: usize, c: i64) {
+        self.edges.push((i, j, c));
+    }
+
+    /// x ≥ lo ⟺ 0 − x ≤ −lo (a zero-var difference edge).
+    fn seed_lb(&mut self, x: usize, lo: i64) {
+        self.seed(0, x, -lo);
+    }
+
+    /// x ≤ hi ⟺ x − 0 ≤ hi.
+    fn seed_ub(&mut self, x: usize, hi: i64) {
+        self.seed(x, 0, hi);
+    }
+
+    /// The context zone's closed bound on a context vertex name
+    /// (the mod range axiom's gate reads the modulus's interval).
+    fn ctx_lb(&self, name: &str) -> Option<i64> {
+        let (z, vmap) = self.context.as_ref()?;
+        let i = vmap.get(name)?;
+        z.lb(*i)
+    }
+    fn ctx_ub(&self, name: &str) -> Option<i64> {
+        let (z, vmap) = self.context.as_ref()?;
+        let i = vmap.get(name)?;
+        z.ub(*i)
+    }
+
+    /// THE REMAINDER RANGE AXIOM (A4 §2's Tier D discharge, Strata's
+    /// Euclidean-% rule adapted to THIS runtime's truncating %): for
+    /// r = a % m with m's interval known positive, r ∈ [−(m−1), m−1] —
+    /// two DBM edges given m's interval: r − m ≤ −1 (r < m against
+    /// the modulus VERTEX) plus the interval edges from m's upper
+    /// bound. A RANGE FACT, never a divisibility solve. NOTE the
+    /// honest deviation: Strata's rule is stated for EUCLIDEAN mod
+    /// (0 ≤ r < m); this language's runtime % is C-truncating
+    /// (r has the dividend's sign), and discharging 0 ≤ r under the
+    /// Euclidean constants would be UNSOUND against the semantics
+    /// that actually run — the axiom is stated for the truncating
+    /// semantics, and `0 <= x % m` correctly does NOT follow (it
+    /// degrades unless the dividend's non-negativity is itself a
+    /// fact, which the DBM cannot combine here — the octagon/QF-PA
+    /// rungs).
+    fn axiom_mod_edges(&mut self, mod_name: &str, modulus_form: &NormForm) -> bool {
+        let r = self.vert(mod_name);
+        if modulus_form.opaque {
+            return false;
+        }
+        match modulus_form.terms.first() {
+            Some((m, c)) if *c == 1 && modulus_form.terms.len() == 1 => {
+                // the modulus is a vertex: gate on its interval, then
+                // seed r − m ≤ −1 (r < m) + r's interval from m's ub.
+                let (lb, ub) = (self.ctx_lb(m), self.ctx_ub(m));
+                if lb.map(|l| l >= 1).unwrap_or(false) {
+                    let mi = self.vert(m);
+                    self.seed(r, mi, -1);
+                    if let Some(hi) = ub {
+                        // r ≤ m−1 ≤ hi−1 and r ≥ 1−m ≥ 1−hi
+                        self.seed_ub(r, hi - 1);
+                        self.seed_lb(r, 1 - hi);
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
+            None => {
+                // the modulus folded to a positive constant: the
+                // interval edges directly.
+                let k = modulus_form.konst;
+                if k >= 1 {
+                    self.seed_ub(r, k - 1);
+                    self.seed_lb(r, 1 - k);
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Resolve one term to a normalized form, allocating vertices and
+    /// seeding derivable edges (the mod axiom) as it goes. Idempotent:
+    /// re-resolving the same term allocates nothing new.
+    fn resolve(&mut self, e: &Expr) -> NormForm {
+        match &e.kind {
+            ExprKind::Int(v) => NormForm::konst(*v),
+            ExprKind::Bool(_) => NormForm::opaque(),
+            ExprKind::Ident(n) => {
+                if n == "result" && self.allow_result {
+                    let i = self.vert("result");
+                    let _ = i;
+                    return NormForm::vert("result", 1);
+                }
+                if self.int_params.contains(n) {
+                    // the param vertex is allocated HERE — the form
+                    // names it and the zone must carry it (the
+                    // context projection copies its bounds)
+                    let v = format!("p:{n}");
+                    let i = self.vert(&v);
+                    let _ = i;
+                    return NormForm::vert(&v, 1);
+                }
+                match self.facts.get(n) {
+                    Some(LocalFact::Known(c)) => NormForm::konst(*c),
+                    Some(LocalFact::Len(k)) => NormForm::konst(*k as i64),
+                    Some(LocalFact::Alias(a)) => {
+                        let a = a.clone();
+                        // an alias of a param (or of another known
+                        // local) resolves through the target
+                        let sub = Expr {
+                            kind: ExprKind::Ident(a),
+                            span: e.span,
+                        };
+                        self.resolve(&sub)
+                    }
+                    Some(LocalFact::Mod(a, m)) => {
+                        // the local's value IS the mod term — resolve
+                        // the term itself (fresh vertex keyed by text)
+                        let term = Expr {
+                            kind: ExprKind::Binary {
+                                op: BinOp::Mod,
+                                lhs: a.clone(),
+                                rhs: m.clone(),
+                            },
+                            span: e.span,
+                        };
+                        self.resolve(&term)
+                    }
+                    None => NormForm::opaque(),
+                }
+            }
+            ExprKind::Unary { op: UnOp::Neg, expr } => {
+                let inner = self.resolve(expr);
+                let zero = NormForm::konst(0);
+                zero.add(inner, -1)
+            }
+            ExprKind::Unary { op: UnOp::Not, expr } => {
+                // `not` at term position only wraps comparisons; the
+                // atom test handles it — a bare `not` term is opaque
+                // here.
+                let _ = expr;
+                NormForm::opaque()
+            }
+            ExprKind::Binary { op, lhs, rhs } => match op {
+                BinOp::Add => {
+                    let l = self.resolve(lhs);
+                    let r = self.resolve(rhs);
+                    l.add(r, 1)
+                }
+                BinOp::Sub => {
+                    let l = self.resolve(lhs);
+                    let r = self.resolve(rhs);
+                    l.add(r, -1)
+                }
+                BinOp::Mul => {
+                    // a literal-scaled product: scale the other side
+                    let l = self.resolve(lhs);
+                    let r = self.resolve(rhs);
+                    let scale = |k: i64, f: NormForm| NormForm {
+                        terms: f
+                            .terms
+                            .iter()
+                            .map(|(v, c)| (v.clone(), c * k))
+                            .collect(),
+                        konst: f.konst * k,
+                        opaque: f.opaque,
+                    };
+                    if l.terms.is_empty() && !l.opaque && l.konst != 0 {
+                        scale(l.konst, r)
+                    } else if r.terms.is_empty() && !r.opaque && r.konst != 0 {
+                        scale(r.konst, l)
+                    } else if l.terms.is_empty() && !l.opaque && l.konst == 0 {
+                        NormForm::konst(0)
+                    } else if r.terms.is_empty() && !r.opaque && r.konst == 0 {
+                        NormForm::konst(0)
+                    } else {
+                        NormForm::opaque()
+                    }
+                }
+                BinOp::Mod => {
+                    let l = self.resolve(lhs);
+                    let m = self.resolve(rhs);
+                    // constant mod folds outright (the discharge of
+                    // mod-by-literal atoms with known operands) —
+                    // Rust's % is C-truncating, exactly the runtime's
+                    // semantics (sn_mod_i64).
+                    if l.terms.is_empty() && !l.opaque && m.terms.is_empty() && !m.opaque && m.konst != 0 {
+                        return NormForm::konst(l.konst % m.konst);
+                    }
+                    // the mod vertex: keyed by the term's canonical
+                    // text (stable across the atoms of one site)
+                    let name = format!("mod:{}", contract_atom_text(e));
+                    let applied = self.axiom_mod_edges(&name, &m);
+                    if applied {
+                        NormForm::vert(&name, 1)
+                    } else {
+                        // no axiom (the modulus's interval unknown or
+                        // non-positive): an unusable vertex — the atom
+                        // degrades, never silently passes
+                        let _ = self.vert(&name);
+                        NormForm::opaque()
+                    }
+                }
+                BinOp::Div => {
+                    // div-by-literal is Tier L (Presburger) but the
+                    // slice-1 engine derives no facts for a quotient
+                    // term — degrade (the QF-PA solver rung is later)
+                    let _ = (lhs, rhs);
+                    NormForm::opaque()
+                }
+                _ => NormForm::opaque(),
+            },
+            ExprKind::Call { callee, args, .. } => {
+                if let ExprKind::Member { base, name } = &callee.kind {
+                    if name == "length" && args.is_empty() {
+                        if let ExprKind::Ident(n) = &base.kind {
+                            if self.list_params.contains(n) {
+                                // len()/capacity as an opaque vertex
+                                // with the DBM-seeded relation len ≥ 0
+                                // (A4 §2: "graph vertices with
+                                // DBM-seeded relations")
+                                let v = format!("len:p:{n}");
+                                let i = self.vert(&v);
+                                let _ = i;
+                                self.seed_lb(i, 0);
+                                return NormForm::vert(&v, 1);
+                            }
+                            if let Some(LocalFact::Len(k)) = self.facts.get(n) {
+                                return NormForm::konst(*k as i64);
+                            }
+                        }
+                    }
+                }
+                NormForm::opaque()
+            }
+            _ => NormForm::opaque(),
+        }
+    }
+
+    /// Seed one atom's own edge into the zone (the entry-zone build:
+    /// the fn's requires atoms are FACTS, assumed at entry — recorded
+    /// as edges, not tested).
+    fn seed_atom_edges(&mut self, atom: &Expr) {
+        let Some((lhs, rhs, op)) = cmp_shape_of(atom) else {
+            return; // or/other shapes: the entry build records only
+                    // comparison facts (sound — fewer facts, never more)
+        };
+        let l = self.resolve(&lhs);
+        let r = self.resolve(&rhs);
+        let f = l.clone().add(r.clone(), -1);
+        if f.opaque {
+            return;
+        }
+        if f.terms.is_empty() {
+            // a constant fact: TRUE adds nothing; FALSE empties the
+            // zone (the function is vacuous — every call site will
+            // refute against the caller's own propagated zone).
+            let holds = match op {
+                BinOp::Le => f.konst <= 0,
+                BinOp::Lt => f.konst < 0,
+                BinOp::Ge => f.konst >= 0,
+                BinOp::Gt => f.konst > 0,
+                BinOp::Eq => f.konst == 0,
+                BinOp::Ne => f.konst != 0,
+                _ => true,
+            };
+            if !holds {
+                self.seed(0, 0, -1);
+            }
+            return;
+        }
+        let Some((i, j, c)) = form_edge(&f, op) else { return };
+        let (i, j) = (self.vert_index(&i), self.vert_index(&j));
+        if let (Some(i), Some(j)) = (i, j) {
+            self.seed(i, j, c);
+        }
+    }
+
+    fn vert_index(&self, name: &str) -> Option<usize> {
+        if name == "0" {
+            return Some(0);
+        }
+        self.vmap.get(name).copied()
+    }
+
+    /// Build the zone: the context projection (the caller's closed
+    /// entry zone restricted to this site's vertices — the submatrix
+    /// of a closed DBM is the closed projection, so no re-closure is
+    /// lost) + every seeded edge. NOT closed — the caller closes
+    /// (through the memo when it has one).
+    fn finish(&mut self) -> Dbm {
+        let n = self.names.len();
+        let mut z = Dbm::top(n);
+        // the context projection
+        if let Some((cz, cvmap)) = &self.context {
+            for (an, ai) in &self.vmap {
+                let Some(&cai) = cvmap.get(an) else { continue };
+                for (bn, bi) in &self.vmap {
+                    if let Some(&cbi) = cvmap.get(bn) {
+                        let c = cz.d[cz.idx(cai, cbi)];
+                        if c < INF {
+                            z.seed(*ai, *bi, c);
+                        }
+                    }
+                }
+            }
+        }
+        for (i, j, c) in self.edges.drain(..) {
+            if i < n && j < n {
+                z.seed(i, j, c);
+            }
+        }
+        z
+    }
+}
+
+/// The comparison shape of an atom: (lhs, rhs, op) with `not`
+/// negations pushed in (not (a < b) ⟹ a >= b). None for non-
+/// comparison atoms (or/eq handled by their own arms).
+fn cmp_shape_of(e: &Expr) -> Option<(Expr, Expr, BinOp)> {
+    match &e.kind {
+        ExprKind::Binary { op, lhs, rhs }
+            if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge) =>
+        {
+            Some((lhs.as_ref().clone(), rhs.as_ref().clone(), *op))
+        }
+        ExprKind::Unary { op: UnOp::Not, expr } => {
+            let (l, r, o) = cmp_shape_of(expr)?;
+            let flipped = match o {
+                BinOp::Lt => BinOp::Ge,
+                BinOp::Gt => BinOp::Le,
+                BinOp::Le => BinOp::Gt,
+                BinOp::Ge => BinOp::Lt,
+                BinOp::Eq => BinOp::Ne,
+                BinOp::Ne => BinOp::Eq,
+                _ => return None,
+            };
+            Some((l, r, flipped))
+        }
+        _ => None,
+    }
+}
+
+/// Does the atom reference a callee parameter the caller did NOT
+/// bind (a defaulted-out param)? Those atoms degrade to the FN ENTRY
+/// — the call site has no value for the param.
+fn atom_refs_unbound_param(e: &Expr, bound: &HashSet<String>) -> bool {
+    match &e.kind {
+        ExprKind::Ident(n) => !bound.contains(n),
+        ExprKind::Binary { lhs, rhs, .. } => {
+            atom_refs_unbound_param(lhs, bound) || atom_refs_unbound_param(rhs, bound)
+        }
+        ExprKind::Unary { expr, .. } => atom_refs_unbound_param(expr, bound),
+        ExprKind::Call { callee, args, .. } => {
+            atom_refs_unbound_param(callee, bound)
+                || args.iter().any(|a| match a {
+                    Arg::Pos(x) | Arg::Inout(x) => atom_refs_unbound_param(x, bound),
+                    Arg::Named { value, .. } => atom_refs_unbound_param(value, bound),
+                })
+        }
+        ExprKind::Member { base, .. } => atom_refs_unbound_param(base, bound),
+        _ => false,
+    }
+}
+
+/// Substitute the callee's parameter names with the caller's argument
+/// terms (the site discharge runs on the caller's side of the edge;
+/// the stored site check keeps the ORIGINAL atom — the IR binds the
+/// callee's params to the evaluated argument values).
+fn contract_subst(e: &Expr, map: &HashMap<String, Expr>) -> Expr {
+    match &e.kind {
+        ExprKind::Ident(n) => map.get(n).cloned().unwrap_or_else(|| e.clone()),
+        ExprKind::Binary { op, lhs, rhs } => Expr {
+            kind: ExprKind::Binary {
+                op: *op,
+                lhs: Box::new(contract_subst(lhs, map)),
+                rhs: Box::new(contract_subst(rhs, map)),
+            },
+            span: e.span,
+        },
+        ExprKind::Unary { op, expr } => Expr {
+            kind: ExprKind::Unary {
+                op: *op,
+                expr: Box::new(contract_subst(expr, map)),
+            },
+            span: e.span,
+        },
+        ExprKind::Call { callee, type_args, args } => Expr {
+            kind: ExprKind::Call {
+                callee: Box::new(contract_subst(callee, map)),
+                type_args: type_args.clone(),
+                args: args
+                    .iter()
+                    .map(|a| match a {
+                        Arg::Pos(x) => Arg::Pos(contract_subst(x, map)),
+                        Arg::Inout(x) => Arg::Inout(contract_subst(x, map)),
+                        Arg::Named { name, value } => Arg::Named {
+                            name: name.clone(),
+                            value: contract_subst(value, map),
+                        },
+                    })
+                    .collect(),
+            },
+            span: e.span,
+        },
+        ExprKind::Member { base, name } => Expr {
+            kind: ExprKind::Member {
+                base: Box::new(contract_subst(base, map)),
+                name: name.clone(),
+            },
+            span: e.span,
+        },
+        _ => e.clone(),
+    }
+}
+
+/// One atom's resolved shape at a site (phase A's output; the closed
+/// zone is phase B; the verdict is phase C — resolution allocates
+/// vertices so it must complete before the zone is built).
+enum SiteAtom {
+    Cmp { l: NormForm, r: NormForm, op: BinOp },
+    /// A non-comparison shape (an `or`, a bare term): folded when
+    /// constant, degraded otherwise.
+    Fold(Option<bool>),
+}
+
+/// Phase C: the verdict for one atom against the CLOSED site zone.
+fn contract_verdict(zone: &Dbm, sv: &SiteSolver, sa: &SiteAtom) -> AtomVerdict {
+    match sa {
+        SiteAtom::Fold(Some(true)) => AtomVerdict::Discharged,
+        SiteAtom::Fold(Some(false)) => AtomVerdict::Refuted,
+        SiteAtom::Fold(None) => AtomVerdict::Degraded,
+        SiteAtom::Cmp { l, r, op } => {
+            let f = l.clone().add(r.clone(), -1);
+            if f.opaque {
+                return AtomVerdict::Degraded;
+            }
+            if f.terms.is_empty() {
+                // the pure-constant atom folds: proven or refuted
+                let k = f.konst;
+                return match op {
+                    BinOp::Le if k <= 0 => AtomVerdict::Discharged,
+                    BinOp::Lt if k < 0 => AtomVerdict::Discharged,
+                    BinOp::Ge if k >= 0 => AtomVerdict::Discharged,
+                    BinOp::Gt if k > 0 => AtomVerdict::Discharged,
+                    BinOp::Eq if k == 0 => AtomVerdict::Discharged,
+                    BinOp::Ne if k != 0 => AtomVerdict::Discharged,
+                    BinOp::Le | BinOp::Lt | BinOp::Ge | BinOp::Gt | BinOp::Eq | BinOp::Ne => {
+                        AtomVerdict::Refuted
+                    }
+                    _ => AtomVerdict::Degraded,
+                };
+            }
+            match op {
+                BinOp::Eq => {
+                    // x = y ⟺ two edges; both implied → discharged;
+                    // either conjoin empty → refuted
+                    let (le, ge) = (
+                        sv.edge_index(&f, BinOp::Le),
+                        sv.edge_index(&f, BinOp::Ge),
+                    );
+                    match (le, ge) {
+                        (Some((i, j, c)), Some((i2, j2, c2))) => {
+                            if zone.implies(i, j, c) && zone.implies(i2, j2, c2) {
+                                AtomVerdict::Discharged
+                            } else if zone.conjoined(i, j, c).is_empty()
+                                || zone.conjoined(i2, j2, c2).is_empty()
+                            {
+                                AtomVerdict::Refuted
+                            } else {
+                                AtomVerdict::Degraded
+                            }
+                        }
+                        _ => AtomVerdict::Degraded,
+                    }
+                }
+                BinOp::Ne => AtomVerdict::Degraded, // non-convex (A4 §2: parity is not a zone)
+                _ => {
+                    // the interval shape (one vertex ± const) and THE
+                    // DIFFERENCE BOUND (two vertices, +1/−1) both
+                    // reduce through form_edge; the shapes the zone
+                    // layer cannot carry (same-sign sums, |coeff| ≠
+                    // 1, 3+ variables) return None — the honest
+                    // degrade, never a false discharge
+                    match sv.edge_index(&f, *op) {
+                        Some((i, j, c)) => {
+                            if zone.implies(i, j, c) {
+                                AtomVerdict::Discharged
+                            } else if zone.conjoined(i, j, c).is_empty() {
+                                AtomVerdict::Refuted
+                            } else {
+                                AtomVerdict::Degraded
+                            }
+                        }
+                        None => AtomVerdict::Degraded,
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl SiteSolver {
+    /// The (vertex-name, vertex-name, bound) edge of a resolved form
+    /// under a comparison op — THE DBM EDGE SHAPES (A4 rung (i)): the
+    /// interval bound (one vertex ± const, the other side the zero
+    /// vertex) and THE DIFFERENCE BOUND x − y ≤ c (two vertices with
+    /// coefficients +1/−1 — the classic index-vs-len shape).
+    /// Returns None for the shapes the zone layer cannot carry:
+    /// sums of same-sign variables (the octagon rung ±x±y ≤ c),
+    /// |coeff| ≠ 1, opaque terms, and != (non-convex — A4 §2: parity
+    /// is not a zone).
+    fn edge_index(&self, f: &NormForm, op: BinOp) -> Option<(usize, usize, i64)> {
+        let (i, j, c) = form_edge(f, op)?;
+        let i = self.vert_index(&i)?;
+        let j = self.vert_index(&j)?;
+        Some((i, j, c))
+    }
+}
+
+/// The canonical edge reduction of a resolved form F under op:
+/// "zone ⟹ x_i − x_j ≤ bound" is exactly "zone ⟹ F ⊲ 0".
+fn form_edge(f: &NormForm, op: BinOp) -> Option<(String, String, i64)> {
+    if f.opaque {
+        return None;
+    }
+    match f.terms.len() {
+        0 => None, // constant atoms fold before the edge test
+        1 => {
+            let (v, a) = &f.terms[0];
+            let b = f.konst;
+            if *a != 1 && *a != -1 {
+                return None;
+            }
+            Some(match (*a, op) {
+                (1, BinOp::Le) => (v.clone(), "0".into(), -b),
+                (1, BinOp::Lt) => (v.clone(), "0".into(), -b - 1),
+                (1, BinOp::Ge) => ("0".into(), v.clone(), b),
+                (1, BinOp::Gt) => ("0".into(), v.clone(), b - 1),
+                (-1, BinOp::Le) => ("0".into(), v.clone(), -b),
+                (-1, BinOp::Lt) => ("0".into(), v.clone(), -b - 1),
+                (-1, BinOp::Ge) => (v.clone(), "0".into(), b),
+                (-1, BinOp::Gt) => (v.clone(), "0".into(), b - 1),
+                _ => return None,
+            })
+        }
+        2 => {
+            // THE DIFFERENCE BOUND: F = v − w + c (coefficients +1/−1
+            // after normalization) — the shape the whole rung is
+            // named for. Same-sign sums (x + y ≤ c) are the octagon
+            // rung, not a zone.
+            let (v, av) = &f.terms[0];
+            let (w, aw) = &f.terms[1];
+            if !((*av == 1 && *aw == -1) || (*av == -1 && *aw == 1)) {
+                return None;
+            }
+            let (big, small, c) = if *av == 1 {
+                (v.clone(), w.clone(), f.konst)
+            } else {
+                (w.clone(), v.clone(), f.konst)
+            };
+            // F = big − small + c ⊲ 0
+            Some(match op {
+                BinOp::Le => (big, small, -c),
+                BinOp::Lt => (big, small, -c - 1),
+                BinOp::Ge => (small, big, c),
+                BinOp::Gt => (small, big, c - 1),
+                _ => return None,
+            })
+        }
+        _ => None, // 3+ variables: the Presburger rungs
+    }
+}
+
+/// The ensures pass: the fn's exit zone over (entry vertices ∪ result
+/// ∪ the atoms'/bindings' terms — ONE shared vertex space), built per
+/// return site (the entry zone + that site's result binding) and
+/// JOINED (Miné Thm 4.2 — the over-approximating lattice join: sound,
+/// not exact; the join is where the convexity price is paid, in
+/// discharged atoms). Each ensures atom then discharges, refutes, or
+/// degrades against the joined zone — the degraded atoms lower to the
+/// typed runtime assertion at every return.
+fn contract_ensures_pass(f: &FnItem, db: &mut CheckDb, diag: &mut Diagnostics) {
+    let Some(contract) = db.fn_contracts.get(&f.name).cloned() else { return };
+    if contract.ensures.is_empty() {
+        return;
+    }
+    let Some(ctx) = db.fn_contract_ctx.get(&f.name).cloned() else { return };
+    let entry = ctx.entry_zone.clone().unwrap_or_else(|| Dbm::top(1));
+    let entry_vmap = ctx.vertices.clone();
+    // ONE solver for the whole pass: every ensures atom and every
+    // return binding resolves once, so the vertex space is shared and
+    // the per-site zones (and their join) are over the same indices.
+    let mut sv = SiteSolver::new(
+        Some((entry.clone(), entry_vmap)),
+        &ctx.facts,
+        &ctx.int_params,
+        &ctx.list_params,
+        true,
+    );
+    // resolve the ensures atoms (vertices + axiom edges allocated)
+    let mut shapes = Vec::new();
+    for atom in &contract.ensures {
+        shapes.push(site_atom_shape(&mut sv, &atom.expr));
+    }
+    // resolve the return bindings
+    let ret_int = f
+        .ret
+        .as_ref()
+        .map(|t| {
+            matches!(
+                resolve_type_ast(t, db),
+                Type::Int | Type::I8 | Type::I16 | Type::I32 | Type::U8 | Type::U16 | Type::U32
+                    | Type::U64
+            )
+        })
+        .unwrap_or(false);
+    let mut sites: Vec<NormForm> = Vec::new();
+    for ret in &ctx.returns {
+        sites.push(sv.resolve(ret));
+    }
+    if ctx.has_fallthrough && ret_int {
+        // the IR's default exit binds result := 0 — the zone models
+        // the path the lowered assertion actually guards
+        sites.push(NormForm::konst(0));
+    }
+    let ridx = sv.vert("result");
+    // The base zone: the context projection (the entry zone's bounds
+    // restricted to this pass's vertices — the submatrix of a closed
+    // DBM is the closed projection) + the axiom edges. Unclosed; each
+    // site's zone is a clone plus that site's binding edges, closed,
+    // then joined.
+    let base = sv.finish();
+    let vmap = sv.vmap.clone();
+    let _ = &vmap;
+    // per-site zones: the base + the site's binding edges, closed,
+    // then the over-approximating join across sites (Miné Thm 4.2).
+    let mut joined: Option<Dbm> = None;
+    for binding in &sites {
+        let mut z = base.clone();
+        match binding.terms.first() {
+            Some((v, c)) if binding.terms.len() == 1 && *c == 1 && !binding.opaque => {
+                // result := v + k: two offset-equality edges
+                if let Some(&vi) = vmap.get(v) {
+                    let k = binding.konst;
+                    z.seed(ridx, vi, k);
+                    z.seed(vi, ridx, -k);
+                }
+            }
+            None if !binding.opaque => {
+                // result := the constant k
+                z.seed(ridx, 0, binding.konst);
+                z.seed(0, ridx, -binding.konst);
+            }
+            _ => {
+                // result := a term with no DBM-expressible binding
+                // (a coefficient-2 product, an opaque call, ...): the
+                // result vertex stays unbounded — the honest degrade
+            }
+        }
+        z = db.contract_zone_memo.close(z);
+        joined = Some(match joined {
+            Some(j) => j.join(&z),
+            None => z,
+        });
+    }
+    let Some(zone) = joined else { return };
+    // the per-atom verdict against the joined exit zone.
+    let mut degraded: Vec<ContractCheck> = Vec::new();
+    for (atom, shape) in contract.ensures.iter().zip(shapes.iter()) {
+        let v = contract_verdict(&zone, &sv, shape);
+        match v {
+            AtomVerdict::Discharged => {}
+            AtomVerdict::Refuted => {
+                diag.warn(
+                    atom.span,
+                    format!(
+                        "W-CONTRACT: ensures atom '{text}' of '{name}' is REFUTED at \
+                         the fn exit — the engine proved the negation from the \
+                         function's own facts; the runtime assertion will always \
+                         fail here. [W-CONTRACT]",
+                        text = atom.text,
+                        name = f.name
+                    ),
+                );
+                degraded.push(ContractCheck {
+                    expr: atom.expr.clone(),
+                    message: format!(
+                        "contract ensures '{text}' of '{name}' violated at the exit \
+                         of '{name}' (a typed runtime assertion — the compile-time \
+                         engine proved the negation) [E-0702]",
+                        text = atom.text,
+                        name = f.name
+                    ),
+                });
+            }
+            AtomVerdict::Degraded => {
+                diag.warn(
+                    atom.span,
+                    format!(
+                        "W-CONTRACT: ensures atom '{text}' of '{name}' was not \
+                         discharged at the fn exit ({tier}) — a typed runtime \
+                         assertion now sits at every return of '{name}'. [W-CONTRACT]",
+                        text = atom.text,
+                        name = f.name,
+                        tier = atom.tier.label()
+                    ),
+                );
+                degraded.push(ContractCheck {
+                    expr: atom.expr.clone(),
+                    message: format!(
+                        "contract ensures '{text}' of '{name}' violated at the exit \
+                         of '{name}' (a typed runtime assertion — the compile-time \
+                         engine could not discharge this atom) [E-0702]",
+                        text = atom.text,
+                        name = f.name
+                    ),
+                });
+            }
+        }
+    }
+    if !degraded.is_empty() {
+        db.contract_exit_checks.insert(f.name.clone(), degraded);
+    }
+}
+
+/// Resolve one atom into its site shape (phase A).
+fn site_atom_shape(sv: &mut SiteSolver, atom: &Expr) -> SiteAtom {
+    if let ExprKind::Bool(b) = &atom.kind {
+        return SiteAtom::Fold(Some(*b));
+    }
+    match cmp_shape_of(atom) {
+        Some((l, r, op)) => {
+            let lf = sv.resolve(&l);
+            let rf = sv.resolve(&r);
+            SiteAtom::Cmp { l: lf, r: rf, op }
+        }
+        None => SiteAtom::Fold(None),
+    }
+}
 // region's shared walkers and collect pre-passes (W2B §3/§4 — Thm WS
 // made executable). One ban list, one expression visitor, two
 // consumers (the wave-body E0812 gate and the fn-purity fixpoint) —
@@ -4433,6 +6224,23 @@ impl Checker<'_> {
                 }
             }
             Stmt::NestedFn(f) => {
+                // SWARM RABBIT HOLE — Wave 15 (Impl-T, Cohort Delta):
+                // Salt ε's slice-1 boundary — contract clauses on a
+                // nested function are rejected, never silently
+                // dropped (a nested fn is not in the fn table the
+                // discharge walk reads; honoring its clauses would
+                // need the per-nesting machinery — a later slice).
+                if !f.requires.is_empty() || !f.ensures.is_empty() {
+                    self.diag.error(
+                        f.span,
+                        format!(
+                            "contract clauses on a nested function are not supported \
+                             in slice 1: '{name}' — contracts live on top-level \
+                             functions",
+                            name = f.name
+                        ),
+                    );
+                }
                 let saved = self.current_fn_ret.clone();
                 let ty = Type::Fn {
                     params: f.params.iter().map(|p| resolve_type_ast(&p.ty, self.db)).collect(),
@@ -5614,6 +7422,15 @@ impl Checker<'_> {
         // builtins like `sha256`.
         if let Some(sig) = self.db.funcs.get(n).cloned() {
             self.check_arity(&sig, args, span);
+            // SWARM RABBIT HOLE — Wave 15 (Impl-T, Cohort Delta): Salt
+            // ε's call-site discharge walk — every requires atom of a
+            // contracted callee is discharged, refuted, or degraded
+            // HERE, per site (the caller's facts are the proof
+            // context; a contracted fn with no requires atoms costs
+            // nothing).
+            if self.db.fn_contracts.contains_key(n) {
+                self.contract_check_call_site(n, &sig, args, span);
+            }
             if sig.is_extern {
                 self.check_extern_args(&sig, args, span);
             }
@@ -6662,6 +8479,207 @@ impl Checker<'_> {
                 None
             }
             _ => None,
+        }
+    }
+
+    /// SWARM RABBIT HOLE — Wave 15 (Impl-T, Cohort Delta): Salt ε —
+    /// the CALL-SITE discharge walk (the boundary rule's caller
+    /// side). Per requires atom of the callee: substitute the
+    /// callee's params with the caller's argument terms, build the
+    /// site zone (the caller's projected entry zone — the call-chain
+    /// propagation — plus the local facts and the len/mod seeds),
+    /// close it through the memo (the fast path), and test.
+    ///   discharged  ⟹ silent (compile-time OK, nothing lowered);
+    ///   refuted     ⟹ the W-CONTRACT refutation warning + the
+    ///                 runtime assertion (it will always fail);
+    ///   degraded   ⟹ the W-CONTRACT degrade warning naming the tier
+    ///                 and where the assertion sits + the lowered
+    ///                 assertion at the call site (or the fn entry,
+    ///                 for atoms over defaulted-out params).
+    /// Never silently dropped — priced per atom.
+    fn contract_check_call_site(&mut self, callee: &str, sig: &FuncSig, args: &[Arg], span: Span) {
+        let Some(contract) = self.db.fn_contracts.get(callee).cloned() else { return };
+        if contract.requires.is_empty() {
+            return;
+        }
+        // the caller context (None outside a known fn — module-level
+        // statements, methods, generic bodies: no facts, so every
+        // atom degrades — sound).
+        let ctx = self
+            .current_fn_key
+            .as_ref()
+            .and_then(|k| self.db.fn_contract_ctx.get(k).cloned());
+        let (context, facts, int_params, list_params) = match ctx {
+            Some(c) => (
+                c.entry_zone.map(|z| (z, c.vertices.clone())),
+                c.facts.clone(),
+                c.int_params.clone(),
+                c.list_params.clone(),
+            ),
+            None => (None, HashMap::new(), HashSet::new(), HashSet::new()),
+        };
+        // the substitution map: callee param → the caller's argument
+        // term (positional by index, the call_user_fn discipline;
+        // named args by name).
+        let mut subst: HashMap<String, Expr> = HashMap::new();
+        let mut bound: HashSet<String> = HashSet::new();
+        for (i, a) in args.iter().enumerate() {
+            let (pname, expr) = match a {
+                Arg::Pos(e) => match sig.params.get(i) {
+                    Some(p) => (p.0.clone(), e),
+                    None => continue,
+                },
+                Arg::Named { name, value } => (name.clone(), value),
+                Arg::Inout(e) => match sig.params.get(i) {
+                    Some(p) => (p.0.clone(), e),
+                    None => continue,
+                },
+            };
+            subst.insert(pname.clone(), expr.clone());
+            bound.insert(pname);
+        }
+        // defaulted-out params substitute with their default
+        // expression (an expr over the OTHER substituted params —
+        // resolvable); atoms over them degrade to the FN ENTRY (the
+        // call site cannot cheaply evaluate the default).
+        for (i, p) in sig.params.iter().enumerate() {
+            if !bound.contains(&p.0) {
+                if let Some(Some(d)) = sig.defaults.get(i) {
+                    subst.insert(p.0.clone(), d.clone());
+                }
+            }
+        }
+        let mut sv = SiteSolver::new(context, &facts, &int_params, &list_params, false);
+        let mut shapes = Vec::new();
+        let mut atoms_ordered = Vec::new();
+        for atom in &contract.requires {
+            let substituted = contract_subst(&atom.expr, &subst);
+            shapes.push(site_atom_shape(&mut sv, &substituted));
+            atoms_ordered.push(atom);
+        }
+        let mut zone = sv.finish();
+        // the signature-keyed zone memo (§7.3's memoized fast path,
+        // second layer): two call sites with identical fact
+        // signatures share one closure
+        zone = self.db.contract_zone_memo.close(zone);
+        let mut site_checks: Vec<ContractCheck> = Vec::new();
+        let mut entry_checks: Vec<ContractCheck> = Vec::new();
+        let caller_name = self
+            .current_fn_key
+            .clone()
+            .unwrap_or_else(|| "<module>".to_string());
+        for (atom, shape) in atoms_ordered.iter().zip(shapes.iter()) {
+            // Tier N atoms never discharge (the stamp governs — A4
+            // §4: the classification is part of the obligation
+            // record); the refutation/conjoin test is a zone query
+            // the Tier N shape cannot answer either. An atom over a
+            // defaulted-out parameter degrades to the FN ENTRY (the
+            // call site has no value for it); the location text of
+            // both the warning and the runtime message follows the
+            // destination.
+            let over_defaulted = atom_refs_unbound_param(&atom.expr, &bound);
+            let (at_text, in_text) = if over_defaulted {
+                (
+                    "the fn entry (the atom references a defaulted parameter)",
+                    format!("at the entry of '{callee}'"),
+                )
+            } else {
+                ("the call site", format!("at the call in '{caller_name}'"))
+            };
+            let verdict = contract_verdict(&zone, &sv, shape);
+            match verdict {
+                AtomVerdict::Discharged => {}
+                AtomVerdict::Refuted => {
+                    self.diag.warn(
+                        span,
+                        format!(
+                            "W-CONTRACT: requires atom '{text}' of '{callee}' is \
+                             REFUTED at the call in '{caller}' — the engine proved \
+                             the negation from the caller's facts; the runtime \
+                             assertion will always fail here. [W-CONTRACT]",
+                            text = atom.text,
+                            caller = caller_name
+                        ),
+                    );
+                    let ck = ContractCheck {
+                        expr: atom.expr.clone(),
+                        message: format!(
+                            "contract requires '{text}' of '{callee}' violated \
+                             {in_text} (a typed runtime assertion — the \
+                             compile-time engine proved the negation) [E-0702]",
+                            text = atom.text,
+                        ),
+                    };
+                    if over_defaulted {
+                        entry_checks.push(ck);
+                    } else {
+                        site_checks.push(ck);
+                    }
+                }
+                AtomVerdict::Degraded => {
+                    let nonlinear = matches!(atom.tier, ContractTier::Nonlinear(_));
+                    self.diag.warn(
+                        span,
+                        format!(
+                            "W-CONTRACT: requires atom '{text}' of '{callee}' was \
+                             not discharged at the call in '{caller}' ({tier}) — a \
+                             typed runtime assertion now sits at {at_text}{tail} \
+                             [W-CONTRACT]",
+                            text = atom.text,
+                            caller = caller_name,
+                            tier = atom.tier.label(),
+                            tail = if nonlinear {
+                                ".".to_string()
+                            } else {
+                                "; the facts table + DBM zones are sound, not \
+                                 complete."
+                                    .to_string()
+                            }
+                        ),
+                    );
+                    let detail = if nonlinear {
+                        let kind = match atom.tier {
+                            ContractTier::Nonlinear(NonlinearKind::Product) => {
+                                "the atom is Tier N: nonlinear product, never dischargeable"
+                            }
+                            ContractTier::Nonlinear(NonlinearKind::QuotientByVariable) => {
+                                "the atom is Tier N: quotient by a variable, never dischargeable"
+                            }
+                            _ => unreachable!("the nonlinear label is set"),
+                        };
+                        kind.to_string()
+                    } else {
+                        "the compile-time engine could not discharge this atom".to_string()
+                    };
+                    let ck = ContractCheck {
+                        expr: atom.expr.clone(),
+                        message: format!(
+                            "contract requires '{text}' of '{callee}' violated \
+                             {in_text} (a typed runtime assertion — {detail}) \
+                             [E-0702]",
+                            text = atom.text,
+                        ),
+                    };
+                    if over_defaulted {
+                        entry_checks.push(ck);
+                    } else {
+                        site_checks.push(ck);
+                    }
+                }
+            }
+        }
+        if !site_checks.is_empty() {
+            self.db
+                .contract_site_checks
+                .insert((span.file, span.start, span.end), site_checks);
+        }
+        if !entry_checks.is_empty() {
+            let list = self.db.contract_entry_checks.entry(callee.to_string()).or_default();
+            for ck in entry_checks {
+                if !list.iter().any(|c| c.message == ck.message) {
+                    list.push(ck);
+                }
+            }
         }
     }
 

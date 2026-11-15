@@ -188,6 +188,17 @@ struct Cx<'a> {
     /// waves are E0812), and the stack shape keeps the lowering
     /// honest if that ever relaxes.
     wave_stack: Vec<String>,
+    /// SWARM RABBIT HOLE — Wave 15 (Impl-T, Cohort Delta): Salt ε —
+    /// this function's degraded contract atoms, cloned from the
+    /// checker's tables at lower_fn entry. The DBM engine itself is
+    /// compile-time only; the runtime sees JUST these typed
+    /// assertions (the boundary rule's degradation, lowered through
+    /// the fail-fast convention — sn_contract_assert: fprintf +
+    /// exit(1), the E-LKIND/E-SFC pattern).
+    contract_entry: Vec<crate::check::ContractCheck>,
+    /// The degraded ensures atoms — checked at every return (and the
+    /// fall-through exit, result bound to the returned value).
+    contract_exit: Vec<crate::check::ContractCheck>,
 }
 
 /// Coverage instrumentation state for the current lowering pass.
@@ -564,6 +575,33 @@ fn ffi_ret_ty(t: &Type) -> String {
     }
 }
 
+/// SWARM RABBIT HOLE — Wave 15 (Impl-T, Cohort Delta): does the
+/// degraded atom reference `result`? (Gates the result-binding slot.)
+fn expr_refs_result(e: &Expr) -> bool {
+    expr_refs_name(e, "result")
+}
+
+/// Wave 15 (Impl-T): does the atom reference the named binding
+/// (directly, or as the receiver of a .length() term)?
+fn expr_refs_name(e: &Expr, name: &str) -> bool {
+    match &e.kind {
+        ExprKind::Ident(n) => n == name,
+        ExprKind::Binary { lhs, rhs, .. } => {
+            expr_refs_name(lhs, name) || expr_refs_name(rhs, name)
+        }
+        ExprKind::Unary { expr, .. } => expr_refs_name(expr, name),
+        ExprKind::Call { callee, args, .. } => {
+            expr_refs_name(callee, name)
+                || args.iter().any(|a| match a {
+                    Arg::Pos(x) | Arg::Inout(x) => expr_refs_name(x, name),
+                    Arg::Named { value, .. } => expr_refs_name(value, name),
+                })
+        }
+        ExprKind::Member { base, .. } => expr_refs_name(base, name),
+        _ => false,
+    }
+}
+
 fn lower_fn(
     f: &FnItem,
     db: &CheckDb,
@@ -589,6 +627,9 @@ fn lower_fn(
         None => f.name.clone(),
     };
     let sub_id = dbg.sub(&scope_name, f.span.file, decl_line, &llvm_name);
+    // SWARM RABBIT HOLE — Wave 15 (Impl-T): the summary key the
+    // contract tables index (the pinned-lane feed's precedent).
+    let fn_key = crate::check::fn_summary_key(bp.as_deref(), &f.name);
     let mut cx = Cx {
         db,
         buf: String::new(),
@@ -604,7 +645,7 @@ fn lower_fn(
         current_bp: bp.clone(),
         // Wave 8 (Impl-I): the pinned-lane feed indexes
         // db.lane_assignment by the checker's summary key.
-        fn_key: crate::check::fn_summary_key(bp.as_deref(), &f.name),
+        fn_key: fn_key.clone(),
         files,
         cur_loc: None,
         cur_sub: sub_id,
@@ -618,6 +659,19 @@ fn lower_fn(
         active_regions: Vec::new(),
         frozen_depth: 0,
         wave_stack: Vec::new(),
+        // SWARM RABBIT HOLE — Wave 15 (Impl-T, Cohort Delta): Salt
+        // ε — this function's degraded contract atoms, cloned from
+        // the checker's tables (keyed by the summary key — the
+        // lane_assignment precedent). The entry checks are the
+        // degraded requires atoms over defaulted-out params; the
+        // exit checks are the degraded ensures atoms. The DBM engine
+        // is compile-time only — the runtime sees just these.
+        contract_entry: db
+            .contract_entry_checks
+            .get(&fn_key)
+            .cloned()
+            .unwrap_or_default(),
+        contract_exit: db.contract_exit_checks.get(&fn_key).cloned().unwrap_or_default(),
     };
     let mut params_ll = Vec::new();
     if bp.is_some() && !f.is_static {
@@ -651,6 +705,24 @@ fn lower_fn(
             cx.line(&format!("store {} %p_{}, ptr {an}", llty(&t), p.name));
         }
         cx.locals.insert(p.name.clone(), (an, t));
+    }
+    // SWARM RABBIT HOLE — Wave 15 (Impl-T, Cohort Delta): Salt ε —
+    // the FN-ENTRY degraded requires assertions (the boundary rule's
+    // other site: atoms over defaulted-out params, whose values exist
+    // only in the callee's prologue). The params are all bound here,
+    // defaults resolved by the call. And the result binding slot for
+    // the exit checks, when a degraded ensures atom references
+    // 'result' (the validator guarantees the fn returns an int
+    // there).
+    if !cx.contract_entry.is_empty() {
+        for ck in cx.contract_entry.clone() {
+            let (v, _) = cx.expr(&ck.expr);
+            cx.contract_assert(&v, &ck.message);
+        }
+    }
+    if !cx.contract_exit.is_empty() && cx.contract_exit.iter().any(|ck| expr_refs_result(&ck.expr)) {
+        let rt = cx.current_fn_ret.clone();
+        cx.emit_alloca(&format!("%v_contract_result = alloca {}", llty(&rt)));
     }
     // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): main's entry is
     // where module-level GLOBAL POOLS are constructed. Module-level
@@ -716,6 +788,15 @@ fn lower_fn(
         cx.stmt(s);
     }
     cx.exit_active_scopes();
+    // SWARM RABBIT HOLE — Wave 15 (Impl-T): the FALL-THROUGH exit's
+    // degraded-ensures assertions — result bound to the default
+    // value the implicit exit returns (0 for int fns; a void fn's
+    // degraded atoms reference params only). Dead when the body
+    // always returns (line() drops after a terminator); live exactly
+    // where the IR's default ret is.
+    if !cx.contract_exit.is_empty() && !cx.terminated {
+        cx.contract_exit_check(None);
+    }
     if matches!(ret_ty, Type::Void) {
         cx.line("ret void");
     } else if ret_ty.is_ptr() || matches!(ret_ty, Type::Optional(_)) {
@@ -1523,6 +1604,16 @@ impl Cx<'_> {
             Stmt::Return { value, .. } => {
                 if let Some(v) = value {
                     let (r, t) = self.expr(v);
+                    // SWARM RABBIT HOLE — Wave 15 (Impl-T): the fn-exit
+                    // degraded-ensures assertions — evaluated at the
+                    // return point, result bound to the (coerced)
+                    // return value, BEFORE the deferred statements
+                    // run (the ensures holds of the returned state).
+                    if !self.contract_exit.is_empty() {
+                        let rt = self.current_fn_ret.clone();
+                        let (rc, _) = self.coerce(r.clone(), &t, &rt);
+                        self.contract_exit_check(Some((rc, rt)));
+                    }
                     self.exit_active_scopes();
                     if let Type::Tuple(ts) = t {
                         let mut final_r = r;
@@ -1553,6 +1644,13 @@ impl Cx<'_> {
                         self.line(&format!("ret {} {r}", llty(&ret_ty)));
                     }
                 } else {
+                    // SWARM RABBIT HOLE — Wave 15 (Impl-T): a bare
+                    // return in a void fn — the degraded ensures
+                    // atoms reference params only (the validator
+                    // rejects 'result' without an int return).
+                    if !self.contract_exit.is_empty() {
+                        self.contract_exit_check(None);
+                    }
                     self.exit_active_scopes();
                     self.line("ret void");
                 }
@@ -2041,6 +2139,11 @@ impl Cx<'_> {
                 active_regions: Vec::new(),
                 frozen_depth: 0,
                 wave_stack: Vec::new(),
+                // Wave 15 (Impl-T): synthetic child context — no
+                // fn-level contract lowering (a closure/spawn body is
+                // not the contracted function).
+                contract_entry: Vec::new(),
+                contract_exit: Vec::new(),
             };
             for (i, (n, t)) in cap_tys.iter().enumerate() {
                 let slot = child.t();
@@ -2951,6 +3054,20 @@ impl Cx<'_> {
                 return self.ffi_call(&sig, &vs);
             }
             let vs = self.eval_args_for_sig(Some(&sig), args);
+            // SWARM RABBIT HOLE — Wave 15 (Impl-T, Cohort Delta):
+            // Salt ε — this call site's degraded requires atoms
+            // (span-keyed, exactly the resolved_calls precedent). The
+            // arguments are already evaluated once; the assertions
+            // bind the callee's params to those values — the
+            // argument expressions are never re-evaluated.
+            if let Some(checks) = self
+                .db
+                .contract_site_checks
+                .get(&(span.file, span.start, span.end))
+                .cloned()
+            {
+                self.contract_site_asserts(&sig, &vs, &checks);
+            }
             return self.call_user_fn(&sig, &vs);
         }
         let vs = self.eval_args_for_sig(None, args);
@@ -5776,6 +5893,122 @@ impl Cx<'_> {
         self.line(&format!("call void @sn_panic(ptr {t})"));
     }
 
+    // -----------------------------------------------------------------
+    // SWARM RABBIT HOLE — Wave 15 (Impl-T, Cohort Delta): Salt ε —
+    // the degraded contract assertions' lowering. The engine is
+    // compile-time; these are the ONLY contract artifacts the runtime
+    // ever sees (the boundary rule's typed runtime assertions, each
+    // carrying its atom text and classification, lowered through the
+    // fail-fast convention: sn_contract_assert = fprintf + exit(1),
+    // the E-LKIND/E-SFC pattern — never a silent drop).
+    // -----------------------------------------------------------------
+
+    /// One assertion: the condition value (an i64 bool per the
+    /// comparison lowering) + the interned fail-fast message (the
+    /// raw @.str global is already NUL-terminated — no SN string
+    /// needed for a fprintf).
+    fn contract_assert(&mut self, cond_val: &str, msg: &str) {
+        let (id, _n) = self.intern(msg);
+        self.line(&format!(
+            "call void @sn_contract_assert(i64 {cond_val}, ptr @.str.{id})"
+        ));
+    }
+
+    /// The fn-exit check: bind `result` (when the fn returns a value
+    /// and some degraded atom references it), evaluate each degraded
+    /// ensures atom, assert. Called at every return and at the
+    /// fall-through exit.
+    fn contract_exit_check(&mut self, ret_value: Option<(String, Type)>) {
+        let checks = self.contract_exit.clone();
+        if checks.is_empty() {
+            return;
+        }
+        let mut saved_result: Option<Option<(String, Type)>> = None;
+        if checks.iter().any(|ck| expr_refs_result(&ck.expr)) {
+            let rt = self.current_fn_ret.clone();
+            match ret_value {
+                Some((v, t)) => {
+                    let (vc, _) = self.coerce(v, &t, &rt);
+                    self.line(&format!(
+                        "store {} {vc}, ptr %v_contract_result",
+                        llty(&rt)
+                    ));
+                }
+                None => {
+                    // the fall-through default (int fns: 0)
+                    self.line(&format!(
+                        "store {} 0, ptr %v_contract_result",
+                        llty(&rt)
+                    ));
+                }
+            }
+            saved_result = Some(
+                self.locals
+                    .insert("result".into(), ("%v_contract_result".into(), rt)),
+            );
+        }
+        for ck in checks {
+            let (v, _) = self.expr(&ck.expr);
+            self.contract_assert(&v, &ck.message);
+        }
+        if let Some(old) = saved_result {
+            match old {
+                Some((a, t)) => {
+                    self.locals.insert("result".into(), (a, t));
+                }
+                None => {
+                    self.locals.remove("result");
+                }
+            }
+        }
+    }
+
+    /// The call-site check: bind each atom-referenced callee param to
+    /// its ALREADY-EVALUATED argument value (one alloca per param —
+    /// the argument expression is never re-evaluated), evaluate each
+    /// degraded requires atom, assert, restore the caller's bindings.
+    fn contract_site_asserts(
+        &mut self,
+        sig: &FuncSig,
+        vs: &[(String, Type)],
+        checks: &[crate::check::ContractCheck],
+    ) {
+        if checks.is_empty() {
+            return;
+        }
+        let mut saved: Vec<(String, Option<(String, Type)>)> = Vec::new();
+        for (i, p) in sig.params.iter().enumerate() {
+            if !checks.iter().any(|ck| expr_refs_name(&ck.expr, &p.0)) {
+                continue;
+            }
+            let Some((v, t)) = vs.get(i) else { continue };
+            // the alloca name carries the temp counter: two call
+            // sites binding the same param name in one function must
+            // not collide (each site's alloca is its own slot).
+            self.tmp += 1;
+            let uniq = self.tmp;
+            let an = format!("%v_contract_p_{}_{uniq}", p.0);
+            self.emit_alloca(&format!("{an} = alloca {}", llty(&p.1)));
+            let (vc, _) = self.coerce(v.clone(), t, &p.1);
+            self.line(&format!("store {} {vc}, ptr {an}", llty(&p.1)));
+            saved.push((p.0.clone(), self.locals.insert(p.0.clone(), (an, p.1.clone()))));
+        }
+        for ck in checks {
+            let (v, _) = self.expr(&ck.expr);
+            self.contract_assert(&v, &ck.message);
+        }
+        for (name, old) in saved {
+            match old {
+                Some((a, t)) => {
+                    self.locals.insert(name, (a, t));
+                }
+                None => {
+                    self.locals.remove(&name);
+                }
+            }
+        }
+    }
+
     fn expr_unwrap(&mut self, inner: &Expr) -> (String, Type) {
         let (v, t) = self.expr(inner);
         let inner_ty = t.unwrap_optional().cloned().unwrap_or(t.clone());
@@ -6065,6 +6298,11 @@ impl Cx<'_> {
                 active_regions: Vec::new(),
                 frozen_depth: 0,
                 wave_stack: Vec::new(),
+                // Wave 15 (Impl-T): synthetic child context — no
+                // fn-level contract lowering (a closure/spawn body is
+                // not the contracted function).
+                contract_entry: Vec::new(),
+                contract_exit: Vec::new(),
             };
             let mut pll = vec!["ptr %env".to_string()];
             for p in params {
@@ -6178,6 +6416,12 @@ fn lower_ext_fn(
         active_regions: Vec::new(),
         frozen_depth: 0,
         wave_stack: Vec::new(),
+        // Wave 15 (Impl-T): the contract lowering tables — filled
+        // per function in lower_fn (and empty for the synthetic
+        // child contexts; the call-site checks ride ident_call via
+        // db.contract_site_checks on whichever context lowers them).
+        contract_entry: Vec::new(),
+        contract_exit: Vec::new(),
     };
     let mut params_ll = vec!["ptr %p_self".to_string()];
     for p in &f.params {

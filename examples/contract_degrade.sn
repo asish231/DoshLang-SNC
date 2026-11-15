@@ -1,0 +1,44 @@
+// SWARM RABBIT HOLE — Wave 15 (Impl-T, Cohort Delta): Salt ε — the
+// DEGRADE tier (the boundary rule's honest degradation, priced per
+// atom; A4 §4's rule 2 / the final report §7.3's boundary rule).
+//
+// An atom the engine cannot prove but that is Tier L/D degrades to a
+// TYPED RUNTIME ASSERTION at the boundary — never silently dropped —
+// and the compile-time W-CONTRACT warning names what was not
+// discharged and where the assertion now sits. This program runs
+// VALID inputs, so the runtime assertions pass silently; the fail
+// twin is contract_degrade_fail.sn.
+//
+//   get(xs, i) with i = time_now_ms() % 3:
+//     atom 'i < xs.length()' — DISCHARGED: the facts table records
+//       i's mod-term (the range axiom: i ∈ [−2, 2]) and xs's literal
+//       length (3); the DBM closure derives i − len ≤ 2 − 3 = −1.
+//     atom '0 <= i' — DEGRADED (tier L): the axiom gives i ≥ −2, not
+//       i ≥ 0 — sound but not complete, priced per atom.
+//   rmod(7, 4):
+//     atom '0 <= x % m' — DEGRADED (tier D: the divisibility ledge):
+//       the range axiom was applied (m = 4 known, r ∈ [−3, 3]) but
+//       0 ≤ r does not follow — the EPAD solver tier is a later rung.
+
+fn get(list<int> xs, int i) -> int requires(0 <= i < xs.length()) {
+    return xs[i]
+}
+
+// Tier D in the flesh: the mod-by-variable atom under the remainder
+// range axiom — the two DBM edges are injected, the divisibility
+// question is NOT solved (that is the EPAD/Lipshitz rung, named, not
+// claimed).
+fn rmod(int x, int m) -> int requires(0 <= x % m) {
+    return x % m
+}
+
+fn main() {
+    list<int> xs = [10, 20, 30]
+    int i = time_now_ms() % 3
+    get(xs, i)
+    // x is a runtime value: the range axiom applies (m = 4 known, so
+    // r ∈ [−3, 3]) but 0 ≤ r does not follow — the honest tier-D
+    // degrade (a literal x would fold the atom and discharge).
+    rmod(time_now_ms(), 4)
+    print("ok")
+}

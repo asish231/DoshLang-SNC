@@ -856,10 +856,66 @@ else
     FAILURES=$((FAILURES + 1))
 fi
 
+# 23. Salt ε — the numeric contract layer's engine mechanics (SWARM
+#     RABBIT HOLE, Wave 15, Impl-T, Cohort Delta; A4's Presburger
+#     decidable ladder + the final report §7.3's boundary rule). THE
+#     HONEST TWIN DISCIPLINE: the DBM engine lives in the checker
+#     (compile-time only — the runtime never sees a zone); this C
+#     twin is line-matched to compiler/src/dbm.rs and proves the
+#     ALGORITHM's mathematical properties (the closure vs the
+#     brute-force relax-to-fixpoint reference over randomized zones,
+#     emptiness == a negative diagonal, ∩ exact by enumeration, the
+#     join over-approximates both operands — sound, NOT exact; zones
+#     are convex), the facts-table hit/miss, and the fork-probed
+#     [E-0702] degrade fail-fast (the actual helper the degraded
+#     atoms lower to). The Rust engine's agreement lives in the
+#     dbm::tests unit tests; the real engine's decisions are pinned
+#     by the golden suite (contract_*.sn). Built twice: plain (23),
+#     then ASan (23b).
+echo ""
+echo "-----------------------------------------------------------------"
+echo "23. SALT EPSILON CONTRACT ENGINE, MECHANICS (test_contract.c)"
+echo "-----------------------------------------------------------------"
+OUT_CONTRACT="/tmp/snc_test_contract_c"
+rm -f "$OUT_CONTRACT"
+if clang -O1 -g -o "$OUT_CONTRACT" "$DIR/test_contract.c" "$ROOT/compiler/runtime.c" -lpthread 2>/dev/null; then
+    OUTPUT=$("$OUT_CONTRACT")
+    echo "$OUTPUT"
+    if echo "$OUTPUT" | grep -q "PASS:"; then
+        echo ">>> test_contract(.c): PASSED"
+    else
+        echo ">>> test_contract(.c): FAILED"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> test_contract(.c): BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+echo ""
+echo "-----------------------------------------------------------------"
+echo "23b. SALT EPSILON CONTRACT ENGINE, ASAN STRESS (test_contract.c)"
+echo "-----------------------------------------------------------------"
+OUT_CONTRACT_ASAN="/tmp/snc_test_contract_c_asan"
+rm -f "$OUT_CONTRACT_ASAN"
+if clang -O1 -g -fsanitize=address -o "$OUT_CONTRACT_ASAN" "$DIR/test_contract.c" "$ROOT/compiler/runtime.c" -lpthread 2>/dev/null; then
+    OUTPUT=$(ASAN_OPTIONS=detect_leaks=0 "$OUT_CONTRACT_ASAN" 2>&1)
+    echo "$OUTPUT"
+    if echo "$OUTPUT" | grep -q "PASS:"; then
+        echo ">>> test_contract(.c ASan): PASSED (no ASan reports over the closure loops / the enumeration boxes / the fork'd probes)"
+    else
+        echo ">>> test_contract(.c ASan): FAILED"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> test_contract(.c ASan): BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
 echo ""
 echo "================================================================="
 if [ $FAILURES -eq 0 ]; then
-    echo "  ALL SYSTEMS & SECURITY TESTS PASSED (35 checks)"
+    echo "  ALL SYSTEMS & SECURITY TESTS PASSED (37 checks)"
     exit 0
 else
     echo "  $FAILURES SYSTEMS TESTS FAILED"

@@ -1,0 +1,79 @@
+// SWARM RABBIT HOLE — Wave 15 (Impl-T, Cohort Delta): Salt ε — the
+// numeric contract layer's compile-time DISCHARGE cases (A4 §4's
+// decidable ladder; the final report §7.3's Presburger-first
+// architecture, slice 1: the facts table + the DBM zone layer).
+//
+// Every requires atom at every call here, and every ensures atom at
+// every fn exit, is DISCHARGED at compile time: no runtime assertion
+// is emitted anywhere in this file and the compile is warning-free —
+// the point of the discharge tier (an atom the engine proves is
+// compile-time OK; nothing is checked at run time).
+//
+//   get(xs, 0) / get(xs, 2)      — the loop-index-vs-len classic: the
+//                                  literal caller against the
+//                                  list-literal length fact (len=3):
+//                                  0 <= i and i <= 2 < 3 both follow
+//                                  from the caller's facts table.
+//   sum_upto(xs, 2)              — the call-chain propagation: the
+//                                  caller's own requires atoms become
+//                                  the entry zone the inner call's
+//                                  atoms are discharged against (the
+//                                  facts propagated from call chains).
+//   clamp(50)                    — the ensures discharge: result := x
+//                                  (the return-value binding) against
+//                                  the entry zone x ∈ [0, 100].
+//   rem(7, 4)                    — the mod range axiom (A4 §2's
+//                                  remainder-range rule): result
+//                                  binds x % m; m > 0 gives the two
+//                                  DBM edges 0−result ≤ m−1 and
+//                                  result−m ≤ −1 — a RANGE FACT
+//                                  against the runtime's truncating
+//                                  %, never a divisibility solve.
+//   mod_lit(13)                  — the mod-by-literal atom folds to
+//                                  a constant (13 % 4 < 4 is 1 < 4).
+
+fn get(list<int> xs, int i) -> int requires(0 <= i < xs.length()) {
+    return xs[i]
+}
+
+// The call-chain propagation: sum_upto's own requires
+// (0 <= n < xs.length()) builds its entry zone; the inner get(xs, n)
+// call's atoms discharge against it.
+fn sum_upto(list<int> xs, int n) -> int requires(0 <= n < xs.length()) {
+    return get(xs, n) + get(xs, 0)
+}
+
+// The ensures discharge over the return-value binding: `return x`
+// binds result := x; the entry zone (from the requires atoms
+// 0 <= x and x <= 100) carries x ∈ [0, 100] to the exit zone, and
+// both ensures atoms (0 <= result, result <= 100) read off it.
+fn clamp(int x) -> int requires(0 <= x <= 100) ensures(0 <= result <= 100) {
+    return x
+}
+
+// The mod range axiom, Tier D (the divisibility ledge): r = x % m,
+// m > 0 ⟹ −(m−1) <= r <= m−1 against the runtime's truncating % —
+// the two DBM edges are d[0][r] ≤ m−1 and d[r][m] ≤ −1 (r < m against
+// the modulus VERTEX); given m's interval (m >= 1 from the requires)
+// the ensures atom result < m is a range fact, never a divisibility
+// solve (Strata's rule; the EPAD solver tier is a later rung).
+fn rem(int x, int m) -> int requires(m > 0) ensures(result < m) {
+    return x % m
+}
+
+// The mod-by-literal atom: x % 4 < 4 with x = 13 folds to 1 < 4 —
+// mod/div by literals are Tier L (Presburger-decidable; A4 §1's
+// ladder) and constant operands discharge by folding.
+fn mod_lit(int x) -> int requires(x % 4 < 4) {
+    return x % 4
+}
+
+fn main() {
+    list<int> xs = [10, 20, 30]
+    print(get(xs, 0))
+    print(get(xs, 2))
+    print(sum_upto(xs, 2))
+    print(clamp(50))
+    print(rem(7, 4))
+    print(mod_lit(13))
+}

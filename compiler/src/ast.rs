@@ -44,6 +44,23 @@ pub struct FnItem {
     pub type_params: Vec<TypeParam>,
     pub params: Vec<Param>,
     pub ret: Option<TypeAst>,
+    /// SWARM RABBIT HOLE — Wave 15 (Impl-T, Cohort Delta): Salt ε —
+    /// the numeric contract layer's requires clauses (A4 §4's
+    /// ladder; the final report §7.3's boundary rule). Each clause is
+    /// an int-valued boolean expression over the parameters; multiple
+    /// clauses are allowed and conjoin. Comparison chains
+    /// (`0 <= i < xs.length()`) are desugared at parse time into
+    /// `and` conjunctions (the left-associative parse of a chain is
+    /// the standard mathematical reading inside a clause —
+    /// `(0 <= i) < len` would compare a bool against an int). The
+    /// requires condition is checked at every call site: the caller
+    /// proves it or the call degrades.
+    pub requires: Vec<Expr>,
+    /// The ensures clauses — the function's own proof obligation over
+    /// its parameters and `result` (the contextual return-value
+    /// name); discharged at the fn exit or degraded to a typed
+    /// runtime assertion at every return.
+    pub ensures: Vec<Expr>,
     pub body: Vec<Stmt>,
     pub span: Span,
 }

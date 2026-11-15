@@ -1,0 +1,344 @@
+// SWARM RABBIT HOLE — Wave 15 (Impl-T, Cohort Delta): Salt ε — the
+// numeric contract layer's price rows, in-language (A4's ladder +
+// the final report §7.3; the honest numbers live in
+// bench/RESULTS_CONTRACT.md).
+//
+// THE HONEST COMPARISONS (the .sn twin discipline — the same caveat
+// as the pinned-lane C twin: these rows price the ALGORITHM's SHAPE
+// in-language, on the runtime's list/map primitives; the compile-time
+// engine is the same algorithm in Rust, and its cost rides snc's own
+// build):
+//   (a) closure25 / closure50 / closure100 — the Floyd–Warshall
+//       all-pairs closure at V = 25/50/100 (the O(V³) pipeline floor;
+//       §7.3: "closure is the floor, not the budget" — the per-cell
+//       ns should stay ~flat while the total grows 64× from V=25 to
+//       V=100).
+//   (b) memo_hit vs reclub — the memoized facts-table hit (one map
+//       probe of the already-closed zone, the signature keyed) vs the
+//       full re-closure of the same zone per query (§7.3's "DBM/zone
+//       closure as a memoized fast path" — the payoff row).
+//   (c) atom_test vs reclub — the per-atom discharge test (one
+//       resolved-edge lookup against the closed zone) vs the naive
+//       re-check-everything baseline (a full re-closure per atom).
+//   (d) degrade_call vs discharged_call — the REAL emitted-code price
+//       of the boundary rule: the same fn called with an opaque index
+//       (the engine could not discharge '0 <= i' — one typed runtime
+//       assertion fires per call, the second atom IS discharged by the
+//       remainder-range axiom) vs the literal-index call (both atoms
+//       fold — nothing lowered, zero contract overhead). The delta is
+//       the honest price of the degradation.
+//
+// Shape (the W2F discipline, verbatim): SNlang's only clock is the
+// ms-resolution time_now_ms, so every timed op phase totals >= 100x
+// that (the per-row multipliers below are sized to clear 100 ms at
+// the default base of 5); the driver (bench/run_bench.sh,
+// CONTRACT_ONLY=1) runs one warmup at base/10 then RUNS timed runs
+// and takes the median; every row prints its own deterministic
+// checksum, and the cross-row checksum sets must agree (the
+// memo/reclub/atom rows all fold the SAME closed zone).
+
+use std.os
+
+fn report(str row, int ns_per_op, int phase_ms, int ops, int ck) {
+    print("BENCH row=" + row + " ns_per_op=" + cast(ns_per_op, str)
+        + " phase_ms=" + cast(phase_ms, str)
+        + " ops=" + cast(ops, str)
+        + " checksum=" + cast(ck, str))
+}
+
+// The INF sentinel (1<<50): two of them cannot overflow an i64 when
+// added inside the closure (the compiler's own engine uses the same
+// discipline — INF legs are skipped, and the sums stay in range).
+fn inf() -> int { return 1125899906842624 }
+
+// One seeded zone build: the LCG edges (deterministic — the checksum
+// is identical across runs and machines).
+fn seed_zone(list<int> d, int n, int round) -> int {
+    int st = 12345 + round * 7919
+    int k = 0
+    while (k < n * n) {
+        d[k] = inf()
+        k = k + 1
+    }
+    k = 0
+    while (k < n) {
+        d[k * n + k] = 0
+        k = k + 1
+    }
+    int edges = n * n / 8 + n
+    k = 0
+    while (k < edges) {
+        st = (st * 1103515245 + 12345) % 2147483648
+        int i = st % n
+        st = (st * 1103515245 + 12345) % 2147483648
+        int j = st % n
+        st = (st * 1103515245 + 12345) % 2147483648
+        int c = st % 41 - 20
+        if (i != j) {
+            int cell = i * n + j
+            if (c < d[cell]) {
+                d[cell] = c
+            }
+        }
+        k = k + 1
+    }
+    return st
+}
+
+// The Floyd–Warshall closure (Floyd CACM 1962; Dill CAV'89) — the
+// twin of compiler/src/dbm.rs's close(): INF detour legs are skipped
+// (only finite legs carry). Returns the finite-cell fold (the
+// deterministic checksum).
+fn close_zone(list<int> d, int n) -> int {
+    int k = 0
+    while (k < n) {
+        int i = 0
+        while (i < n) {
+            int dik = d[i * n + k]
+            if (dik < inf()) {
+                int j = 0
+                while (j < n) {
+                    int dkj = d[k * n + j]
+                    if (dkj < inf()) {
+                        int via = dik + dkj
+                        int cell = i * n + j
+                        if (via < d[cell]) {
+                            d[cell] = via
+                        }
+                    }
+                    j = j + 1
+                }
+            }
+            i = i + 1
+        }
+        k = k + 1
+    }
+    return fold_zone(d, n)
+}
+
+fn fold_zone(list<int> d, int n) -> int {
+    int ck = 0
+    int k = 0
+    while (k < n * n) {
+        if (d[k] < inf()) {
+            ck = (ck + d[k]) * 31 % 2305843009213693951
+        }
+        k = k + 1
+    }
+    return ck
+}
+
+// The signature fold (the memo key — deterministic over the seeded
+// edges).
+fn zone_sig(list<int> d, int n) -> int {
+    int sig = 0
+    int k = 0
+    while (k < n * n) {
+        if (d[k] < inf()) {
+            sig = (sig + d[k]) * 17 % 2305843009213693951
+        }
+        k = k + 1
+    }
+    return sig
+}
+
+// The contracted fn for the (d) rows: two requires atoms. The
+// literal-index call folds both (discharged, nothing lowered); the
+// opaque-index call degrades exactly ONE atom ('0 <= i' — the mod
+// range axiom bounds the remainder in [-2, 2], which does not prove
+// non-negativity) while the second ('i < xs.length()') is discharged
+// by the axiom + the literal length (the per-atom pricing, live).
+fn get(list<int> xs, int i) -> int requires(0 <= i < xs.length()) {
+    return xs[i]
+}
+
+fn main() {
+    int base = 5
+    list<str> a = args()
+    if (a.length() > 1) {
+        int v = cast(a[1], int)
+        if (v > 0) {
+            base = v
+        }
+    }
+    if (base < 1) { base = 1 }
+    int rc25 = base * 1000      // closure rounds at V=25 (15,625 cells each)
+    int rc50 = base * 120       // closure rounds at V=50 (125,000 cells)
+    int rc100 = base * 15       // closure rounds at V=100 (1,000,000 cells)
+    int rmemo = base * 6000000  // memo-hit queries (the map probe)
+    int rreclub = base * 1000   // full re-closures (the naive baseline)
+    int ratom = base * 10000000 // per-atom discharge lookups
+    int rcall = base * 30       // contracted-call rounds (1M calls each)
+    gc_set_threshold(2000000000)
+
+    // ---- timer overhead: 100_000 time_now_ms() call pairs
+    int t0 = time_now_ms()
+    int kt = 0
+    int acct = 0
+    while (kt < 100000) {
+        acct = acct + time_now_ms()
+        kt = kt + 1
+    }
+    int t1 = time_now_ms()
+    report("timer", (t1 - t0) * 1000000 / 100000, t1 - t0, 100000, acct)
+
+    // ---- (a) the closure floor at V = 25 / 50 / 100
+    // Per round: seed a fresh zone, close it, fold the checksum. The
+    // per-cell ns/op must stay ~flat across the three rows — the O(V³)
+    // growth shows up in the totals (the honest floor measurement).
+    int n = 25
+    list<int> z25 = []
+    kt = 0
+    while (kt < n * n) {
+        z25.push(inf())
+        kt = kt + 1
+    }
+    int ck = 0
+    t0 = time_now_ms()
+    kt = 0
+    while (kt < rc25) {
+        seed_zone(z25, n, kt)
+        ck = ck + close_zone(z25, n)
+        kt = kt + 1
+    }
+    t1 = time_now_ms()
+    report("closure25", (t1 - t0) * 1000000 / rc25, t1 - t0, rc25 * n * n * n, ck)
+
+    n = 50
+    list<int> z50 = []
+    kt = 0
+    while (kt < n * n) {
+        z50.push(inf())
+        kt = kt + 1
+    }
+    ck = 0
+    t0 = time_now_ms()
+    kt = 0
+    while (kt < rc50) {
+        seed_zone(z50, n, kt)
+        ck = ck + close_zone(z50, n)
+        kt = kt + 1
+    }
+    t1 = time_now_ms()
+    report("closure50", (t1 - t0) * 1000000 / rc50, t1 - t0, rc50 * n * n * n, ck)
+
+    n = 100
+    list<int> z100 = []
+    kt = 0
+    while (kt < n * n) {
+        z100.push(inf())
+        kt = kt + 1
+    }
+    ck = 0
+    t0 = time_now_ms()
+    kt = 0
+    while (kt < rc100) {
+        seed_zone(z100, n, kt)
+        ck = ck + close_zone(z100, n)
+        kt = kt + 1
+    }
+    t1 = time_now_ms()
+    report("closure100", (t1 - t0) * 1000000 / rc100, t1 - t0, rc100 * n * n * n, ck)
+
+    // ---- (b) memo_hit vs reclub: the SAME zone (the signature key),
+    //      K queries. The memo row probes the map (one miss — the
+    //      initial closure — then hits); the reclub row re-closes the
+    //      zone per query. The checksums must agree (the same closed
+    //      zone either way — the determinism claim, self-checked).
+    n = 25
+    map<int, int> memo = {}
+    seed_zone(z25, n, 1)
+    int sig = zone_sig(z25, n)
+    ck = 0
+    t0 = time_now_ms()
+    kt = 0
+    while (kt < rmemo) {
+        if (memo.has(sig)) {
+            ck = memo[sig]
+        } else {
+            int cl = close_zone(z25, n)
+            memo[sig] = cl
+            ck = cl
+        }
+        kt = kt + 1
+    }
+    t1 = time_now_ms()
+    report("memo_hit", (t1 - t0) * 1000000 / rmemo, t1 - t0, rmemo, ck)
+
+    ck = 0
+    t0 = time_now_ms()
+    kt = 0
+    while (kt < rreclub) {
+        // the naive baseline pays the full miss path per query: the
+        // re-seed + the closure (exactly the memo row's one miss);
+        // re-closing an already-closed matrix would be a no-op on a
+        // well-formed zone and NON-idempotent on an empty one (the
+        // dense seeds plant negative cycles — the closure is only a
+        // fixpoint on the non-empty zones)
+        seed_zone(z25, n, 1)
+        ck = close_zone(z25, n)
+        kt = kt + 1
+    }
+    t1 = time_now_ms()
+    report("reclub", (t1 - t0) * 1000000 / rreclub, t1 - t0, rreclub, ck)
+
+    // ---- (c) atom_test vs reclub: the per-atom discharge test (one
+    //      resolved-edge lookup against the ALREADY-CLOSED zone — the
+    //      memoized fast path's per-atom cost) vs the naive baseline
+    //      (a full re-closure per atom, the row above). The atom row
+    //      walks every (i, j) cell asking "does the zone imply the
+    //      bound?" — the O(1) lookup the discharged atoms pay.
+    seed_zone(z25, n, 1)
+    ck = close_zone(z25, n)
+    int atom_ck = 0
+    t0 = time_now_ms()
+    kt = 0
+    while (kt < ratom) {
+        int i = kt % n
+        int j = (kt / n) % n
+        int bound = z25[i * n + j]
+        if (bound < inf()) {
+            atom_ck = atom_ck + bound
+        }
+        kt = kt + 1
+    }
+    t1 = time_now_ms()
+    report("atom_test", (t1 - t0) * 1000000 / ratom, t1 - t0, ratom, atom_ck + ck)
+
+    // ---- (d) degrade_call vs discharged_call — the REAL emitted-code
+    //      price (the same fn, the same list): the opaque index pays
+    //      one typed runtime assertion per call ('0 <= i' degraded;
+    //      'i < xs.length()' discharged by the range axiom + the
+    //      literal length — priced per atom, exactly as the compile
+    //      warnings say); the literal call pays nothing.
+    list<int> xs = [10, 20, 30]
+    int calls = 1000000
+    int call_ops = rcall * calls
+    ck = 0
+    t0 = time_now_ms()
+    kt = 0
+    while (kt < rcall) {
+        int k2 = 0
+        while (k2 < calls) {
+            ck = ck + get(xs, k2 % 3)
+            k2 = k2 + 1
+        }
+        kt = kt + 1
+    }
+    t1 = time_now_ms()
+    report("degrade_call", (t1 - t0) * 1000000 / call_ops, t1 - t0, call_ops, ck)
+
+    ck = 0
+    t0 = time_now_ms()
+    kt = 0
+    while (kt < rcall) {
+        int k2 = 0
+        while (k2 < calls) {
+            ck = ck + get(xs, 0)
+            k2 = k2 + 1
+        }
+        kt = kt + 1
+    }
+    t1 = time_now_ms()
+    report("discharged_call", (t1 - t0) * 1000000 / call_ops, t1 - t0, call_ops, ck)
+}

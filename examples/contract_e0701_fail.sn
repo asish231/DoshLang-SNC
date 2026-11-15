@@ -1,0 +1,16 @@
+// SWARM RABBIT HOLE — Wave 15 (Impl-T, Cohort Delta): Salt ε — the
+// E0701 all-or-nothing rejection, PRODUCT arm (A4 §4's rule 1). A
+// variable×variable product in a VERIFIED function's contract is Tier
+// N — never dischargeable (MRDP; the §1(v) nonlinear cliff) — and the
+// verified tier is all-or-nothing by design: no silent degradation
+// inside a verified fn. The diagnostic names the offending atom, the
+// rule, and the bounded-degree redemption clause (degrade is a total
+// function of (atom shape × known bounds), not a blanket rule).
+
+verified fn area(int w, int h) -> int requires(w * h > 0) {
+    return w * h
+}
+
+fn main() {
+    print(area(3, 4))
+}

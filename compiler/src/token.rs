@@ -154,6 +154,16 @@ pub enum TokenKind {
        d=2 sorted-key lane IS the index). */
     MortonKw,
     HilbertKw,
+    /* SWARM RABBIT HOLE — Wave 15 (Impl-T, Cohort Delta): Salt ε's
+       clause keywords — `fn f(...) requires(cond) ensures(cond) { }`
+       (the numeric contract layer; A4's ladder + the final report
+       §7.3's boundary rule). NOTE: the `contract` keyword is the
+       trait/interface system (Type::Contract) — the numeric layer's
+       surface is these two clause heads, and `result` inside an
+       ensures condition is a contextual identifier, NOT a keyword
+       (zero backward-compat risk). */
+    Requires,
+    Ensures,
 }
 
 #[derive(Clone, Debug)]

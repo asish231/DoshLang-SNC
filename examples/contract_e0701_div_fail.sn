@@ -1,0 +1,15 @@
+// SWARM RABBIT HOLE — Wave 15 (Impl-T, Cohort Delta): Salt ε — the
+// E0701 rejection, QUOTIENT-BY-VARIABLE arm. `x / y >= 0` binds the
+// quotient q = x / y, which is q·y = x in disguise — division, not
+// mod, is the undecidability vector (the final report §7.2: the
+// div-quotient-by-variable never enters the static engine). Inside a
+// verified fn that is E0701; mod-by-variable is the allowed static
+// ledge (Tier D), div-by-variable is not.
+
+verified fn quot(int x, int y) -> int requires(x / y >= 0) {
+    return x / y
+}
+
+fn main() {
+    print(quot(8, 2))
+}

@@ -1,0 +1,17 @@
+// SWARM RABBIT HOLE — Wave 15 (Impl-T, Cohort Delta): Salt ε — the
+// ensures DEGRADE at the fn exit. `return x * 2` binds result := 2x —
+// a coefficient-2 binding is NOT a difference bound (that is the
+// octagon rung (ii), a later rung; the DBM zone layer only carries
+// ±1 coefficients), so the ensures atom 'result <= 100' has no exit
+// zone bound to read off: it degrades to a typed runtime assertion at
+// EVERY return of 'double', and the W-CONTRACT warning names it. The
+// call double(60) returns 120 — the exit assertion fires and the
+// process dies with the [E-0702] fail-fast message.
+
+fn double(int x) -> int ensures(result <= 100) {
+    return x * 2
+}
+
+fn main() {
+    print(double(60))
+}

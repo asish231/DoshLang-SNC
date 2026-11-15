@@ -1,0 +1,27 @@
+// SWARM RABBIT HOLE — Wave 15 (Impl-T, Cohort Delta): Salt ε — the
+// TYPED degradation of a Tier N atom in a PLAIN (non-verified) fn
+// (A4 §4's rule 2, the mirror of E0701's rule 1). The atom
+// 'x * y >= 0' is stamped Tier N (nonlinear product) at extraction;
+// in a proof fn it degrades to a typed runtime assertion carrying
+// the classification — the W-CONTRACT warning names the tier, and
+// the runtime message names it too.
+//
+// NOTE the operand shape: a site whose operands ALL fold to constants
+// (area3(2, 3)) discharges by plain constant evaluation — sound for
+// every tier; the degrade is the site whose product is a RUNTIME
+// value (the stamp's "never dischargeable" claim is about the
+// symbolic atom — the DBM engine cannot prove a product, and this
+// site's x is opaque). The valid input runs clean; the result is
+// discarded so the golden output stays deterministic.
+
+fn area3(int x, int y) -> int requires(x * y >= 0) {
+    return x * y
+}
+
+fn main() {
+    // a runtime value in [1, 100]: positive, so the product holds and
+    // the typed runtime assertion passes silently
+    int xv = time_now_ms() % 100 + 1
+    area3(xv, 3)
+    print("ok")
+}

@@ -1,0 +1,18 @@
+// SWARM RABBIT HOLE — Wave 15 (Impl-T, Cohort Delta): Salt ε — the
+// REFUTED arm of the boundary rule. The caller passes the literal 99
+// against the 3-element list literal: the engine proves the NEGATION
+// (the DBM conjoins the atom, the closure hits the negative diagonal
+// cycle 0 → len → 0), so the W-CONTRACT warning says the assertion
+// will always fail here — and the runtime assertion still fires
+// (soundness: the engine's refutation rests on the caller's facts,
+// which are themselves enforced elsewhere; the fail-fast is the
+// backstop). The process dies with the [E-0702] fail-fast message.
+
+fn get(list<int> xs, int i) -> int requires(0 <= i < xs.length()) {
+    return xs[i]
+}
+
+fn main() {
+    list<int> xs = [10, 20, 30]
+    print(get(xs, 99))
+}

@@ -499,6 +499,81 @@ if [ -n "${SFC_ONLY:-}" ]; then
     exit 0
 fi
 
+# ---------- contract rows (Wave 15, Impl-T) ----------
+# bench/contract_bench.sn — Salt ε's price rows, in-language (A4's
+# Presburger decidable ladder + the final report §7.3's boundary rule,
+# priced; SWARM RABBIT HOLE, Wave 15). THE HONEST TWIN DISCIPLINE: the
+# compile-time engine is the same algorithm in Rust (compiler/src/
+# dbm.rs); these rows price the ALGORITHM'S SHAPE on the runtime's
+# list/map primitives — and the (d) rows are the REAL emitted-code
+# price (the same contracted fn called with an opaque index (one
+# typed runtime assertion fires per call — exactly what the compile
+# W-CONTRACT warning says) vs a literal index (both atoms fold;
+# nothing lowered)). Rows:
+#   closure25/50/100 — the Floyd–Warshall O(V³) floor (§7.3: "closure
+#                     is the floor, not the budget"); ns per closure,
+#                     ops = the cell updates (the per-cell figure
+#                     divides in RESULTS_CONTRACT.md);
+#   memo_hit vs reclub — the memoized facts-table hit (one map probe)
+#                     vs the full re-closure per query (§7.3's
+#                     memoized fast path — the payoff row; the
+#                     CHECKSUMS MUST MATCH: the same zone, closed
+#                     either way);
+#   atom_test — the per-atom discharge lookup against the closed zone
+#                     (vs the naive re-check-everything baseline —
+#                     the reclub row IS that baseline priced per
+#                     re-closure);
+#   degrade_call vs discharged_call — the boundary rule's runtime
+#                     price, per call (the honest direction: the
+#                     degraded site pays the assertion; the
+#                     discharged site pays nothing).
+# Every op phase >= 100x the ms clock (the W2F discipline); every row
+# prints a deterministic checksum. Results: bench/RESULTS_CONTRACT.md.
+# CONTRACT_ONLY=1 ./run_bench.sh runs just these rows.
+contract_rows() {
+    echo "-- building contract bench (Wave 15, Impl-T)"
+    "$SNC" contract_bench.sn -o "$OUT/sn_contract_bench" || exit 1
+    local rounds="${CONTRACT_BASE:-5}"
+    local warm=$((rounds / 10))
+    if [ "$warm" -lt 1 ]; then warm=1; fi
+    local f r b spec
+    b=sn_contract_bench
+    f="$OUT/$b.txt"
+    : > "$f"
+    echo "-- warmup $b (base=$warm)" >&2
+    "$OUT/$b" "$warm" >/dev/null 2>&1
+    echo "-- timed $b x$RUNS (base=$rounds)" >&2
+    for r in $(seq "$RUNS"); do
+        "$OUT/$b" "$rounds" >> "$f" 2>/dev/null
+    done
+    echo "-- contract medians (base=$rounds, median of $RUNS):"
+    for spec in \
+        "timer ns_per_op" \
+        "closure25 ns_per_op" \
+        "closure25 phase_ms" \
+        "closure50 ns_per_op" \
+        "closure50 phase_ms" \
+        "closure100 ns_per_op" \
+        "closure100 phase_ms" \
+        "memo_hit ns_per_op" \
+        "reclub ns_per_op" \
+        "atom_test ns_per_op" \
+        "degrade_call ns_per_op" \
+        "discharged_call ns_per_op"; do
+        set -- $spec
+        echo "  $1.$2 = $(median_row "$OUT/$b.txt" "$1" "$2")"
+    done
+    echo "-- contract checksums (must be identical across all runs; memo_hit == reclub):"
+    grep -h "^BENCH row=" "$OUT/$b.txt" | grep -v "row=timer" | sort | uniq -c
+}
+
+if [ -n "${CONTRACT_ONLY:-}" ]; then
+    contract_rows
+    echo
+    echo "== done (CONTRACT_ONLY). raw runs in $OUT/sn_contract_bench.txt ; see RESULTS_CONTRACT.md =="
+    exit 0
+fi
+
 # ---------- run + collect ----------
 collect() {  # collect NAME -- cmd...
     local name="$1"; shift; shift

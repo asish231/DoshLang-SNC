@@ -208,6 +208,12 @@ declare i64 @sn_list_contains_ptr(ptr, ptr)
 declare ptr @sn_error_new(ptr)
 declare ptr @sn_error_msg(ptr)
 declare void @sn_panic(ptr)
+; SWARM RABBIT HOLE — Wave 15 (Impl-T, Cohort Delta): Salt ε — the
+; numeric contract layer's degraded runtime assertion (the boundary
+; rule's fail-fast; the compile-time DBM engine never reaches the
+; runtime — only the atoms it could not discharge do). The message is
+; the raw @.str global (already NUL-terminated for the fprintf).
+declare void @sn_contract_assert(i64, ptr)
 declare ptr @sn_alloc(i64)
 declare void @sn_free(ptr)
 declare ptr @sn_box_i64(i64)

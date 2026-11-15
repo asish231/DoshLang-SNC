@@ -405,6 +405,8 @@ void sn_rt_init(int argc, char **argv) {
 }
 
 void sn_panic(void *msg);
+/* Wave 15 (Impl-T): Salt ε's degraded contract assertion. */
+void sn_contract_assert(int64_t ok, const char *msg);
 void *sn_error_new(void *msg);
 
 static void *xmalloc(size_t n) {
@@ -4895,6 +4897,22 @@ void *sn_error_msg(void *p) {
 void sn_panic(void *msg) {
     fprintf(stderr, "panic: %s\n", sn_str_cstr(msg));
     exit(1);
+}
+
+/* SWARM RABBIT HOLE — Wave 15 (Impl-T, Cohort Delta): Salt ε — the
+ * numeric contract layer's degraded runtime assertion (the boundary
+ * rule's fail-fast; the E-LKIND/E-SFC convention: fprintf + exit(1)).
+ * The DBM engine is compile-time only — this is the ONLY contract
+ * artifact the runtime ever sees: a condition the compile-time engine
+ * could not discharge (tier L/D) or could never discharge (tier N),
+ * lowered at the boundary (the call site / the fn entry for requires,
+ * the fn exit for ensures). The message carries the atom text and the
+ * typed classification ([E-0702]). */
+void sn_contract_assert(int64_t ok, const char *msg) {
+    if (!ok) {
+        fprintf(stderr, "runtime error: %s\n", msg);
+        exit(1);
+    }
 }
 
 /* --------------------------------------------------------------------- */
