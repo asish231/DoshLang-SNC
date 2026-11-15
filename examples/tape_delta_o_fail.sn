@@ -1,0 +1,12 @@
+// SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): the Tier-O
+// classification — E2's honest fallback (W2C §1.1/§38). A value with
+// no tier-classified origin (an int here; an unannotated extern's
+// results identically — P2's default-unpure opaque form) is
+// classified O: no delta-local law at any price. The delta record
+// kind on O values is a checked refusal; the tape falls back to
+// OPAQUE (kind 0) — the record kinds are tier-parametric.
+fn main() {
+    tape<int> t = tape_new("o")
+    int x = 5
+    tape_record(t, 1, x, x)
+}

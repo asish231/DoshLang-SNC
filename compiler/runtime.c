@@ -440,7 +440,7 @@ typedef struct Sb {
     char *buf;
 } Sb;
 
-enum { KIND_BYTEARRAY = 20, KIND_POOL = 21, KIND_STRBUILDER = 22, KIND_ZSET = 23, KIND_LCELL = 24, KIND_ZFIX = 25 };
+enum { KIND_BYTEARRAY = 20, KIND_POOL = 21, KIND_STRBUILDER = 22, KIND_ZSET = 23, KIND_LCELL = 24, KIND_ZFIX = 25, KIND_TAPE = 26 };
 
 /* Forward: the Salt-ζ engine's struct is defined with the Tier-L/G
  * engines below, but gc_mark/gc_free/sn_release trace and free it by
@@ -1105,8 +1105,10 @@ void sn_release(void *p) {
        owns the bytes and reclaims them at its rewind. A stray release
        (an alias the checker's store rules did not see) is a NO-OP
        here, not a free of lane memory; the checker's E-GC-IN-LANE
-       store rejections are the primary line. */
-    if (o->kind == KIND_MORTON || o->kind == KIND_HILBERT) return;
+       store rejections are the primary line. Wave 16 (Impl-U): the
+       tape joins the no-op — the chronicle header is lane-backed
+       (the hilbert precedent) and dies at the lane's rewind. */
+    if (o->kind == KIND_MORTON || o->kind == KIND_HILBERT || o->kind == KIND_TAPE) return;
     o->rc--;
     if (o->rc > 0) return;
     gc_untrack(p);
@@ -2253,6 +2255,22 @@ static void lcell_gset_rehash(SnLCell *c, int64_t new_hcap) {
 }
 
 static int64_t lcell_gset_find(SnLCell *c, int64_t e, uint64_t h, uint64_t *out_bucket) {
+    /* SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta), the
+       flagged runtime fix: an UNALLOCATED table (hcap == 0 — the
+       lazy arrays of an empty cell) contains nothing. The find
+       previously computed mask = hcap−1 = 0xFFFF… and read
+       buckets[slot] at the full hash — a latent OOB that only fires
+       when a caller probes an empty-but-live cell, exactly what the
+       tape's ⊥-rooted delta chains do (the first fragment is
+       against the empty base; the mutator-law round's first record
+       exposed it). The insert path never reaches here with
+       hcap == 0 (lcell_gset_insert allocates first); every other
+       caller asks a membership question whose honest answer on an
+       empty table is "absent". */
+    if (c->hcap == 0) {
+        if (out_bucket) *out_bucket = 0;
+        return -1;
+    }
     uint64_t mask = (uint64_t)c->hcap - 1;
     uint64_t slot = h & mask;
     for (;;) {
@@ -3592,6 +3610,582 @@ int64_t sn_hilbert_box_next(void *p, int64_t x0, int64_t y0, int64_t x1,
         exit(1);
     }
     return sn_hilbert_box_advance(h, x0, y0, x1, y1, kmax, idx + 1);
+}
+
+
+/* --------------------------------------------------------------------- */
+/*  SnTape — the tape record kinds (SWARM RABBIT HOLE, Wave 16,          */
+/*  Impl-U, Cohort Delta; W2C §36–§38 + §48 item 4 — the P5↔P2          */
+/*  elevation plan made executable).                                     */
+/*                                                                       */
+/*  THE KINSHIP, RULED (W2C §36): the tape IS a δ₀-chronicle in        */
+/*  SHAPE — discrete impulses against an integrated state, ordered     */
+/*  by a clock, replay = re-integration from a checkpoint — and is     */
+/*  NOT a calculus in algebra: no group on opaque entries, no ℐ/𝒟     */
+/*  pair, no chain rule (§38's E3 is the named slice-2 boundary).      */
+/*  The DELTA record kind is the elevation's slice-1 extent: the      */
+/*  record carries the (prev → next) change against a LANDED carrier,  */
+/*  the tape derives the impulse, CHECKS the tier-parametric law at    */
+/*  this effect boundary (the record IS the boundary — the impulse    */
+/*  is accepted only if the law holds), and stores the raw pairs.      */
+/*                                                                       */
+/*  THE THREE RECORD KINDS (a P2-sanctioned record kind, like wave's   */
+/*  contrib — §48 item 4):                                               */
+/*   TAPE_OPAQUE (0)  — the free-monoid chronicle: a raw int payload,  */
+/*                      no algebra, no law (§36's honest baseline;     */
+/*                      differentiation vacuous). Refused at replay —  */
+/*                      an opaque record in the window has no          */
+/*                      integral to contribute.                        */
+/*   TAPE_DELTA (1)   — the (prev → next) carrier pair. The impulse    */
+/*                      is derived with the carrier's own ops and the  */
+/*                      LAW IS CHECKED HERE (§332's tier-parametric   */
+/*                      per-operation laws):                           */
+/*                        Tier G: d = b ⊖ a (sn_zset_delta — the       */
+/*                          exact group ⊖); ILC's a ⊕ (b ⊖ a) = b     */
+/*                          verified by reconstruction (sn_zset_apply  */
+/*                          compared against b). The impulse stores    */
+/*                          as raw (key, count) pairs — E2's          */
+/*                          embeddability, LITERAL: the delta records  */
+/*                          embed in the ℤ[X] multiplicity carrier.   */
+/*                        Tier L: m^δ = sn_lcell_delta (the           */
+/*                          join-decomposition-optimal fragment,      */
+/*                          Almeida–Shoker–Baquero JPDC 2018); the    */
+/*                          mutator law X ⊔ m^δ(X) = m(X) verified     */
+/*                          (sn_lcell_apply compared via              */
+/*                          sn_lcell_eq). NO ⊖ exists on this path     */
+/*                          (the E-LRET precedent — the fragment is   */
+/*                          ⊔-world state-relative material).         */
+/*                        Tier O: NOTHING is checked because the kind  */
+/*                          is REFUSED — no delta-local law at any     */
+/*                          price (W2C §1.1; the checker's E-TAPE     */
+/*                          arm fires first; this runtime arm is the */
+/*                          raw-ptr backstop).                        */
+/*   TAPE_CHECKPOINT (2) — the carrier STATE snapshot: the            */
+/*                      materialized base; replay re-integrates from  */
+/*                      the LAST one (§36's shape).                     */
+/*                                                                       */
+/*  ONE TAPE, ONE LEDGER (the P2↔wave boundary rule extended to P5,     */
+/*  §4's E4): the first delta/checkpoint record fixes the tape's       */
+/*  (tier, carrier); a record against a different carrier is a        */
+/*  fail-fast [E-TAPE] refusal — the chronicle must stay one linear    */
+/*  ledger of one carrier's evolution (the L replay's ⊔-fold is       */
+/*  exact re-integration exactly under that discipline).               */
+/*                                                                       */
+/*  REPLAY (§36: replay = re-integration from the checkpoint):         */
+/*   Tier G: the target is reset to the zero state (the group         */
+/*     inverse — Tier-G's exact capability), the last checkpoint's     */
+/*     snapshot pairs are applied, then every delta impulse in the     */
+/*     window. Idempotent by exactness.                                 */
+/*   Tier L: the snapshot's offers and every fragment's offers are     */
+/*     ⊔-joined into the target (inflate only — the LVar discipline;  */
+/*     NO reset exists on this surface). Idempotent by ⊔-idempotence   */
+/*     (x⊔x = x — the checked lattice law). The fold into a FRESH ⊥    */
+/*     cell is the exact re-integration witness; folding into a       */
+/*     stateful cell is target ⊔ integral (the monotone capability).   */
+/*                                                                       */
+/*  LANE DISCIPLINE (E-GC-IN-LANE): the header, the record directory,  */
+/*  and the flat payload buffer live on lane 0 (sn_lane_alloc — the   */
+/*  hilbert precedent); the tape is NEVER gc_track'd and sn_release    */
+/*  on it is a NO-OP (the runtime backstop above). The records hold   */
+/*  RAW INT64 PAIRS ONLY — never GC pointers — so the chronicle is    */
+/*  lane-safe by construction and dies at the lane's rewind. The      */
+/*  derived d/m^δ objects are gc_track'd heap objects: built, law-    */
+/*  checked, flattened onto the lane, and released HERE, inside the  */
+/*  record call (the effect boundary) — no GC pointer ever crosses    */
+/*  into the chronicle.                                                 */
+/* --------------------------------------------------------------------- */
+
+enum {
+    TAPE_OPAQUE = 0,     /* the free-monoid chronicle (W2C §36)     */
+    TAPE_DELTA = 1,     /* the (prev → next) carrier change         */
+    TAPE_CHECKPOINT = 2 /* the carrier state snapshot                */
+};
+enum {
+    TAPE_TIER_NONE = 0, /* nothing classified yet                    */
+    TAPE_TIER_G = 1,    /* the ℤ[X] carrier: exact ⊖, ILC law       */
+    TAPE_TIER_L = 2     /* the ⊔ carriers: the mutator law, no ⊖    */
+};
+
+typedef struct SnTapeRec {
+    int64_t kind; /* TAPE_OPAQUE / TAPE_DELTA / TAPE_CHECKPOINT */
+    int64_t off;  /* the payload region's start (int64 units)     */
+    int64_t len;  /* the payload region's length (int64 units)    */
+} SnTapeRec;
+
+typedef struct SnTape {
+    int64_t rc;      /* unused on the lane (no ARC) */
+    int64_t kind;    /* KIND_TAPE */
+    int64_t tier;    /* learned at the first delta/checkpoint (one tape, one ledger) */
+    int64_t carrier; /* G: the zset key_kind; L: the lcell carrier */
+    int64_t nrec;
+    int64_t cap;
+    SnTapeRec *recs;   /* lane: the record directory */
+    int64_t plen;
+    int64_t pcap;
+    int64_t *payloads; /* lane: the flat (a, b) pair buffer — the impulses */
+    char name[32];    /* the chronicle's label (diagnostics; NUL-terminated) */
+} SnTape;
+
+static SnTape *tape_of(void *p, const char *op) {
+    SnTape *t = (SnTape *)p;
+    if (!t || t->kind != KIND_TAPE) {
+        fprintf(stderr,
+                "runtime error: %s operates on a tape (the lane-backed "
+                "chronicle header); the value is not one [E-TAPE]\n",
+                op);
+        exit(1);
+    }
+    return t;
+}
+
+/* The lane-bump growth discipline (the hilbert grow precedent): the
+   old block is abandoned to the rewind — lane bump memory, never
+   freed in place; amortized O(1) per append. */
+static void tape_grow_recs(SnTape *t) {
+    if (t->nrec < t->cap) return;
+    int64_t ncap = t->cap ? t->cap * 2 : 16;
+    SnTapeRec *nr = (SnTapeRec *)sn_lane_alloc_fwd(0, ncap * (int64_t)sizeof(SnTapeRec));
+    if (t->nrec > 0) {
+        memcpy(nr, t->recs, (size_t)t->nrec * sizeof(SnTapeRec));
+    }
+    t->recs = nr;
+    t->cap = ncap;
+}
+
+static void tape_grow_payload(SnTape *t, int64_t need) {
+    if (t->plen + need <= t->pcap) return;
+    int64_t ncap = t->pcap ? t->pcap : 64;
+    while (ncap < t->plen + need) ncap *= 2;
+    int64_t *np = (int64_t *)sn_lane_alloc_fwd(0, ncap * (int64_t)sizeof(int64_t));
+    if (t->plen > 0) {
+        memcpy(np, t->payloads, (size_t)t->plen * sizeof(int64_t));
+    }
+    t->payloads = np;
+    t->pcap = ncap;
+}
+
+/* The common append: one record header + the raw payload pairs. */
+static void tape_append(SnTape *t, int64_t kind, const int64_t *pairs, int64_t npairs) {
+    tape_grow_payload(t, npairs * 2);
+    SnTapeRec r;
+    r.kind = kind;
+    r.off = t->plen;
+    r.len = npairs * 2;
+    for (int64_t i = 0; i < npairs; i++) {
+        t->payloads[t->plen + 2 * i] = pairs[2 * i];
+        t->payloads[t->plen + 2 * i + 1] = pairs[2 * i + 1];
+    }
+    t->plen += npairs * 2;
+    tape_grow_recs(t);
+    t->recs[t->nrec] = r;
+    t->nrec++;
+}
+
+/* ONE TAPE, ONE LEDGER: the first delta/checkpoint fixes the
+   (tier, carrier); any later divergence is the fail-fast refusal. */
+static void tape_learn(SnTape *t, int64_t tier, int64_t carrier, const char *op) {
+    if (t->tier == TAPE_TIER_NONE) {
+        t->tier = tier;
+        t->carrier = carrier;
+        return;
+    }
+    if (t->tier != tier || t->carrier != carrier) {
+        fprintf(stderr,
+                "runtime error: %s on tape '%s': one tape, one ledger — the "
+                "tape already chronicles a %s ledger and this record is %s "
+                "(the P2↔wave boundary rule extended to P5, W2C §4 E4; keep "
+                "one carrier per tape) [E-TAPE]\n",
+                op, t->name,
+                t->tier == TAPE_TIER_G ? "Tier-G" : "Tier-L",
+                tier == TAPE_TIER_G ? "Tier-G" : "Tier-L");
+        exit(1);
+    }
+}
+
+/* Structural Z-set equality (the law check's comparator): every key
+   of either side carries the same coefficient on both. */
+static int tape_zset_eq(void *a, void *b) {
+    SnZSet *x = (SnZSet *)a;
+    SnZSet *y = (SnZSet *)b;
+    if (sn_zset_total(x) != sn_zset_total(y)) return 0;
+    for (int64_t i = 0; i < x->len; i++) {
+        if (sn_zset_count(x, x->keys[i]) != sn_zset_count(y, x->keys[i])) return 0;
+    }
+    for (int64_t i = 0; i < y->len; i++) {
+        if (sn_zset_count(y, y->keys[i]) != sn_zset_count(x, y->keys[i])) return 0;
+    }
+    return 1;
+}
+
+/* Flatten a Z-set into raw (key, count) pairs — the ℤ[X] element as
+   lane bytes (E2's embeddability, literal). Zero coefficients are
+   skipped (the canonical finite-support form). */
+static void tape_zset_flatten(SnZSet *z, int64_t **out, int64_t *nout) {
+    int64_t cap = z->len > 0 ? z->len : 1;
+    int64_t *buf = (int64_t *)xmalloc(sizeof(int64_t) * (size_t)cap * 2);
+    int64_t n = 0;
+    for (int64_t i = 0; i < z->len; i++) {
+        if (z->counts[i] == 0) continue;
+        buf[2 * n] = z->keys[i];
+        buf[2 * n + 1] = z->counts[i];
+        n++;
+    }
+    *out = buf;
+    *nout = n;
+}
+
+/* Flatten an LCell's state/fragment into raw (a, b) offer pairs
+   (the lcell_inflate payload form — one shape for state and
+   fragment: MAX (hwm, 0); GSET (elem, 0)*; LWW (val, clock)). */
+static void tape_lcell_flatten(SnLCell *c, int64_t **out, int64_t *nout) {
+    int64_t cap = 8;
+    if (c->carrier == LCELL_GSET && c->len > cap) cap = c->len;
+    int64_t *buf = (int64_t *)xmalloc(sizeof(int64_t) * (size_t)cap * 2);
+    int64_t n = 0;
+    switch (c->carrier) {
+    case LCELL_MAX:
+        if (c->hwm != INT64_MIN) {
+            buf[0] = c->hwm;
+            buf[1] = 0;
+            n = 1;
+        }
+        break;
+    case LCELL_GSET:
+        for (int64_t i = 0; i < c->len; i++) {
+            buf[2 * i] = c->elems[i];
+            buf[2 * i + 1] = 0;
+        }
+        n = c->len;
+        break;
+    case LCELL_LWW:
+        if (c->lww_set) {
+            buf[0] = c->lww_val;
+            buf[1] = c->lww_clock;
+            n = 1;
+        }
+        break;
+    }
+    *out = buf;
+    *nout = n;
+}
+
+void *sn_tape_new(void *name) {
+    Str *s = (Str *)name;
+    int64_t nlen = 0;
+    const char *nd = "";
+    if (s && s->kind == KIND_STR && s->len >= 0) {
+        nlen = s->len;
+        nd = s->data;
+    }
+    if (nlen > 31) {
+        fprintf(stderr,
+                "runtime error: tape name longer than 31 bytes (got %lld) — "
+                "the label is copied into the lane-backed header "
+                "[E-TAPE]\n",
+                (long long)nlen);
+        exit(1);
+    }
+    SnTape *t = (SnTape *)sn_lane_alloc_fwd(0, (int64_t)sizeof(SnTape));
+    t->rc = 1;
+    t->kind = KIND_TAPE;
+    t->tier = TAPE_TIER_NONE;
+    t->carrier = 0;
+    t->nrec = 0;
+    t->cap = 0;
+    t->recs = NULL;
+    t->plen = 0;
+    t->pcap = 0;
+    t->payloads = NULL;
+    memset(t->name, 0, sizeof(t->name));
+    for (int64_t i = 0; i < nlen; i++) t->name[i] = nd[i];
+    return t;
+}
+
+/* The OPAQUE record (kind 0): the int payload, no algebra, no law.
+   The i64 ABI (the int payload); the p ABI below carries kinds 1/2. */
+void sn_tape_record_i(void *p, int64_t kind, int64_t payload) {
+    SnTape *t = tape_of(p, "tape_record");
+    if (kind != TAPE_OPAQUE) {
+        fprintf(stderr,
+                "runtime error: unknown tape record kind %lld — 0=opaque, "
+                "1=delta, 2=checkpoint [E-TAPE]\n",
+                (long long)kind);
+        exit(1);
+    }
+    int64_t pair[2];
+    pair[0] = payload;
+    pair[1] = 0;
+    tape_append(t, TAPE_OPAQUE, pair, 1);
+}
+
+/* The DELTA and CHECKPOINT records (kinds 1/2) — the ptr ABI. THE
+   EFFECT BOUNDARY: the impulse is derived with the carrier's own
+   ops and the TIER-PARAMETRIC LAW IS CHECKED before the record is
+   accepted. */
+void sn_tape_record_p(void *p, int64_t kind, void *a, void *b) {
+    SnTape *t = tape_of(p, "tape_record");
+    if (kind != TAPE_DELTA && kind != TAPE_CHECKPOINT) {
+        fprintf(stderr,
+                "runtime error: unknown tape record kind %lld — 0=opaque, "
+                "1=delta, 2=checkpoint [E-TAPE]\n",
+                (long long)kind);
+        exit(1);
+    }
+    Obj *oa = (Obj *)a;
+    Obj *ob = (Obj *)b;
+    if (kind == TAPE_DELTA) {
+        /* The tier-confusion backstop (E-LKIND's seam, the raw-ptr
+           case the checker's origin classification cannot see): both
+           endpoints must be live carriers of the SAME kind. */
+        if (!oa || !ob || (oa->kind != KIND_ZSET && oa->kind != KIND_LCELL)
+            || oa->kind != ob->kind) {
+            fprintf(stderr,
+                    "runtime error: a delta record needs a same-tier "
+                    "(prev, next) carrier pair — got kind=%lld and kind=%lld "
+                    "(the Tier-G ⊕ and the Tier-L ⊔ do not mix; the checker's "
+                    "classification fired first on the classified shapes) "
+                    "[E-TAPE]\n",
+                    oa ? (long long)oa->kind : -1, ob ? (long long)ob->kind : -1);
+            exit(1);
+        }
+        if (oa->kind == KIND_ZSET) {
+            /* ---- Tier G: ILC's a ⊕ (b ⊖ a) = b, checked ---- */
+            SnZSet *prev = (SnZSet *)a;
+            SnZSet *next = (SnZSet *)b;
+            if (prev->key_kind != next->key_kind) {
+                fprintf(stderr,
+                        "runtime error: a delta record's Z-sets must share the "
+                        "key kind (got %lld and %lld) [E-TAPE]\n",
+                        (long long)prev->key_kind, (long long)next->key_kind);
+                exit(1);
+            }
+            tape_learn(t, TAPE_TIER_G, prev->key_kind, "tape_record");
+            void *d = sn_zset_delta(next, prev); /* b ⊖ a */
+            void *chk = sn_zset_apply(prev, d);  /* a ⊕ (b ⊖ a) */
+            if (!tape_zset_eq(chk, next)) {
+                fprintf(stderr,
+                        "runtime error: tape law violated on the recorded "
+                        "triple: a ⊕ (b ⊖ a) != b (ILC's change-structure law "
+                        "at the effect boundary, W2C §38 E1) [E-TAPE]\n");
+                exit(1);
+            }
+            int64_t *pairs;
+            int64_t npairs;
+            tape_zset_flatten((SnZSet *)d, &pairs, &npairs);
+            tape_append(t, TAPE_DELTA, pairs, npairs);
+            free(pairs);
+            sn_release(d);
+            sn_release(chk);
+        } else {
+            /* ---- Tier L: the mutator law X ⊔ m^δ(X) = m(X), checked
+               (NO ⊖ on this path — the E-LRET precedent; the fragment
+               is sn_lcell_delta's join-decomposition-optimal material) ---- */
+            lcell_guard_pair(a, b, "tape_record");
+            tape_learn(t, TAPE_TIER_L, ((SnLCell *)a)->carrier, "tape_record");
+            void *m = sn_lcell_delta(b, a);      /* m^δ(m(X), X)     */
+            void *chk = sn_lcell_apply(a, m);    /* X ⊔ m^δ(X)       */
+            if (!sn_lcell_eq(chk, b)) {
+                fprintf(stderr,
+                        "runtime error: tape law violated on the recorded "
+                        "pair: X ⊔ m^δ(X) != m(X) (the delta-mutator law at "
+                        "the effect boundary, Almeida–Shoker–Baquero JPDC "
+                        "2018; W2C §1.1 Tier L) [E-TAPE]\n");
+                exit(1);
+            }
+            int64_t *pairs;
+            int64_t npairs;
+            tape_lcell_flatten((SnLCell *)m, &pairs, &npairs);
+            tape_append(t, TAPE_DELTA, pairs, npairs);
+            free(pairs);
+            sn_release(m);
+            sn_release(chk);
+        }
+        return;
+    }
+    /* ---- The CHECKPOINT record: the carrier state snapshot. No law
+       to check — the snapshot IS the base; the classification must
+       still be a carrier (Tier O has nothing to snapshot). ---- */
+    if (!oa || (oa->kind != KIND_ZSET && oa->kind != KIND_LCELL)) {
+        fprintf(stderr,
+                "runtime error: a checkpoint is a carrier snapshot (a Tier-G "
+                "Z-set or a Tier-L cell) — got kind=%lld [E-TAPE]\n",
+                oa ? (long long)oa->kind : -1);
+        exit(1);
+    }
+    if (oa->kind == KIND_ZSET) {
+        SnZSet *z = (SnZSet *)a;
+        tape_learn(t, TAPE_TIER_G, z->key_kind, "tape_record");
+        int64_t *pairs;
+        int64_t npairs;
+        tape_zset_flatten(z, &pairs, &npairs);
+        tape_append(t, TAPE_CHECKPOINT, pairs, npairs);
+        free(pairs);
+    } else {
+        lcell_guard_one(a, "tape_record");
+        tape_learn(t, TAPE_TIER_L, ((SnLCell *)a)->carrier, "tape_record");
+        int64_t *pairs;
+        int64_t npairs;
+        tape_lcell_flatten((SnLCell *)a, &pairs, &npairs);
+        tape_append(t, TAPE_CHECKPOINT, pairs, npairs);
+        free(pairs);
+    }
+}
+
+int64_t sn_tape_len(void *p) {
+    SnTape *t = tape_of(p, "tape_len");
+    return t->nrec;
+}
+
+int64_t sn_tape_rec_kind(void *p, int64_t i) {
+    SnTape *t = tape_of(p, "tape_rec_kind");
+    if (i < 0 || i >= t->nrec) {
+        fprintf(stderr,
+                "runtime error: tape record index %lld out of range (the tape "
+                "holds %lld records) [E-TAPE]\n",
+                (long long)i, (long long)t->nrec);
+        exit(1);
+    }
+    return t->recs[i].kind;
+}
+
+int64_t sn_tape_rec_payload(void *p, int64_t i) {
+    SnTape *t = tape_of(p, "tape_rec_payload");
+    if (i < 0 || i >= t->nrec) {
+        fprintf(stderr,
+                "runtime error: tape record index %lld out of range (the tape "
+                "holds %lld records) [E-TAPE]\n",
+                (long long)i, (long long)t->nrec);
+        exit(1);
+    }
+    if (t->recs[i].kind != TAPE_OPAQUE) {
+        fprintf(stderr,
+                "runtime error: tape_rec_payload reads the OPAQUE payload — "
+                "record %lld is kind %lld (a delta/checkpoint record's meaning "
+                "is its carrier ops at replay, not a raw int; W2C §36) "
+                "[E-TAPE]\n",
+                (long long)i, (long long)t->recs[i].kind);
+        exit(1);
+    }
+    return t->payloads[t->recs[i].off];
+}
+
+/* tape_replay — replay = re-integration from the last checkpoint
+   (W2C §36's shape, executable). Tier G: the target is reset to the
+   zero state (the group inverse — Tier-G's exact capability), then
+   the base + window impulses apply. Tier L: the base + window
+   offers ⊔-join into the target (inflate only — no reset exists on
+   the L surface; idempotent by ⊔-idempotence). An OPAQUE record in
+   the window is the honest REFUSAL: no algebra, no integral. */
+void sn_tape_replay(void *p, void *target) {
+    SnTape *t = tape_of(p, "tape_replay");
+    Obj *og = (Obj *)target;
+    if (!og || (og->kind != KIND_ZSET && og->kind != KIND_LCELL)) {
+        fprintf(stderr,
+                "runtime error: tape_replay folds into a carrier (a Tier-G "
+                "Z-set or a Tier-L cell) — got kind=%lld [E-TAPE]\n",
+                og ? (long long)og->kind : -1);
+        exit(1);
+    }
+    /* The one-ledger discipline: a tape that learned a tier replays
+       only into that tier's carrier (the raw-ptr backstop of the
+       checker's classification). */
+    int64_t want = og->kind == KIND_ZSET ? TAPE_TIER_G : TAPE_TIER_L;
+    if (t->tier != TAPE_TIER_NONE && t->tier != want) {
+        fprintf(stderr,
+                "runtime error: tape_replay on tape '%s': one tape, one "
+                "ledger — the tape chronicles a %s ledger and the target is a "
+                "%s carrier [E-TAPE]\n",
+                t->name,
+                t->tier == TAPE_TIER_G ? "Tier-G" : "Tier-L",
+                want == TAPE_TIER_G ? "Tier-G" : "Tier-L");
+        exit(1);
+    }
+    /* The window: everything after the LAST checkpoint (or the whole
+       tape when none exists — the zero state is the base). */
+    int64_t c = -1;
+    for (int64_t i = 0; i < t->nrec; i++) {
+        if (t->recs[i].kind == TAPE_CHECKPOINT) c = i;
+    }
+    if (og->kind == KIND_ZSET) {
+        /* The exact reset: subtract the target's whole support (the
+           group inverse; pruned to the zero state). */
+        List *keys = (List *)sn_zset_keys(target);
+        for (int64_t i = 0; i < keys->len; i++) {
+            int64_t k = keys->items[i];
+            sn_zset_add(target, k, -sn_zset_count(target, k));
+        }
+        sn_release(keys);
+        if (c >= 0) {
+            SnTapeRec *r = &t->recs[c];
+            for (int64_t j = 0; j < r->len; j += 2) {
+                sn_zset_add(target, t->payloads[r->off + j],
+                            t->payloads[r->off + j + 1]);
+            }
+        }
+        for (int64_t i = (c >= 0 ? c + 1 : 0); i < t->nrec; i++) {
+            SnTapeRec *r = &t->recs[i];
+            if (r->kind == TAPE_DELTA) {
+                for (int64_t j = 0; j < r->len; j += 2) {
+                    sn_zset_add(target, t->payloads[r->off + j],
+                                t->payloads[r->off + j + 1]);
+                }
+            } else if (r->kind == TAPE_OPAQUE) {
+                fprintf(stderr,
+                        "runtime error: tape_replay hit an opaque record in "
+                        "the replay window — opaque payloads have no algebra "
+                        "(W2C §36: a free monoid at best, differentiation "
+                        "vacuous) and cannot integrate; keep opaque and delta "
+                        "records on separate tapes, or checkpoint before the "
+                        "opaque run [E-TAPE]\n");
+                exit(1);
+            }
+        }
+    } else {
+        /* The ⊔-fold: offers only, never a reset (the LVar
+           discipline). A fresh ⊥ cell receives exactly the integral.
+           THE TIER ASYMMETRY, honestly refused: Tier-G deltas are
+           ABSOLUTE (the group difference — a zero base replays
+           them exactly); Tier-L fragments are STATE-RELATIVE (the
+           mutator law joins m^δ onto ITS base), so a replay without
+           a CHECKPOINT has no base — the fold would silently
+           under-approximate, and the honest answer is the refusal. */
+        lcell_guard_one(target, "tape_replay");
+        if (c < 0) {
+            fprintf(stderr,
+                    "runtime error: tape_replay on tape '%s': the Tier-L "
+                    "fragments are state-relative (the mutator law joins "
+                    "m^δ onto its base) and this tape has no checkpoint to "
+                    "re-integrate from — record tape_record(t, 2, state) as "
+                    "the base first; the Tier-G deltas are absolute and "
+                    "replay from the zero state, the Tier-L fragments are "
+                    "not [E-TAPE]\n",
+                    t->name);
+            exit(1);
+        }
+        SnTapeRec *r = &t->recs[c];
+        for (int64_t j = 0; j < r->len; j += 2) {
+            sn_lcell_inflate(target, t->payloads[r->off + j],
+                             t->payloads[r->off + j + 1]);
+        }
+        for (int64_t i = c + 1; i < t->nrec; i++) {
+            SnTapeRec *rr = &t->recs[i];
+            if (rr->kind == TAPE_DELTA) {
+                for (int64_t j = 0; j < rr->len; j += 2) {
+                    sn_lcell_inflate(target, t->payloads[rr->off + j],
+                                     t->payloads[rr->off + j + 1]);
+                }
+            } else if (rr->kind == TAPE_OPAQUE) {
+                fprintf(stderr,
+                        "runtime error: tape_replay hit an opaque record in "
+                        "the replay window — opaque payloads have no algebra "
+                        "(W2C §36: a free monoid at best, differentiation "
+                        "vacuous) and cannot integrate; keep opaque and delta "
+                        "records on separate tapes, or checkpoint before the "
+                        "opaque run [E-TAPE]\n");
+                exit(1);
+            }
+        }
+    }
 }
 
 

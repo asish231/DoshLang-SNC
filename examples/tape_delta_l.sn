@@ -1,0 +1,55 @@
+// SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): the Tier-L
+// DELTA record kind — the tier-parametric per-operation law
+// (W2C §332's v2.1 fix, executable). On Tier L the delta record
+// carries the (prev -> next) pair of carrier cells; the tape derives
+// the mutator-law fragment m^δ = lcell_delta(next, prev)
+// (Almeida–Shoker–Baquero JPDC 2018; Enes et al. 2018 — the
+// join-decomposition-optimal delta) and CHECKS the mutator law
+// X ⊔ m^δ(X) = m(X) at the effect boundary — prev ⊔ m^δ == next,
+// via the landed lcell_apply/lcell_eq pair.
+//
+// NO ⊖ anywhere on this path (the E-LRET precedent). THE HONEST
+// TIER ASYMMETRY the replay executes: Tier-G deltas are ABSOLUTE
+// (the group difference — ∅-based replay is exact for any chain
+// that starts at ∅); Tier-L fragments are STATE-RELATIVE (the
+// mutator law joins them onto their base), so the L replay
+// re-integrates FROM A CHECKPOINT — without one the fold has no
+// base and is a checked [E-TAPE] refusal, never a silent
+// under-approximation. tape_retract_l_fail.sn pins the ⊖ refusal
+// next door.
+fn main() {
+    tape<int> t = tape_new("lz")
+
+    // The chain p0 -> p1 -> p2 on the GSET carrier (⊔ = union).
+    ptr p0 = lcell_new(1)
+    lcell_inflate(p0, 1, 0)
+    lcell_inflate(p0, 2, 0)
+    ptr p1 = lcell_new(1)
+    lcell_inflate(p1, 1, 0)
+    lcell_inflate(p1, 2, 0)
+    lcell_inflate(p1, 3, 0)
+    ptr p2 = lcell_new(1)
+    lcell_inflate(p2, 1, 0)
+    lcell_inflate(p2, 2, 0)
+    lcell_inflate(p2, 3, 0)
+    lcell_inflate(p2, 4, 0)
+
+    tape_record(t, 2, p0)        // the CHECKPOINT: the re-integration base
+    tape_record(t, 1, p0, p1)     // fragment: {3}
+    tape_record(t, 1, p1, p2)     // fragment: {4}
+
+    print(tape_len(t))            // 3
+    print(tape_rec_kind(t, 0))    // 2 — the checkpoint kind
+
+    // The replay == re-integration witness on Tier L: the base's
+    // snapshot ⊔ the fragments, into a FRESH ⊥ cell — the result
+    // equals the chain's endpoint p2 exactly.
+    ptr r = lcell_new(1)
+    tape_replay(t, r)
+    print(lcell_len(r))           // 4
+    print(lcell_has(r, 3))        // true
+    print(lcell_has(r, 4))        // true
+    print(lcell_has(r, 9))        // false
+    print(lcell_len(p2))          // 4 — the direct computation agrees
+    print("PASS: tape_delta_l")
+}

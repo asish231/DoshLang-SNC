@@ -1,0 +1,15 @@
+// SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): the
+// E-LRET-ADJACENT refusal — NO ⊖ on the Tier-L tape path. The tape
+// records Tier-L deltas as mutator-law FRAGMENTS (lcell_delta: the
+// join-decomposition-optimal state-relative material, ⊔-world) and
+// replays them as ⊔-folds; exact retraction on the Tier-L surface
+// remains impossible (the Grothendieck argument: x⊔x = x ⇒ [x] = 0
+// — the merge operator is non-embeddable), so lcell_retract stays
+// ALWAYS rejected — the tape adds no ⊖ to the L surface.
+fn main() {
+    tape<int> t = tape_new("l")
+    ptr c = lcell_new(1)
+    lcell_inflate(c, 4, 0)
+    tape_record(t, 2, c)      // a Tier-L checkpoint: legal (⊔-world)
+    lcell_retract(c)          // ⊖: the E-LRET refusal, always
+}

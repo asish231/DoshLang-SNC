@@ -1,0 +1,11 @@
+// SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): the scope
+// rule — slice-1 tapes are FUNCTION-LOCAL chronicles. A module-
+// scope tape wants the DIFF-4 slot pattern (the @sn_g_ global +
+// the main-entry construction the seam cells use); that machinery
+// is the named slice-2 form, and the declaration is refused here
+// rather than silently lowered to a dead slot.
+tape<int> t = tape_new("g")
+
+fn main() {
+    tape_record(t, 0, 1)
+}

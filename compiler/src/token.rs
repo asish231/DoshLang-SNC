@@ -164,6 +164,14 @@ pub enum TokenKind {
        (zero backward-compat risk). */
     Requires,
     Ensures,
+    /* SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): the tape
+       keywords — W2C's P5↔P2 elevation plan made executable (§36–§38,
+       §48 item 4). `tape<int>`: the append-only δ₀-chronicle type
+       (the record kinds: opaque / delta / checkpoint). `tape_delta(G)`
+       in extern RESULT position: E1 — the extern declares the delta
+       type of its results (the dec(n) keyword+parens type precedent). */
+    TapeKw,
+    TapeDeltaKw,
 }
 
 #[derive(Clone, Debug)]

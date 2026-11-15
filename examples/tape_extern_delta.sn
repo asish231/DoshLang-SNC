@@ -1,0 +1,49 @@
+// SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): E1 — typed
+// extern deltas, the minimal honest slice (W2C §38's elevation
+// ingredient (1); the final report §332 item (3)). An extern
+// declares the delta type of its RESULTS — `-> tape_delta(G)`: this
+// feed's results are Tier-G delta-chain endpoints (the CDC-feed
+// shape: each call returns the ledger's next state; the change
+// between consecutive results is a ℤ[X] element). UNANNOTATED
+// externs keep P2's default-unpure OPAQUE form — the §4 kinship
+// activates exactly when this layer exists (tape_delta_o_fail.sn
+// pins the unannotated/O refusal).
+//
+// The compile-time check is the SIGNATURE discipline (the tier
+// classification below); the ⊕/⊖ laws are checked at the EFFECT
+// BOUNDARY — the tape record: ILC's a ⊕ (b ⊖ a) = b runs on every
+// recorded triple before the impulse is accepted (the shim here
+// produces honest states, so the law holds; a lying producer is
+// the runtime's to catch, the seeded-bug tripwire rationale).
+//
+// The shim (compiler/tests/tape_shim.c) builds Z-sets through the
+// runtime's own symbols — resolved at the final link, exactly like
+// the ffi_extern precedent.
+
+extern "/tmp/sn_tape_shim.o" {
+    fn tape_feed(int step) -> tape_delta(G)
+}
+
+fn main() {
+    tape<int> t = tape_new("feed")
+
+    // The extern's results are tier-classified BY THE SIGNATURE:
+    // the delta kind accepts them (E1's compile-time discipline).
+    ptr a = tape_feed(3)             // the chain's source state
+    ptr b = tape_feed(4)             // the next state
+    tape_record(t, 2, a)             // the CHECKPOINT: the re-integration base
+    tape_record(t, 1, a, b)          // the law checked at the boundary
+
+    print(tape_len(t))               // 2
+    print(tape_rec_kind(t, 0))       // 2 — the checkpoint kind
+
+    // Replay == re-integration: the base ⊕ the impulse = the feed's
+    // endpoint b — {100:3, 200:6} ⊕ {100:1, 200:2} = {100:4, 200:8}.
+    ptr r = zset_new(0)
+    tape_replay(t, r)
+    print(zset_count(r, 100))         // 4
+    print(zset_count(r, 200))         // 8
+    print(zset_total(r))             // 12
+    print(zset_total(b))             // 12 — the direct computation agrees
+    print("PASS: tape_extern_delta")
+}

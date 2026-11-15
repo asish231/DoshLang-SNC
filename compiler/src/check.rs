@@ -416,6 +416,18 @@ pub struct CheckDb {
     /// (6) The zone-closure memo (the second memoization layer: two
     /// sites with identical fact signatures share one closure).
     pub contract_zone_memo: ZoneMemo,
+    /// SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): the
+    /// tape's E1 table (W2C §38 — typed extern deltas). extern name
+    /// → the declared result tier: 1 = G (the ℤ[X] carrier), 2 = L
+    /// (the join-semilattice carriers). Recorded at the extern
+    /// registration from the `-> tape_delta(G|L)` annotation (the
+    /// parser validated the tier letters; the return type resolves
+    /// to Type::Ptr for the ABI — the ANNOTATION is this table, the
+    /// compile-time signature discipline); consulted by the delta
+    /// record's tier classification. Unannotated externs stay out
+    /// of the table — P2's default-unpure OPAQUE form (the §4
+    /// kinship activates exactly when the annotation exists).
+    pub extern_delta_tiers: HashMap<String, i64>,
 }
 
 impl CheckDb {
@@ -615,6 +627,19 @@ struct Checker<'a> {
     /// pair — W-SFC-T5B fires there (a warning: the program is legal,
     /// the layout is wasted — A2 §3/T5(b)).
     lex_loop_vars: Vec<String>,
+    /// SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): the
+    /// tape's per-function DELTA-ORIGIN table (W2C §38 E1/E2's
+    /// classification input): local name → the tier its INITIALIZER
+    /// produced (1 = G via the zset_* constructors or a
+    /// tape_delta(G) extern; 2 = L via the lcell_* constructors or a
+    /// tape_delta(L) extern). The classification is the DECLARED
+    /// ORIGIN (the initializer) — a reassignment does not update it
+    /// (the runtime's kind guard is the backstop that catches a
+    /// re-typed binding), and the tape_record arms consult it only
+    /// for Ptr-typed bindings. Module-scope bindings have no
+    /// recorded origin (they classify O) — slice-1 tapes and their
+    /// carriers are function-local.
+    tape_local_tiers: HashMap<String, i64>,
 }
 
 pub fn template_param_names(tp: &[crate::ast::TypeParam]) -> Vec<String> {
@@ -724,6 +749,7 @@ pub fn check_programs(programs: &[Program], diag: &mut Diagnostics) -> CheckDb {
         contract_entry_checks: HashMap::new(),
         contract_exit_checks: HashMap::new(),
         contract_zone_memo: ZoneMemo::default(),
+        extern_delta_tiers: HashMap::new(),
     };
     collect(&mut db, programs, diag);
     check_contracts(&mut db, diag);
@@ -761,6 +787,7 @@ pub fn check_programs(programs: &[Program], diag: &mut Diagnostics) -> CheckDb {
             spawn_depth: 0,
             joined_stack: vec![Vec::new()],
             lex_loop_vars: Vec::new(),
+            tape_local_tiers: HashMap::new(),
         };
         for item in &p.items {
             match item {
@@ -775,6 +802,44 @@ pub fn check_programs(programs: &[Program], diag: &mut Diagnostics) -> CheckDb {
                                 f.span,
                                 format!("extern '{}' cannot have default parameters", f.name),
                             );
+                        }
+                        // SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort
+                        // Delta): E1 — typed extern deltas (W2C §38:
+                        // "externs declare delta types on results").
+                        // The `-> tape_delta(G|L)` annotation: (a) a
+                        // delta-typed PARAMETER is the honest
+                        // slice-1 refusal (what a delta-consuming
+                        // callee may assume is the E3 chain-rule
+                        // boundary — named in the spec, not claimed
+                        // here); (b) the RESULT tier is recorded in
+                        // the db table the delta record's
+                        // classification consults (the compile-time
+                        // SIGNATURE DISCIPLINE); the sig's ret is
+                        // already Type::Ptr — the carrier object's
+                        // ABI, the annotation is not a runtime type.
+                        // Unannotated externs stay out of the table:
+                        // P2's default-unpure OPAQUE form — the §4
+                        // kinship activates exactly when the
+                        // annotation exists.
+                        for prm in &f.params {
+                            if let crate::ast::TypeAst::TapeDelta(_) = &prm.ty {
+                                c.diag.error(
+                                    f.span,
+                                    format!(
+                                        "E-TAPE: tape_delta types annotate extern RESULTS \
+                                         (E1: the delta type of what the extern produces) — \
+                                         '{}' declares a delta-typed parameter, which the \
+                                         slice-1 surface does not define; the E3 chain-rule \
+                                         boundary is named, not claimed [E-TAPE]",
+                                        f.name
+                                    ),
+                                );
+                            }
+                        }
+                        if let Some(crate::ast::TypeAst::TapeDelta(tier)) = &f.ret {
+                            c.db
+                                .extern_delta_tiers
+                                .insert(f.name.clone(), *tier);
                         }
                         if c.db.funcs.contains_key(&f.name) {
                             c.diag.error(f.span, format!("duplicate extern '{}'", f.name));
@@ -866,6 +931,7 @@ pub fn check_programs(programs: &[Program], diag: &mut Diagnostics) -> CheckDb {
             spawn_depth: 0,
             joined_stack: vec![Vec::new()],
             lex_loop_vars: Vec::new(),
+            tape_local_tiers: HashMap::new(),
         };
         c.current_bp = Some(inst.name.clone());
         c.current_bp_hierarchy = hierarchy(&c.db.blueprints, &inst.name);
@@ -2143,6 +2209,28 @@ fn collect(db: &mut CheckDb, programs: &[Program], diag: &mut Diagnostics) {
                         // dims/elem rules are type facts, not
                         // expression facts).
                         check_sfc_type(&rt, *span, diag);
+                        // SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort
+                        // Delta): the tape types' discipline at the
+                        // module-scope site — and the slice-1 SCOPE
+                        // rule: tapes are function-local chronicles
+                        // (a module-scope tape would want the DIFF-4
+                        // slot pattern — the @sn_g_ global + the
+                        // main-entry construction the seam cells use
+                        // — which is the named slice-2 form; refuse
+                        // rather than silently lower a dead slot).
+                        check_tape_type(&rt, *span, diag);
+                        if matches!(rt, Type::Tape(_)) {
+                            diag.error(
+                                *span,
+                                format!(
+                                    "E-TAPE: slice-1 tapes are function-local chronicles — a \
+                                     module-scope tape wants the DIFF-4 slot pattern (the \
+                                     seam cells' @sn_g_ construction at main entry), the \
+                                     named slice-2 form; declare the tape inside a \
+                                     function [E-TAPE]"
+                                ),
+                            );
+                        }
                         db.globals.insert(n.clone(), rt);
                         // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O):
                         // the global-declaration arm records the pool's
@@ -4413,6 +4501,30 @@ fn check_sfc_type(t: &Type, span: Span, diag: &mut Diagnostics) {
     }
 }
 
+/* SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): the tape
+   type's discipline — W2C §36–§38's δ₀-chronicle, executable. The
+   record payloads are int64 PAIRS throughout (the ℤ[X] impulses of
+   the Tier-G kind: (key, count); the ⊔ offers of the Tier-L kind:
+   (a, b); the opaque payload: one int), so slice 1 implements
+   tape<int> — other element types are the honest named boundary,
+   refused by name. Shared by the module-scope collect site and the
+   function-body declaration site (both hold a Diagnostics), the
+   check_sfc_type precedent verbatim. */
+fn check_tape_type(t: &Type, span: Span, diag: &mut Diagnostics) {
+    if let Type::Tape(elem) = t {
+        if !matches!(**elem, Type::Int) {
+            diag.error(
+                span,
+                format!(
+                    "E-TAPE: slice 1 implements tape<int> — the record payloads are \
+                     int64 pairs (the ℤ[X] impulses and the ⊔ offers), got element \
+                     type {elem} [E-TAPE]"
+                ),
+            );
+        }
+    }
+}
+
 /// SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the morton
 /// constructors' literal dims — morton_new(d1, d2), morton_from_lex(src,
 /// d1, d2), morton_from_bytes(bytes, d1, d2) — extracted for the
@@ -4882,6 +4994,11 @@ impl Checker<'_> {
                         // map<int, int> (the verbatim E-SFC arms the
                         // golden suite pins).
                         check_sfc_type(&t, *span, &mut self.diag);
+                        // SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort
+                        // Delta): the tape type's discipline at the
+                        // declaration site (slice 1: tape<int> — the
+                        // same rule the module-scope arm runs).
+                        check_tape_type(&t, *span, &mut self.diag);
                         // The dims-are-in-the-type rule: a morton
                         // constructor's literal dims must agree with
                         // the declared type — the annotation must not
@@ -4952,6 +5069,22 @@ impl Checker<'_> {
                     }
                     let decl_ty_clone = decl_ty.clone();
                     self.declare(name, decl_ty, *is_const, *span);
+                    // SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort
+                    // Delta): the tape's DELTA-ORIGIN record — a
+                    // local whose initializer is a tier-classified
+                    // producer (a zset_*/lcell_* constructor, or an
+                    // E1 delta-typed extern call) carries its tier
+                    // for the tape_record arms' classification
+                    // (W2C §38 E2's embeddability table's input).
+                    // The declared ORIGIN only: a later assignment
+                    // does not update the entry, and the
+                    // classification applies to Ptr-typed bindings —
+                    // the runtime's kind guard is the backstop.
+                    if let Some(v) = value {
+                        if let Some(tier) = self.tape_delta_tier_of_expr(v) {
+                            self.tape_local_tiers.insert(name.clone(), tier);
+                        }
+                    }
                     // SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the
                     // E0801 by-value-copy rejection, DECLARATION-
                     // INITIALIZATION form (kills G1 §1 A2 → S4).
@@ -6551,6 +6684,19 @@ impl Checker<'_> {
                     || n == "hilbert_box_first"
                     || n == "hilbert_box_next"
                     || n == "sfc_path"
+                    /* Tape builtins (SWARM RABBIT HOLE, Wave 16,
+                       Impl-U, Cohort Delta; W2C §36–§38 + §48 item 4 —
+                       the P5↔P2 elevation plan made executable). The
+                       record kinds (0=opaque, 1=delta, 2=checkpoint)
+                       are P2-sanctioned, like wave's contrib; the
+                       tier classification + the per-kind arity rule
+                       fire in check_call's arms below. */
+                    || n == "tape_new"
+                    || n == "tape_record"
+                    || n == "tape_replay"
+                    || n == "tape_len"
+                    || n == "tape_rec_kind"
+                    || n == "tape_rec_payload"
                 {
                     Type::Named(format!("builtin:{n}"))
                 } else {
@@ -6650,7 +6796,10 @@ impl Checker<'_> {
                     // Delta): the E-GC-IN-LANE store rule, list-
                     // literal form — a lane-backed SFC collection
                     // cannot enter a list (the GC-managed holder
-                    // would release lane bytes as heap).
+                    // would release lane bytes as heap). Wave 16
+                    // (Impl-U): the tape joins the rule with its
+                    // own arm (the chronicle header is lane-backed,
+                    // the hilbert precedent).
                     if matches!(t, Type::Morton(_, _) | Type::Hilbert(_, _)) {
                         let src = Self::expr_label(el);
                         self.diag.error(
@@ -6662,6 +6811,19 @@ impl Checker<'_> {
                                  lane memory and the holder's release would free it); \
                                  SFC collections live in their region's lane and die \
                                  at its rewind [E-GC-IN-LANE]"
+                            ),
+                        );
+                    } else if matches!(t, Type::Tape(_)) {
+                        let src = Self::expr_label(el);
+                        self.diag.error(
+                            el.span,
+                            format!(
+                                "E-GC-IN-LANE: cannot store '{src}' into a list \
+                                 literal — a lane-backed tape cannot enter a \
+                                 GC-managed holder (the collector cannot trace \
+                                 lane memory and the holder's release would free \
+                                 it); tapes live in their region's lane and die at \
+                                 its rewind [E-GC-IN-LANE]"
                             ),
                         );
                     }
@@ -6872,6 +7034,73 @@ impl Checker<'_> {
         if !matches!(t, Type::Hilbert(_, _)) {
             self.diag
                 .error(span, format!("{op} operates on a hilbert map<K, V>, got {t}"));
+        }
+    }
+
+    /* SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): the tape
+       surface's arg discipline (the sfc_morton_arg precedent): the
+       first argument of every tape op is the chronicle — the
+       `tape<int>`-typed binding. */
+    fn tape_arg(&mut self, args: &[Arg], op: &str, span: Span) {
+        let t = self.sfc_arg_ty(args, 0);
+        if !matches!(t, Type::Tape(_)) {
+            self.diag
+                .error(span, format!("{op} operates on a tape (tape<int>), got {t}"));
+        }
+    }
+
+    /* SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): THE TIER
+       CLASSIFICATION — W2C §1.1's three-tier backbone + §38's E2
+       (embeddability), as a PURE FUNCTION of the expression's
+       origin. The final report §332's tier-parametric per-operation
+       laws consume this:
+         Tier G (1) — the ℤ[X] Z-set carrier: the state space IS the
+           change space; deletions are −[x]; cancellative ⇒ embeds in
+           the group world (the Grothendieck completion the Tier-L
+           work priced). Origins: the zset_* constructors, an E1
+           tape_delta(G) extern's results.
+         Tier L (2) — the join-semilattice carriers (max/gset/lww):
+           deltas are state-relative fragments via the mutator law;
+           NO ⊖ (the Grothendieck triviality — x⊔x = x ⇒ [x] = 0).
+           Origins: the lcell_* constructors, a tape_delta(L) extern.
+         Tier O (None) — everything else: no delta-local maintenance
+           law at any price (median(A) + dA does not determine
+           median(A⊕dA) — DBSP's own negative result; the cell-probe
+           barriers). The tape falls back to OPAQUE for O values
+           (E2's honest fallback) and the delta kind is REFUSED.
+       Classification inputs: the local origin table (the declared
+       initializer — the lcell_globals discipline at function
+       scope) and the direct-constructor/extern call shape. The
+       runtime's KIND guard is the backstop (a re-typed binding
+       classifies by origin here and fails on kind there). */
+    fn tape_delta_tier_of_expr(&self, e: &Expr) -> Option<i64> {
+        match &e.kind {
+            ExprKind::Ident(n) => {
+                /* Only a Ptr-typed binding can hold a carrier: an
+                   int-rebind of the same name must not inherit the
+                   stale tier. */
+                let is_ptr_binding = self
+                    .lookup(n)
+                    .map(|(t, _)| matches!(t, Type::Ptr))
+                    .unwrap_or(false);
+                if is_ptr_binding {
+                    self.tape_local_tiers.get(n).copied()
+                } else {
+                    None
+                }
+            }
+            ExprKind::Call { callee, .. } => {
+                let ExprKind::Ident(f) = &callee.kind else { return None };
+                if let Some(t) = self.db.extern_delta_tiers.get(f) {
+                    return Some(*t);
+                }
+                match f.as_str() {
+                    "zset_new" | "zset_copy" | "zset_delta" | "zset_apply" => Some(1),
+                    "lcell_new" | "lcell_delta" | "lcell_apply" => Some(2),
+                    _ => None,
+                }
+            }
+            _ => None,
         }
     }
 
@@ -8014,6 +8243,287 @@ impl Checker<'_> {
                the software shift-or path (this AArch64 machine), 1 =
                BMI2 PDEP/PEXT. */
             "sfc_path" => Type::Int,
+            /* SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta):
+               THE TAPE — W2C's P5↔P2 elevation plan made executable
+               (§36–§38; §48 item 4: "tape record kinds for deltas —
+               a P2-sanctioned record kind, like wave's"). The
+               append-only δ₀-chronicle over int64 payloads with
+               THREE record kinds (0=opaque, 1=delta, 2=checkpoint):
+                 opaque      — the free-monoid baseline (§36): raw
+                               payloads, no algebra, no law;
+                 delta       — the (prev → next) carrier pair: the
+                               change is derived and the
+                               TIER-PARAMETRIC LAW is checked at
+                               this boundary (the effect boundary —
+                               §332's per-operation laws: G checks
+                               ILC's a⊕(b⊖a)=b on total ⊕/⊖; L
+                               checks the mutator law X ⊔ m^δ(X) =
+                               m(X) and surfaces NO ⊖ — the E-LRET
+                               precedent; O checks NOTHING — the
+                               kind is REFUSED, E2's honest
+                               fallback to opaque);
+                 checkpoint  — the carrier state snapshot; replay
+                               re-integrates from the LAST one
+                               (§36's shape).
+               THE BOUNDARY RULE (one tape, one ledger — the P2↔wave
+               boundary rule extended to P5, §4's E4): the whole tape
+               surface is refused inside a wave body. */
+            "tape_new" => {
+                if args.len() != 1 {
+                    self.diag.error(
+                        span,
+                        format!(
+                            "E-TAPE: tape_new expects 1 arg (the chronicle's \
+                             name), got {} [E-TAPE]",
+                            args.len()
+                        ),
+                    );
+                }
+                Type::Tape(Box::new(Type::Int))
+            }
+            "tape_record" => {
+                self.tape_arg(args, "tape_record", span);
+                if self.wave_depth > 0 {
+                    self.diag.error(
+                        span,
+                        "E-TAPE-WAVE: a tape op cannot cross a wave body — one tape, \
+                         one ledger: the P2↔wave boundary rule (E0812's bracket, \
+                         NI(ii) 'ports don't escape') extended to P5 (W2C §4); the \
+                         wave stages its own effects (contrib → J(W)) and the tape's \
+                         chronicle must stay one linear ledger of the fallback state; \
+                         record and read program-order-outside the wave [E-TAPE-WAVE]",
+                    );
+                }
+                /* The kind is a compile-time fact — the literal the
+                   classification and the arity rule fire on. */
+                let kind = args
+                    .get(1)
+                    .and_then(|a| match a {
+                        Arg::Pos(e) => Self::int_lit_value(e),
+                        _ => None,
+                    });
+                let Some(kind) = kind else {
+                    self.diag.error(
+                        span,
+                        "E-TAPE: the record kind must be a literal — 0=opaque, \
+                         1=delta, 2=checkpoint — the kind is a compile-time fact \
+                         (the tier classification and the arity rule fire on it) \
+                         [E-TAPE]",
+                    );
+                    return Type::Void;
+                };
+                match kind {
+                    0 => {
+                        if args.len() != 3 {
+                            self.diag.error(
+                                span,
+                                format!(
+                                    "E-TAPE: tape_record(t, kind, ...) — the opaque kind \
+                                     takes 1 int payload, the delta kind takes the \
+                                     (prev, next) carrier pair, the checkpoint kind \
+                                     takes the carrier state; got {} args [E-TAPE]",
+                                    args.len()
+                                ),
+                            );
+                        } else {
+                            let t = self.sfc_arg_ty(args, 2);
+                            if !t.is_fixed_int() && !matches!(t, Type::Int | Type::Any) {
+                                self.diag.error(
+                                    span,
+                                    format!(
+                                        "E-TAPE: the opaque payload is an int \
+                                         (tape<int> — W2C §36's raw chronicle), got \
+                                         {t} [E-TAPE]"
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                    1 => {
+                        if args.len() != 4 {
+                            self.diag.error(
+                                span,
+                                format!(
+                                    "E-TAPE: tape_record(t, kind, ...) — the opaque kind \
+                                     takes 1 int payload, the delta kind takes the \
+                                     (prev, next) carrier pair, the checkpoint kind \
+                                     takes the carrier state; got {} args [E-TAPE]",
+                                    args.len()
+                                ),
+                            );
+                        }
+                        /* THE TIER-PARAMETRIC CLASSIFICATION (E2):
+                           both endpoints must classify G or both L —
+                           anything else is the honest refusal. */
+                        let ta = args.get(2).and_then(|a| match a {
+                            Arg::Pos(e) => Some(e),
+                            _ => None,
+                        });
+                        let tb = args.get(3).and_then(|a| match a {
+                            Arg::Pos(e) => Some(e),
+                            _ => None,
+                        });
+                        let ca = ta.and_then(|e| self.tape_delta_tier_of_expr(e));
+                        let cb = tb.and_then(|e| self.tape_delta_tier_of_expr(e));
+                        match (ca, cb) {
+                            (Some(1), Some(1)) | (Some(2), Some(2)) => {}
+                            (None, _) | (_, None) => {
+                                let (who, none_side) = if ca.is_none() {
+                                    (ta, true)
+                                } else {
+                                    (tb, false)
+                                };
+                                let _ = none_side;
+                                let label = who
+                                    .map(Self::expr_label)
+                                    .unwrap_or_else(|| "the argument".into());
+                                self.diag.error(
+                                    span,
+                                    format!(
+                                        "E-TAPE: a delta record needs tier-classified \
+                                         endpoints — '{label}' is classified O (no \
+                                         delta-local law at any price, W2C §1.1 Tier O; \
+                                         the ⊕/⊖ laws do not exist there); record it \
+                                         opaque (kind 0), or produce it from a tier \
+                                         origin: a zset_*/lcell_* constructor or a \
+                                         tape_delta(G|L) extern (E1) [E-TAPE]"
+                                    ),
+                                );
+                            }
+                            _ => {
+                                let la = ta.map(Self::expr_label).unwrap_or_default();
+                                let lb = tb.map(Self::expr_label).unwrap_or_default();
+                                let (ta_name, tb_name) = if ca == Some(1) {
+                                    ("Tier G", "Tier L")
+                                } else {
+                                    ("Tier L", "Tier G")
+                                };
+                                self.diag.error(
+                                    span,
+                                    format!(
+                                        "E-TAPE: a delta record's endpoints must share \
+                                         one tier — '{la}' is classified {ta_name} and \
+                                         '{lb}' is classified {tb_name}; the Tier-G ⊕ \
+                                         and the Tier-L ⊔ do not mix (E-LKIND's \
+                                         tier-confusion seam; W2C §1.1) [E-TAPE]"
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                    2 => {
+                        if args.len() != 3 {
+                            self.diag.error(
+                                span,
+                                format!(
+                                    "E-TAPE: tape_record(t, kind, ...) — the opaque kind \
+                                     takes 1 int payload, the delta kind takes the \
+                                     (prev, next) carrier pair, the checkpoint kind \
+                                     takes the carrier state; got {} args [E-TAPE]",
+                                    args.len()
+                                ),
+                            );
+                        }
+                        /* A checkpoint is a CARRIER SNAPSHOT — Tier O
+                           has no carrier to offer. */
+                        let s = args.get(2).and_then(|a| match a {
+                            Arg::Pos(e) => Some(e),
+                            _ => None,
+                        });
+                        if let Some(e) = s {
+                            if self.tape_delta_tier_of_expr(e).is_none() {
+                                self.diag.error(
+                                    span,
+                                    format!(
+                                        "E-TAPE: a checkpoint is a carrier snapshot (a \
+                                         Tier-G Z-set or a Tier-L cell) — '{}' is \
+                                         classified O (no carrier to snapshot, W2C §1.1 \
+                                         Tier O); checkpoint a classified state or record \
+                                         opaque [E-TAPE]",
+                                        Self::expr_label(e)
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                    _ => {
+                        self.diag.error(
+                            span,
+                            format!(
+                                "E-TAPE: unknown tape record kind {} — 0=opaque, \
+                                 1=delta, 2=checkpoint [E-TAPE]",
+                                kind
+                            ),
+                        );
+                    }
+                }
+                Type::Void
+            }
+            "tape_replay" => {
+                self.tape_arg(args, "tape_replay", span);
+                if args.len() != 2 {
+                    self.diag.error(
+                        span,
+                        format!(
+                            "E-TAPE: tape_replay expects 2 args (the tape, the \
+                             target carrier), got {} [E-TAPE]",
+                            args.len()
+                        ),
+                    );
+                }
+                if self.wave_depth > 0 {
+                    self.diag.error(
+                        span,
+                        "E-TAPE-WAVE: a tape op cannot cross a wave body — one tape, \
+                         one ledger: the P2↔wave boundary rule (E0812's bracket, \
+                         NI(ii) 'ports don't escape') extended to P5 (W2C §4); the \
+                         wave stages its own effects (contrib → J(W)) and the tape's \
+                         chronicle must stay one linear ledger of the fallback state; \
+                         record and read program-order-outside the wave [E-TAPE-WAVE]",
+                    );
+                }
+                Type::Void
+            }
+            "tape_len" => {
+                self.tape_arg(args, "tape_len", span);
+                if self.wave_depth > 0 {
+                    self.diag.error(
+                        span,
+                        "E-TAPE-WAVE: a tape op cannot cross a wave body — one tape, \
+                         one ledger: the P2↔wave boundary rule (E0812's bracket, \
+                         NI(ii) 'ports don't escape') extended to P5 (W2C §4); the \
+                         wave stages its own effects (contrib → J(W)) and the tape's \
+                         chronicle must stay one linear ledger of the fallback state; \
+                         record and read program-order-outside the wave [E-TAPE-WAVE]",
+                    );
+                }
+                Type::Int
+            }
+            "tape_rec_kind" | "tape_rec_payload" => {
+                self.tape_arg(args, n, span);
+                if self.wave_depth > 0 {
+                    self.diag.error(
+                        span,
+                        "E-TAPE-WAVE: a tape op cannot cross a wave body — one tape, \
+                         one ledger: the P2↔wave boundary rule (E0812's bracket, \
+                         NI(ii) 'ports don't escape') extended to P5 (W2C §4); the \
+                         wave stages its own effects (contrib → J(W)) and the tape's \
+                         chronicle must stay one linear ledger of the fallback state; \
+                         record and read program-order-outside the wave [E-TAPE-WAVE]",
+                    );
+                }
+                let t = self.sfc_arg_ty(args, 1);
+                if !t.is_fixed_int() && !matches!(t, Type::Int | Type::Any) {
+                    self.diag.error(
+                        span,
+                        format!(
+                            "E-TAPE: {n}'s record index must be an int, got {t} \
+                             [E-TAPE]"
+                        ),
+                    );
+                }
+                Type::Int
+            }
             "pool_insert" => {
                 // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the
                 // E0803.3 gate on the intrinsic form — the pool is the
@@ -9031,7 +9541,10 @@ impl Checker<'_> {
                     // on the free list), and the holder's release
                     // would free lane bytes as heap. SFC collections
                     // live in their region's lane and die at its
-                    // rewind — the lane-backed list discipline.
+                    // rewind — the lane-backed list discipline. Wave
+                    // 16 (Impl-U): the tape joins the rule (the
+                    // chronicle header is lane-backed, the hilbert
+                    // precedent) with its own diagnostic text.
                     if matches!(t, Type::Morton(_, _) | Type::Hilbert(_, _)) {
                         let src = Self::expr_label(e);
                         let dst = Self::root_var_of_expr(recv)
@@ -9045,6 +9558,21 @@ impl Checker<'_> {
                                  memory and the holder's release would free it); SFC \
                                  collections live in their region's lane and die at \
                                  its rewind [E-GC-IN-LANE]"
+                            ),
+                        );
+                    } else if matches!(t, Type::Tape(_)) {
+                        let src = Self::expr_label(e);
+                        let dst = Self::root_var_of_expr(recv)
+                            .unwrap_or_else(|| Self::expr_label(recv));
+                        self.diag.error(
+                            e.span,
+                            format!(
+                                "E-GC-IN-LANE: cannot store '{src}' into '{dst}' — a \
+                                 lane-backed tape cannot enter a GC-managed holder \
+                                 (the collector cannot trace lane memory and the \
+                                 holder's release would free it); tapes live in \
+                                 their region's lane and die at its rewind \
+                                 [E-GC-IN-LANE]"
                             ),
                         );
                     }

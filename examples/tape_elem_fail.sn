@@ -1,0 +1,8 @@
+// SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): the element
+// discipline — slice 1 implements tape<int>. The record payloads are
+// int64 pairs throughout (the ℤ[X] impulses and the ⊔ offers); other
+// element types are the honest slice-2 boundary, refused by name.
+fn main() {
+    tape<str> t = tape_new("e")
+    tape_record(t, 0, 1)
+}

@@ -1,0 +1,237 @@
+// SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): the tape's
+// benchmark, in-language — W2C §36–§38's replay-vs-reintegration
+// economics, priced (the P5↔P2 elevation plan's honest cost rows).
+//
+// ROWS (the W2F discipline, verbatim from wave_bench: SNlang's only
+// clock is the ms-resolution time_now_ms, so every timed phase
+// totals >= 100x that; the driver (bench/run_bench.sh, TAPE_ONLY=1)
+// runs one warmup at rounds/10 then RUNS timed runs and takes the
+// median; every row prints its own deterministic checksum, and the
+// two replay rows' checksums MUST MATCH — both tapes chronicle the
+// SAME impulse multiset, and replay == re-integration is the
+// cross-row witness, self-checked in the benchmark):
+//
+//   timer            — 100_000 clock pairs: the measurement row.
+//   tape_opaque      — rounds   x K opaque records (the free-monoid
+//                      chronicle: append only — §36's baseline, the
+//                      cheapest legal record).
+//   tape_delta_g     — rounds/4 x K Tier-G delta records on the
+//                      fixed-shape (prev -> next) pair (the record
+//                      cost is a function of the SUPPORT, not the
+//                      content: derive ⊖ + the ILC law check +
+//                      flatten + append per record) — THE TYPED
+//                      RECORD'S PREMIUM; one replay per round folds
+//                      the integral (the witness rides the row).
+//   tape_ckpt        — rounds/2 x K checkpoint records of a fixed
+//                      2-key state — the SNAPSHOT cost (O(support)
+//                      at record; the base that makes replay start
+//                      in O(1)).
+//   tape_replay_ck   — reps x replay of the CHECKPOINTED tape (the
+//                      window = the second half only: the last
+//                      checkpoint resets the integration base).
+//   tape_replay_full — reps x replay of the FULL tape (no
+//                      checkpoint: every impulse re-scanned from
+//                      the zero state — the §36 economics the
+//                      checkpoint amortizes: O(window) vs O(K)).
+//
+// THE WITNESS PAIR, algebraically: the impulse d = {1000: +2, 2000:
+// -1}; the checkpoint state is EXACTLY (K/2)·d = {1000: K, 2000:
+// -K/2} — so replay_ck = (K/2)·d ⊕ (K/2)·d = K·d = replay_full:
+// identical checksums, two different window shapes.
+//
+// Lane discipline: each append row's tape lives one round —
+// region { } around the round's work rewinds lane 0 (the tape
+// header + the record directory + the payloads are lane bytes,
+// E-GC-IN-LANE; the growth's abandoned blocks die with the region
+// too). The two replay tapes are built ONCE (K records each, ~MBs).
+// GC pinned out of every timed phase (the wave bench precedent).
+
+use std.os
+
+fn report(str row, int ns_per_op, int phase_ms, int ops, int ck) {
+    print("BENCH row=" + row + " ns_per_op=" + cast(ns_per_op, str)
+        + " phase_ms=" + cast(phase_ms, str)
+        + " ops=" + cast(ops, str)
+        + " checksum=" + cast(ck, str))
+}
+
+fn main() {
+    int k = 100000
+    int rounds = 1000
+    list<str> a = args()
+    if (a.length() > 1) {
+        int v = cast(a[1], int)
+        if (v > 0) {
+            rounds = v
+        }
+    }
+    int ropaque = rounds
+    // The delta row is sized at rounds/40: the law-checked record
+    // path (~250 ns/record — derive + the ILC reconstruction +
+    // flatten) is the heavyweight row; /40 keeps its phase in the
+    // same window as the other rows (the wave bench's per-row
+    // multiplier precedent).
+    int rdelta = rounds / 40
+    if (rdelta < 1) { rdelta = 1 }
+    int rckpt = rounds / 2
+    if (rckpt < 1) { rckpt = 1 }
+    int reps = rounds
+    gc_set_threshold(2000000000)
+
+    // ---- timer overhead: 100_000 time_now_ms() call pairs
+    int t0 = time_now_ms()
+    int kt = 0
+    int acct = 0
+    while (kt < 100000) {
+        acct = acct + time_now_ms()
+        kt = kt + 1
+    }
+    int t1 = time_now_ms()
+    report("timer", (t1 - t0) * 1000000 / 100000, t1 - t0, 100000, acct)
+
+    // ---- tape_opaque: the free-monoid chronicle's append cost.
+    //      Checksum: the payload sum per round (K*(K-1)/2) x rounds.
+    int ops = 0
+    t0 = time_now_ms()
+    int ck = 0
+    int r = 0
+    while (r < ropaque) {
+        region {
+            tape<int> t = tape_new("op")
+            int j = 0
+            while (j < k) {
+                tape_record(t, 0, j)
+                ck = ck + j
+                j = j + 1
+            }
+        }
+        ops = ops + k
+        r = r + 1
+    }
+    t1 = time_now_ms()
+    report("tape_opaque", (t1 - t0) * 1000000 / ops, t1 - t0, ops, ck)
+
+    // ---- the fixed-shape pair + the impulse, built ONCE:
+    //      d = {1000: +2, 2000: -1}; the record pair (pa -> pb)
+    //      with pb - pa = d; the checkpoint state s2 = (K/2)·d —
+    //      the WITNESS PAIR's algebraic anchor.
+    ptr pa = zset_new(0)
+    zset_add(pa, 1000, 2)
+    zset_remove(pa, 2000, 1)          // pa = 1·d
+    ptr pb = zset_new(0)
+    zset_add(pb, 1000, 4)
+    zset_remove(pb, 2000, 2)          // pb = 2·d = pa ⊕ d
+    ptr s2 = zset_new(0)
+    zset_add(s2, 1000, k)
+    zset_remove(s2, 2000, k / 2)      // s2 = (K/2)·d — the checkpoint
+
+    // ---- tape_delta_g: the typed record's premium — K records of
+    //      the (pa -> pb) pair per round (derive + the ILC law
+    //      check + flatten + append), one replay per round folding
+    //      the integral. Checksum: the integral total (K·d's total
+    //      = K) per round.
+    ops = 0
+    t0 = time_now_ms()
+    ck = 0
+    r = 0
+    while (r < rdelta) {
+        region {
+            tape<int> t = tape_new("dg")
+            int j = 0
+            while (j < k) {
+                tape_record(t, 1, pa, pb)
+                j = j + 1
+            }
+            ptr tgt = zset_new(0)
+            tape_replay(t, tgt)
+            ck = ck + zset_total(tgt)
+        }
+        ops = ops + k
+        r = r + 1
+    }
+    t1 = time_now_ms()
+    report("tape_delta_g", (t1 - t0) * 1000000 / ops, t1 - t0, ops, ck)
+
+    // ---- tape_ckpt: the CHECKPOINT record cost — the state
+    //      snapshot (O(support) at record; the base that makes
+    //      replay start in O(1)). Fixed 2-key state, K snapshots
+    //      per round. Checksum: the record count.
+    ptr sfix = zset_new(0)
+    zset_add(sfix, 1000, 5)
+    zset_add(sfix, 2000, 7)
+    ops = 0
+    t0 = time_now_ms()
+    ck = 0
+    r = 0
+    while (r < rckpt) {
+        region {
+            tape<int> t = tape_new("ck")
+            int j = 0
+            while (j < k) {
+                tape_record(t, 2, sfix)
+                j = j + 1
+            }
+            ck = ck + tape_len(t)
+        }
+        ops = ops + k
+        r = r + 1
+    }
+    t1 = time_now_ms()
+    report("tape_ckpt", (t1 - t0) * 1000000 / ops, t1 - t0, ops, ck)
+
+    // ---- the two replay tapes, built ONCE — the SAME impulse
+    //      multiset: tape_full = K copies of d; tape_ckpt = K/2
+    //      copies + checkpoint(s2 = (K/2)·d) + K/2 copies.
+    tape<int> tfull = tape_new("full")
+    int j = 0
+    while (j < k) {
+        tape_record(tfull, 1, pa, pb)
+        j = j + 1
+    }
+
+    tape<int> tckpt = tape_new("ckhalf")
+    j = 0
+    while (j < k / 2) {
+        tape_record(tckpt, 1, pa, pb)
+        j = j + 1
+    }
+    tape_record(tckpt, 2, s2)
+    j = 0
+    while (j < k / 2) {
+        tape_record(tckpt, 1, pa, pb)
+        j = j + 1
+    }
+
+    // ---- tape_replay_ck: reps replays of the CHECKPOINTED tape —
+    //      the window is the second half (the last checkpoint reset
+    //      the base). THE CHECKSUMS OF THE TWO REPLAY ROWS MUST BE
+    //      IDENTICAL: (K/2)·d ⊕ (K/2)·d == K·d.
+    ops = 0
+    t0 = time_now_ms()
+    ck = 0
+    r = 0
+    while (r < reps) {
+        ptr tgt = zset_new(0)
+        tape_replay(tckpt, tgt)
+        ck = ck + zset_total(tgt)
+        r = r + 1
+    }
+    ops = reps * (k / 2)
+    t1 = time_now_ms()
+    report("tape_replay_ck", (t1 - t0) * 1000000 / ops, t1 - t0, ops, ck)
+
+    // ---- tape_replay_full: reps replays of the FULL tape — every
+    //      impulse re-scanned from the zero state.
+    t0 = time_now_ms()
+    int ck2 = 0
+    r = 0
+    while (r < reps) {
+        ptr tgt = zset_new(0)
+        tape_replay(tfull, tgt)
+        ck2 = ck2 + zset_total(tgt)
+        r = r + 1
+    }
+    ops = reps * k
+    t1 = time_now_ms()
+    report("tape_replay_full", (t1 - t0) * 1000000 / ops, t1 - t0, ops, ck2)
+}

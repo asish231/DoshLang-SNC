@@ -912,10 +912,68 @@ else
     FAILURES=$((FAILURES + 1))
 fi
 
+# 24. The tape record kinds — W2C's P5↔P2 elevation plan's runtime
+#     mechanics (SWARM RABBIT HOLE, Wave 16, Impl-U, Cohort Delta;
+#     W2C §36–§38 + §48 item 4; the final report §332's
+#     tier-parametric per-operation laws). THE HONEST WITNESS SET:
+#     the ILC law a⊕(b⊖a)=b CHECKED at the effect boundary on every
+#     recorded triple (200 seeded-LCG randomized Z-set chain steps —
+#     every record succeeding IS the law verified on that triple);
+#     the mutator law X ⊔ m^δ(X) = m(X) likewise on all three Tier-L
+#     carriers (100 randomized monotone steps each); the replay ==
+#     re-integration witness on randomized streams WITH mid-chain
+#     checkpoints (the pre-checkpoint records excluded, both
+#     tape shapes reaching the direct chain endpoint EXACTLY —
+#     per-key counts on G, sn_lcell_eq on L; and the Tier-G replay
+#     REPLACES a pre-loaded target, the exact reset); the opaque
+#     refusal (an opaque record in the window has no integral);
+#     and the one-tape-one-ledger / no-L-base / tier-confusion /
+#     kind / bounds backstops (fork'd children dying with [E-TAPE]).
+#     Built twice: plain (24), then ASan (24b).
+echo ""
+echo "-----------------------------------------------------------------"
+echo "24. TAPE RECORD KINDS, RUNTIME MECHANICS (test_tape.c)"
+echo "-----------------------------------------------------------------"
+OUT_TAPE="/tmp/snc_test_tape_c"
+rm -f "$OUT_TAPE"
+if clang -O1 -g -o "$OUT_TAPE" "$DIR/test_tape.c" "$ROOT/compiler/runtime.c" -lpthread 2>/dev/null; then
+    OUTPUT=$("$OUT_TAPE")
+    echo "$OUTPUT"
+    if echo "$OUTPUT" | grep -q "PASS:"; then
+        echo ">>> test_tape(.c): PASSED"
+    else
+        echo ">>> test_tape(.c): FAILED"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> test_tape(.c): BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+echo ""
+echo "-----------------------------------------------------------------"
+echo "24b. TAPE RECORD KINDS, ASAN STRESS (test_tape.c)"
+echo "-----------------------------------------------------------------"
+OUT_TAPE_ASAN="/tmp/snc_test_tape_c_asan"
+rm -f "$OUT_TAPE_ASAN"
+if clang -O1 -g -fsanitize=address -o "$OUT_TAPE_ASAN" "$DIR/test_tape.c" "$ROOT/compiler/runtime.c" -lpthread 2>/dev/null; then
+    OUTPUT=$(ASAN_OPTIONS=detect_leaks=0 "$OUT_TAPE_ASAN" 2>&1)
+    echo "$OUTPUT"
+    if echo "$OUTPUT" | grep -q "PASS:"; then
+        echo ">>> test_tape(.c ASan): PASSED (no ASan reports over the lane reservations' growth copies / the record directory / the per-record derive+check+flatten objects)"
+    else
+        echo ">>> test_tape(.c ASan): FAILED"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> test_tape(.c ASan): BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
 echo ""
 echo "================================================================="
 if [ $FAILURES -eq 0 ]; then
-    echo "  ALL SYSTEMS & SECURITY TESTS PASSED (37 checks)"
+    echo "  ALL SYSTEMS & SECURITY TESTS PASSED (39 checks)"
     exit 0
 else
     echo "  $FAILURES SYSTEMS TESTS FAILED"

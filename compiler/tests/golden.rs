@@ -2431,3 +2431,273 @@ fn contract_nonlinear_fail_verbatim() {
         "expected the verbatim [E-0702] typed-degradation message, got: {stderr}"
     );
 }
+
+// ---------------------------------------------------------------------
+// SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): the TAPE —
+// W2C's P5↔P2 elevation plan (§36–§38) made executable. The tape is
+// the δ₀-chronicle SHAPE (discrete impulses against an integrated
+// state, ordered by a clock, replay = re-integration from a
+// checkpoint) with the algebra honestly TIER-PARAMETRIC: opaque
+// records are the free-monoid baseline (§36 — no group, no law,
+// differentiation vacuous); delta records carry the (prev → next)
+// change against the landed carriers with the per-operation law
+// CHECKED at the effect boundary (G: ILC's a⊕(b⊖a)=b — the final
+// report §332's tier-parametric law; L: the mutator law X ⊔ m^δ(X)
+// = m(X), NO ⊖ — the E-LRET precedent); checkpoint records snapshot
+// the carrier state and reset the integration base. The E1 extern
+// layer (`-> tape_delta(G|L)`) types the producer's results;
+// unannotated externs stay opaque (P2's default-unpure form — the
+// §4 kinship activates exactly when the annotation exists). The
+// boundary rule: one tape, one ledger — no tape op crosses a wave
+// body ([E-TAPE-WAVE]).
+// ---------------------------------------------------------------------
+
+/// The OPAQUE chronicle: append/readback on the default kind — raw
+/// int payloads, no algebra (W2C §36's honest baseline, executable).
+#[test]
+fn tape_opaque_chronicle() {
+    assert_out(
+        "examples/tape_opaque.sn",
+        "3\n0\n0\n11\n13\nPASS: tape_opaque\n",
+    );
+}
+
+/// The Tier-G DELTA record: the (prev → next) change derived with
+/// the Z-set's exact ⊖, ILC's a⊕(b⊖a)=b CHECKED at the effect
+/// boundary, the impulse stored as raw (key, count) pairs (E2's
+/// embeddability, literal), and the replay == re-integration
+/// witness: the fold from ∅ equals the chain's endpoint exactly.
+#[test]
+fn tape_delta_g_law_and_replay() {
+    assert_out(
+        "examples/tape_delta_g.sn",
+        "3\n1\n3\n1\n2\n6\n6\n1\nPASS: tape_delta_g\n",
+    );
+}
+
+/// The Tier-L DELTA record: the mutator-law fragment
+/// (lcell_delta — state-relative, ⊔-world, NO ⊖) with
+/// X ⊔ m^δ(X) = m(X) checked at the boundary, and the ⊔-fold
+/// replay witness into a fresh ⊥ cell (the final report §332's
+/// v2.1 fix: L checks the mutator law and surfaces NO ⊖).
+#[test]
+fn tape_delta_l_mutator_law_and_replay() {
+    assert_out(
+        "examples/tape_delta_l.sn",
+        "3\n2\n4\ntrue\ntrue\nfalse\n4\nPASS: tape_delta_l\n",
+    );
+}
+
+/// The CHECKPOINT record: the snapshot resets the integration base;
+/// replay folds ONLY the post-checkpoint window (the pre-checkpoint
+/// record is never re-walked) and a RETRACTION crosses the
+/// checkpoint — the replayed state equals the direct computation
+/// exactly (W2C §36's "replay = re-integration from a checkpoint").
+#[test]
+fn tape_checkpoint_replay_witness() {
+    assert_out(
+        "examples/tape_checkpoint.sn",
+        "4\n2\n0\n4\n1\n5\n5\nPASS: tape_checkpoint\n",
+    );
+}
+
+/// E1 — the delta-typed extern: `-> tape_delta(G)` types the feed's
+/// results as Tier-G delta-chain endpoints (the signature
+/// discipline at compile time), the law is checked at the effect
+/// boundary on every recorded triple, and the replay == the feed's
+/// endpoint. The shim (compiler/tests/tape_shim.c) builds through
+/// the runtime's own symbols, resolved at the final link — the
+/// ffi_extern precedent.
+#[test]
+fn tape_extern_delta_e1() {
+    let root = repo_root();
+    let linked = PathBuf::from("/tmp/sn_tape_shim.o");
+    let cc = Command::new("clang")
+        .arg("-c")
+        .arg("-o")
+        .arg(&linked)
+        .arg(root.join("compiler/tests/tape_shim.c"))
+        .output()
+        .expect("run clang");
+    assert!(cc.status.success(), "tape shim compile failed");
+
+    assert_out(
+        "examples/tape_extern_delta.sn",
+        "2\n2\n4\n8\n12\n12\nPASS: tape_extern_delta\n",
+    );
+}
+
+/// The record kind is a compile-time fact — a variable kind is a
+/// checked refusal (the tier classification and the arity rule fire
+/// on the literal), verbatim.
+#[test]
+fn tape_kind_not_literal_rejected_verbatim() {
+    let err = compile_err("examples/tape_kind_not_literal_fail.sn");
+    assert!(
+        err.contains(
+            "E-TAPE: the record kind must be a literal — 0=opaque, 1=delta, \
+             2=checkpoint — the kind is a compile-time fact (the tier \
+             classification and the arity rule fire on it) [E-TAPE]"
+        ),
+        "expected the verbatim kind-literal E-TAPE diagnostic, got: {err}"
+    );
+}
+
+/// The Tier-O classification — E2's honest fallback, verbatim: a
+/// value with no tier-classified origin (an int here; an unannotated
+/// extern's results identically) is classified O, and the delta kind
+/// is refused — no delta-local law at any price.
+#[test]
+fn tape_delta_o_refused_verbatim() {
+    let err = compile_err("examples/tape_delta_o_fail.sn");
+    assert!(
+        err.contains(
+            "E-TAPE: a delta record needs tier-classified endpoints — 'x' is \
+             classified O (no delta-local law at any price, W2C §1.1 Tier O; \
+             the ⊕/⊖ laws do not exist there); record it opaque (kind 0), or \
+             produce it from a tier origin: a zset_*/lcell_* constructor or a \
+             tape_delta(G|L) extern (E1) [E-TAPE]"
+        ),
+        "expected the verbatim Tier-O E-TAPE refusal, got: {err}"
+    );
+}
+
+/// The mixed-tier refusal, verbatim: the Tier-G ⊕ and the Tier-L ⊔
+/// do not mix — a delta record's endpoints must share one tier
+/// (E-LKIND's tier-confusion seam).
+#[test]
+fn tape_delta_mixed_refused_verbatim() {
+    let err = compile_err("examples/tape_delta_mixed_fail.sn");
+    assert!(
+        err.contains(
+            "E-TAPE: a delta record's endpoints must share one tier — 'z' is \
+             classified Tier G and 'c' is classified Tier L; the Tier-G ⊕ and \
+             the Tier-L ⊔ do not mix (E-LKIND's tier-confusion seam; W2C §1.1) \
+             [E-TAPE]"
+        ),
+        "expected the verbatim mixed-tier E-TAPE refusal, got: {err}"
+    );
+}
+
+/// The checkpoint-on-O refusal, verbatim: a checkpoint is a carrier
+/// snapshot — Tier O has no carrier to snapshot.
+#[test]
+fn tape_checkpoint_o_refused_verbatim() {
+    let err = compile_err("examples/tape_checkpoint_o_fail.sn");
+    assert!(
+        err.contains(
+            "E-TAPE: a checkpoint is a carrier snapshot (a Tier-G Z-set or a \
+             Tier-L cell) — '5' is classified O (no carrier to snapshot, W2C \
+             §1.1 Tier O); checkpoint a classified state or record opaque \
+             [E-TAPE]"
+        ),
+        "expected the verbatim checkpoint-on-O E-TAPE refusal, got: {err}"
+    );
+}
+
+/// The per-kind ARITY rule, verbatim: the payload shape is part of
+/// the kind's contract.
+#[test]
+fn tape_arity_rejected_verbatim() {
+    let err = compile_err("examples/tape_arity_fail.sn");
+    assert!(
+        err.contains(
+            "E-TAPE: tape_record(t, kind, ...) — the opaque kind takes 1 int \
+             payload, the delta kind takes the (prev, next) carrier pair, the \
+             checkpoint kind takes the carrier state; got 3 args [E-TAPE]"
+        ),
+        "expected the verbatim arity E-TAPE refusal, got: {err}"
+    );
+}
+
+/// The BOUNDARY RULE, verbatim: one tape, one ledger — the P2↔wave
+/// boundary rule extended to P5. A tape op cannot cross a wave body
+/// (both the record and the replay arms fire in this file).
+#[test]
+fn tape_wave_boundary_rejected_verbatim() {
+    let err = compile_err("examples/tape_wave_fail.sn");
+    assert!(
+        err.matches("E-TAPE-WAVE").count() >= 2,
+        "expected the E-TAPE-WAVE refusal on both tape_record and tape_replay, got: {err}"
+    );
+    assert!(
+        err.contains(
+            "E-TAPE-WAVE: a tape op cannot cross a wave body — one tape, one \
+             ledger: the P2↔wave boundary rule (E0812's bracket, NI(ii) 'ports \
+             don't escape') extended to P5 (W2C §4); the wave stages its own \
+             effects (contrib → J(W)) and the tape's chronicle must stay one \
+             linear ledger of the fallback state; record and read \
+             program-order-outside the wave [E-TAPE-WAVE]"
+        ),
+        "expected the verbatim E-TAPE-WAVE boundary-rule diagnostic, got: {err}"
+    );
+}
+
+/// The E-LRET-ADJACENT refusal, verbatim: the tape's Tier-L path
+/// records mutator-law FRAGMENTS (⊔-world) and adds NO ⊖ to the L
+/// surface — lcell_retract stays always-rejected (the Grothendieck
+/// argument).
+#[test]
+fn tape_lcell_retract_still_refused_verbatim() {
+    let err = compile_err("examples/tape_retract_l_fail.sn");
+    assert!(
+        err.contains(
+            "exact retraction on a Tier-L join-semilattice is impossible \
+             (the merge operator is non-embeddable: x⊔x = x ⇒ [x] = 0 — \
+             Grothendieck triviality; retraction on Tier L is tombstoned \
+             or none, never exact); use a Tier-G Z-set (zset_*) for exact \
+             retraction [E-LRET]"
+        ),
+        "expected the verbatim E-LRET refusal on the Tier-L tape path, got: {err}"
+    );
+}
+
+/// The element discipline, verbatim: slice 1 implements tape<int>
+/// (the payloads are int64 pairs throughout).
+#[test]
+fn tape_elem_refused_verbatim() {
+    let err = compile_err("examples/tape_elem_fail.sn");
+    assert!(
+        err.contains(
+            "E-TAPE: slice 1 implements tape<int> — the record payloads are \
+             int64 pairs (the ℤ[X] impulses and the ⊔ offers), got element \
+             type str [E-TAPE]"
+        ),
+        "expected the verbatim element E-TAPE refusal, got: {err}"
+    );
+}
+
+/// The scope rule, verbatim: slice-1 tapes are function-local; the
+/// module-scope chronicle is the named slice-2 form (the DIFF-4 slot
+/// pattern), refused here rather than silently lowered to a dead
+/// slot.
+#[test]
+fn tape_module_scope_refused_verbatim() {
+    let err = compile_err("examples/tape_module_scope_fail.sn");
+    assert!(
+        err.contains(
+            "E-TAPE: slice-1 tapes are function-local chronicles — a \
+             module-scope tape wants the DIFF-4 slot pattern (the seam cells' \
+             @sn_g_ construction at main entry), the named slice-2 form; \
+             declare the tape inside a function [E-TAPE]"
+        ),
+        "expected the verbatim module-scope E-TAPE refusal, got: {err}"
+    );
+}
+
+/// The E1 signature discipline, verbatim: tape_delta types annotate
+/// extern RESULTS; a delta-typed parameter is not the slice-1
+/// surface (the E3 chain-rule boundary is named, not claimed).
+#[test]
+fn tape_extern_param_refused_verbatim() {
+    let err = compile_err("examples/tape_extern_param_fail.sn");
+    assert!(
+        err.contains(
+            "E-TAPE: tape_delta types annotate extern RESULTS (E1: the delta \
+             type of what the extern produces) — 'feed' declares a \
+             delta-typed parameter, which the slice-1 surface does not \
+             define; the E3 chain-rule boundary is named, not claimed [E-TAPE]"
+        ),
+        "expected the verbatim E-TAPE extern-parameter refusal, got: {err}"
+    );
+}

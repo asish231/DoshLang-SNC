@@ -1,0 +1,11 @@
+// SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): the mixed-tier
+// refusal — a delta record's endpoints must share one tier. The
+// Tier-G ⊕ and the Tier-L ⊔ do not mix (E-LKIND's tier-confusion
+// seam; W2C §1.1: the meet over the pipeline is classified, and a
+// G/L pair has no meet that admits a law).
+fn main() {
+    tape<int> t = tape_new("m")
+    ptr z = zset_new(0)      // classified G (the zset_new origin)
+    ptr c = lcell_new(1)     // classified L (the lcell_new origin)
+    tape_record(t, 1, z, c)
+}

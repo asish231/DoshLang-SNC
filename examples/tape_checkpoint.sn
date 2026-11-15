@@ -1,0 +1,49 @@
+// SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): the CHECKPOINT
+// record kind — W2C §36's "replay = re-integration from a checkpoint"
+// made executable. A checkpoint record snapshots the carrier state
+// (the materialized base); tape_replay folds ONLY the records after
+// the LAST checkpoint, starting from that snapshot — the
+// event-sourcing economics the benchmark prices (bench/RESULTS_TAPE.md:
+// the window fold vs the full re-scan).
+//
+// The witness here is the strongest shape: the pre-checkpoint record
+// is OUT of the window (never re-walked), and a RETRACTION (⊖,
+// Tier-G's exact capability) crosses the checkpoint — the replayed
+// state must equal the direct computation s3 exactly.
+fn main() {
+    tape<int> t = tape_new("ckz")
+
+    ptr s0 = zset_new(0)
+    zset_add(s0, 5, 2)               // s0 = {5:2}
+    ptr s1 = zset_new(0)
+    zset_add(s1, 5, 2)
+    zset_add(s1, 6, 4)               // s1 = {5:2, 6:4}
+    ptr s2 = zset_new(0)
+    zset_add(s2, 5, 2)
+    zset_add(s2, 6, 4)
+    zset_add(s2, 7, 1)               // s2 = {5:2, 6:4, 7:1}
+    ptr s3 = zset_new(0)
+    zset_add(s3, 5, 2)
+    zset_add(s3, 6, 4)
+    zset_add(s3, 7, 1)
+    zset_remove(s3, 5, 2)            // s3 = {6:4, 7:1} — ⊖ through the checkpoint
+
+    tape_record(t, 1, s0, s1)        // OUT of the replay window
+    tape_record(t, 2, s1)            // the CHECKPOINT: the snapshot {5:2, 6:4}
+    tape_record(t, 1, s1, s2)        // in-window: {7:1}
+    tape_record(t, 1, s2, s3)        // in-window: {5:-2}
+
+    print(tape_len(t))               // 4
+    print(tape_rec_kind(t, 1))       // 2 — the checkpoint kind
+
+    // Replay: snapshot ⊕ the window = {5:2, 6:4} ⊕ {7:1} ⊕ {5:-2}
+    // = {6:4, 7:1} — the direct computation s3.
+    ptr r = zset_new(0)
+    tape_replay(t, r)
+    print(zset_count(r, 5))          // 0 — retracted THROUGH the checkpoint
+    print(zset_count(r, 6))          // 4
+    print(zset_count(r, 7))          // 1
+    print(zset_total(r))             // 5
+    print(zset_total(s3))            // 5 — the direct computation agrees
+    print("PASS: tape_checkpoint")
+}

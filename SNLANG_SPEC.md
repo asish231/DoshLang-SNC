@@ -1373,3 +1373,53 @@ For `r = x % m` with m's interval known positive, the engine injects **two DBM e
 - At the fn exit, the ensures test runs against the JOINED exit zone (per-return-site result bindings — `result := x`, `result := c`, `result := x % m` via the axiom — joined per Miné Thm 4.2, with the fall-through exit modeled as `result := 0`); a coefficient-2 binding (`result := x * 2`) is NOT a difference bound and honestly degrades (the octagon rung is later).
 
 **The honest slice-1 boundary.** Contracts live on top-level non-generic functions (clauses on generic/abstract/nested fns and methods are refused, never silently dropped). The discharge test covers the zone shapes — the interval bound (x ≤ c), THE DIFFERENCE BOUND (x − y ≤ c), equalities, constant folds, and the mod range axiom; multi-variable sums, |coeff| ≠ 1 bindings, `!=` and `or` (non-convex — parity is not a zone), div-quotient terms, and loop-carried values honestly degrade. The **QF-PA solver (rung iii — NP-complete, poly at fixed #vars)** and the **EPAD/Z3 oracle tiers** are LATER RUNGS — named, not claimed; so are the octagon rung (ii), loop-entry facts, and bounded-degree redemption by enumeration. Pinned by the golden suite (`examples/contract_*.sn` + `compiler/tests/golden.rs` — the discharge, the degrade, the refutation, the E0701 product/quotient arms, the typed nonlinear degrade, all verbatim); the engine's math properties by the `dbm` unit tests + `tests/systems/test_contract.c` (checks 23/23b — the line-matched C twin: the closure vs the brute-force relax-to-fixpoint reference over randomized zones, emptiness, ∩ exact by enumeration, the join over-approximates sound-not-exact, the facts-table hit/miss, the fork-probed [E-0702] fail-fast); the price by `bench/RESULTS_CONTRACT.md` (the O(V³) floor at V=25/50/100, the memoized fast path's payoff, the ~0.96 ns/call runtime price of the degrade against zero for the discharge).
+
+---
+
+## 30. Tape Record Kinds — W2C's P5↔P2 elevation plan, executable (implemented)
+
+**`tape<int> t = tape_new("name")`** — the append-only **δ₀-chronicle**: discrete impulses against an integrated state, ordered by a clock, replay = re-integration from a checkpoint (SWARM RABBIT HOLE, Wave 16, Impl-U, Cohort Delta; W2C §36–§38 + §48 item 4 — a P2-sanctioned record kind, like wave's contrib).
+
+**The kinship, ruled honestly (W2C §36):** the tape's SHAPE is the δ₀-chronicle's — true as stated. The ALGEBRA is not: no group on opaque entries (a free monoid at best — differentiation vacuous), no ℐ/𝒟 pair, no chain rule. The elevation is **tier-parametric**: what the tape's records can DO depends on what the recorded values ARE, and the compiler classifies before the first record is written.
+
+```text
+fn main() {
+    tape<int> t = tape_new("gz")
+
+    ptr x0 = zset_new(0)                 // the Tier-G carrier (ℤ[X], exact ⊖)
+    ptr x1 = zset_new(0)
+    zset_add(x1, 10, 3)
+
+    tape_record(t, 1, x0, x1)            // DELTA: the (prev → next) pair — the law CHECKED here
+    tape_record(t, 2, x1)                // CHECKPOINT: the state snapshot (the re-integration base)
+
+    ptr r = zset_new(0)
+    tape_replay(t, r)                    // replay == re-integration: base ⊕ the window
+    print(zset_count(r, 10))             // 3 — the direct computation, identically
+
+    tape_record(t, 0, 42)                // OPAQUE: the raw chronicle (no algebra, no law)
+    print(tape_len(t))                   // 3
+    print(tape_rec_payload(t, 2))        // 42 — the opaque readback
+}
+```
+
+**The three record kinds** (`tape_record(t, kind, ...)` — the kind is a compile-time literal):
+
+| Kind | Record | The law, checked at the effect boundary (the record IS the boundary) | Replay |
+|---|---|---|---|
+| **0 — opaque** (the default) | a raw int payload | none — W2C §36's free-monoid baseline; differentiation vacuous | **refused** in the window ([E-TAPE]: an opaque record has no integral to contribute) |
+| **1 — delta** | the `(prev → next)` carrier pair | **Tier G**: d = b ⊖ a derived (`sn_zset_delta`), ILC's **a ⊕ (b ⊖ a) = b** verified by reconstruction (apply + compare) before the impulse is accepted; stored as raw (key, count) pairs — E2's embeddability LITERAL (the delta records embed in the ℤ[X] multiplicity carrier). **Tier L**: m^δ = `sn_lcell_delta` (the join-decomposition-optimal fragment), the mutator law **X ⊔ m^δ(X) = m(X)** verified (apply + `sn_lcell_eq`); NO ⊖ exists on this path (the E-LRET precedent). **Tier O**: REFUSED — no delta-local law at any price; the tape falls back to opaque (E2's honest fallback) | Tier G: ⊕-fold of the pairs. Tier L: ⊔-fold of the offers (inflate only) |
+| **2 — checkpoint** | the carrier state snapshot | the snapshot IS the base (no law to check; a Tier-O value is refused — no carrier to snapshot) | resets the integration base; `tape_replay` folds ONLY the records after the LAST checkpoint |
+
+**`tape_replay(t, target)` — replay = re-integration, tier-parametrically.** **Tier G**: the target is reset to the zero state (the group inverse — Tier-G's exact capability), the last checkpoint's snapshot pairs apply, then every delta impulse in the window; the fold is idempotent by exactness, and the no-checkpoint fold from ∅ is the accumulated change (exact when the chain is rooted at ∅). **Tier L**: the base's offers and the window's fragments ⊔-join into the target (inflate only — the LVar discipline; idempotent by ⊔-idempotence); **without a checkpoint the replay is REFUSED** ([E-TAPE]) — the fragments are state-relative (the mutator law joins m^δ onto ITS base), and a ⊥-based fold would silently under-approximate. The honest asymmetry: **Tier-G deltas are absolute (a group difference); Tier-L fragments are state-relative (the semilattice's price — no ⊖, E-LRET).**
+
+**The tier classification (per record kind, at compile time).** The checker classifies a delta record's endpoints as a pure function of their origin (W2C §1.1/§38 E2): **Tier G** — the `zset_*` constructors (`zset_new/copy/delta/apply` initializers) or a `tape_delta(G)` extern's results; **Tier L** — the `lcell_*` constructors or a `tape_delta(L)` extern's results; **Tier O** — everything else (an int, an unannotated extern's results, an unclassified binding): the delta and checkpoint kinds are REFUSED ([E-TAPE], verbatim), the tape falls back to opaque. The classification is the DECLARED ORIGIN (the initializer); the runtime's kind guard is the backstop (a raw-ptr tier mix dies [E-TAPE] at the boundary — the E-LKIND pattern).
+
+**E1 — typed extern deltas (the signature discipline).** `extern "lib" { fn feed(int step) -> tape_delta(G) }` declares the delta type of the extern's RESULTS: the feed's results are delta-chain endpoints of the tier's carrier (the CDC-feed shape — the change between consecutive results is a ℤ[X] element / a Tier-L fragment). Unannotated externs keep **P2's default-unpure OPAQUE form** — the §4 kinship activates exactly when the annotation exists. The compile-time check is the SIGNATURE discipline (the classification above); the ⊕/⊖ laws are checked at the effect boundary on every recorded triple (a lying producer dies there — the tripwire). `tape_delta` in a PARAMETER position is the honest slice-1 refusal (a delta-consuming callee's assumptions are the E3 boundary, below).
+
+**The boundary rules (executable).**
+- **ONE TAPE, ONE LEDGER** — the P2↔wave boundary rule extended to P5 (W2C §4's E4): the first delta/checkpoint record fixes the tape's (tier, carrier); a record against a different carrier, or a replay into a mismatched tier's target, dies [E-TAPE] at the effect boundary (the runtime backstop; the chronicle must stay one linear ledger of one carrier's evolution).
+- **E-TAPE-WAVE** — the whole tape surface (records, replay, reads) is refused inside a wave body: the wave stages its own effects (contrib → J(W), NI(ii) "ports don't escape") and the tape's chronicle must stay one linear ledger of the fallback state; record and read program-order-outside the wave.
+- **E-GC-IN-LANE** — the tape is lane-backed (the hilbert precedent: the header, the record directory, and the flat payload buffer live on lane 0, never gc_track'd, `sn_release` a no-op backstop, refused in GC-managed holders); the records hold RAW int64 pairs only — no GC pointer ever crosses into the chronicle (the derived d/m^δ objects are built, law-checked, flattened onto the lane, and released inside the record call).
+
+**The honest slice-1 boundary.** Slice 1 implements `tape<int>` (the payloads are int64 pairs throughout — other element types are the named boundary) and **function-local** chronicles (a module-scope tape wants the DIFF-4 slot pattern — the named slice-2 form; refused, never silently lowered). **E3 — the chain rule** (transporting typed deltas through derived views, making the tape an impulse stream *in the calculus* — W2C §38's ingredient (3)) is the **named slice-2 boundary**: slice 1 records and replays typed deltas against the LANDED carriers; it does not compose them through user views. **No user-body delta certifier** (W2C §6.4's Propel-style checked-not-proven class) and **no new incrementalization mathematics** (the final report §395 item 11): the compiler's job is classification — which records carry a law, which tier's law it is, and what the replay may honestly claim. Benchmarked in `bench/RESULTS_TAPE.md` (the typed record's ~190× premium over the opaque append — the premium IS the law check; the checkpoint's window economics: O(window) replay vs the O(K) re-scan); runtime mechanics in `tests/systems/test_tape.c` (checks 24/24b — the ILC law on randomized Tier-G triples, the mutator law on all three Tier-L carriers, the replay == re-integration witness on randomized streams with mid-chain checkpoints, the opaque refusal, the one-tape-one-ledger/no-base/tier backstops, fork-probed verbatim); the compile-time arms in `examples/tape_*.sn` + `compiler/tests/golden.rs` (the kind-literal rule, the Tier-O/mixed refusals, the E1 signature discipline, the E-TAPE-WAVE boundary rule, the E-LRET-adjacent ⊖ refusal — all verbatim).

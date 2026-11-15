@@ -1,0 +1,10 @@
+// SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): the record
+// kind is a COMPILE-TIME FACT — the tier classification, the arity
+// shape, and the IR's kind dispatch all fire on the literal. A
+// variable kind is a checked refusal, not a runtime guess.
+fn main() {
+    tape<int> t = tape_new("k")
+    int kind = 0
+    int v = 5
+    tape_record(t, kind, v)
+}

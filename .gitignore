@@ -76,5 +76,7 @@ bench/results/sn_wave_bench
 bench/results/sn_sfc_bench
 # Wave-15 contract bench (Impl-T): same policy — binaries out, raw .txt evidence in.
 bench/results/sn_contract_bench
+# Wave-16 tape bench (Impl-U): same policy — binaries out, raw .txt evidence in.
+bench/results/sn_tape_bench
 # Wave-10 gpool bench (Impl-O): same policy — binaries out, raw .txt evidence in.
 bench/results/sn_gpool_bench

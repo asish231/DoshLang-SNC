@@ -1,0 +1,23 @@
+// SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): the tape's
+// OPAQUE record kind — W2C §36's honest baseline, executable. The
+// default kind: raw int payloads on an append-only chronicle, NO
+// algebra — no ⊕/⊖, no law, differentiation vacuous (a free monoid
+// at best). The readback is the only meaning the records carry.
+//
+// The tape is the P5↔P2 kinship's δ₀-chronicle SHAPE (W2C §36:
+// discrete impulses, ordered by a clock) with the algebra honestly
+// absent — the delta kind (tape_delta_g.sn) is what elevates it.
+fn main() {
+    tape<int> t = tape_new("chronicle")
+
+    tape_record(t, 0, 7)
+    tape_record(t, 0, 11)
+    tape_record(t, 0, 13)
+
+    print(tape_len(t))             // 3 — the chronicle's length
+    print(tape_rec_kind(t, 0))     // 0 — opaque
+    print(tape_rec_kind(t, 1))     // 0
+    print(tape_rec_payload(t, 1))  // 11 — the raw payload reads back
+    print(tape_rec_payload(t, 2))  // 13
+    print("PASS: tape_opaque")
+}

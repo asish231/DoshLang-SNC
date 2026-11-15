@@ -55,6 +55,16 @@ pub enum Type {
     /// sorted order IS the index. Lane-backed like Morton. Slice 1:
     /// K = int, V = int.
     Hilbert(Box<Type>, Box<Type>),
+    /// SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): the tape —
+    /// `tape<int>`, the append-only δ₀-chronicle (W2C §36–§38, §48
+    /// item 4: the P5↔P2 kinship's SHAPE — discrete impulses against
+    /// an integrated state, ordered by a clock, replay =
+    /// re-integration from a checkpoint — made executable with
+    /// tier-parametric record kinds: opaque / delta / checkpoint).
+    /// Lane-backed like the SFC layouts (E-GC-IN-LANE: never ARC'd,
+    /// never gc_track'd, never stored into GC holders). Slice 1:
+    /// elem = int (the payloads are int64 pairs throughout).
+    Tape(Box<Type>),
     /// Opaque raw pointer (C FFI). No borrow tracking, no auto-deref.
     Ptr,
     Optional(Box<Type>),
@@ -122,6 +132,10 @@ impl Type {
                 // values (a lane-backed header pointer).
                 | Type::Morton(_, _)
                 | Type::Hilbert(_, _)
+                // Wave 16 (Impl-U): the tape is a pointer-like value
+                // (the lane-backed chronicle header), like the SFC
+                // layouts it follows.
+                | Type::Tape(_)
         )
     }
 
@@ -167,6 +181,11 @@ impl Type {
             Type::Hilbert(k, v) => {
                 TypeAst::Hilbert(Box::new(k.to_type_ast()), Box::new(v.to_type_ast()))
             }
+            // Wave 16 (Impl-U): the tape's round trip through the AST
+            // form. (Type::TapeDelta does not exist — the annotation
+            // resolves to Type::Ptr at parse-resolve time; the tier
+            // lives in the checker's extern table, not the type.)
+            Type::Tape(e) => TypeAst::Tape(Box::new(e.to_type_ast())),
             Type::Ptr => TypeAst::Ptr,
             Type::Optional(inner) => TypeAst::Optional(Box::new(inner.to_type_ast())),
             Type::Tuple(ts) => TypeAst::Tuple(ts.iter().map(|t| t.to_type_ast()).collect()),
@@ -281,10 +300,17 @@ impl Type {
         if let (Type::Hilbert(ka, va), Type::Hilbert(kb, vb)) = (self, other) {
             return ka == kb && va == vb;
         }
-        if matches!(self, Type::Morton(_, _) | Type::Hilbert(_, _)) {
+        // Wave 16 (Impl-U): the tape assigns ONLY to the identical type
+        // (the lane-backed chronicle never coerces to int/ptr —
+        // E-GC-IN-LANE polices the store sites separately; the SFC
+        // layouts' rule, verbatim).
+        if let (Type::Tape(a), Type::Tape(b)) = (self, other) {
+            return a == b;
+        }
+        if matches!(self, Type::Morton(_, _) | Type::Hilbert(_, _) | Type::Tape(_)) {
             return false;
         }
-        if matches!(other, Type::Morton(_, _) | Type::Hilbert(_, _)) {
+        if matches!(other, Type::Morton(_, _) | Type::Hilbert(_, _) | Type::Tape(_)) {
             return false;
         }
         if (matches!(self, Type::Int) && matches!(other, Type::Handle(_)))
@@ -467,6 +493,7 @@ impl fmt::Display for Type {
             // syntax (the verbatim E-SFC diagnostics quote it).
             Type::Morton(elem, dims) => write!(f, "morton list<{elem}, {}>", morton_dims_label(dims)),
             Type::Hilbert(k, v) => write!(f, "hilbert map<{k}, {v}>"),
+            Type::Tape(e) => write!(f, "tape<{e}>"),
             Type::Blueprint(n) | Type::Named(n) | Type::Record(n) | Type::Enum(n) | Type::Contract(n) => write!(f, "{n}"),
             Type::Any => write!(f, "any"),
             Type::Lock => write!(f, "lock"),
@@ -524,6 +551,14 @@ pub fn ast_to_type(t: &TypeAst) -> Type {
         TypeAst::Link(i) => Type::Link(Box::new(ast_to_type(i))),
         TypeAst::Morton { elem, dims } => Type::Morton(Box::new(ast_to_type(elem)), dims.clone()),
         TypeAst::Hilbert(k, v) => Type::Hilbert(Box::new(ast_to_type(k)), Box::new(ast_to_type(v))),
+        // Wave 16 (Impl-U): the tape type; and E1's annotation —
+        // `tape_delta(G|L)` resolves to Type::Ptr (the carrier
+        // object's ABI: the extern returns the carrier pointer), the
+        // tier is the SIGNATURE discipline recorded at the extern
+        // registration (check.rs) — the annotation is not a runtime
+        // type.
+        TypeAst::Tape(e) => Type::Tape(Box::new(ast_to_type(e))),
+        TypeAst::TapeDelta(_) => Type::Ptr,
         TypeAst::Optional(i) => Type::Optional(Box::new(ast_to_type(i))),
         TypeAst::Tuple(xs) => Type::Tuple(xs.iter().map(ast_to_type).collect()),
     }

@@ -1,0 +1,55 @@
+// SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): the Tier-G
+// DELTA record kind — W2C §38's E1/E2 made executable against the
+// landed Tier-G carrier (the ℤ[X] Z-set, P5 slice 1).
+//
+// A delta record carries the (prev -> next) source-target change
+// against a Tier-G Z-set: the tape derives d = next ⊖ prev (the
+// Z-set difference — the exact group ⊖ the Tier-G carrier owns),
+// CHECKS ILC's law a ⊕ (b ⊖ a) = b at the effect boundary (the
+// record IS the boundary — the reconstruction apply(prev, d) is
+// compared against next before the impulse is accepted), and stores
+// the impulse as raw (key, count) pairs — the ℤ[X] multiplicity
+// representation itself (E2's embeddability: the delta records embed
+// in the Tier-G carrier literally).
+//
+// tape_replay folds the records after the last checkpoint (none
+// here: from the zero state ∅) into the target: replay ==
+// re-integration (W2C §36's shape, now executable). The witness:
+// the replayed state equals the direct computation (x3) exactly.
+fn main() {
+    tape<int> t = tape_new("gz")
+
+    // The chain x0 = ∅ -> x1 -> x2 -> x3 (the ledger's evolution).
+    ptr x0 = zset_new(0)
+    ptr x1 = zset_new(0)
+    zset_add(x1, 10, 3)
+    zset_add(x1, 20, 5)
+    ptr x2 = zset_new(0)
+    zset_add(x2, 10, 3)
+    zset_add(x2, 20, 5)
+    zset_add(x2, 30, 2)
+    zset_remove(x2, 20, 4)          // x2 = {10:3, 20:1, 30:2} — ⊖ first-class
+    ptr x3 = zset_new(0)
+    zset_add(x3, 10, 3)
+    zset_add(x3, 30, 2)
+    zset_add(x3, 20, 1)              // x3 == x2 — the zero impulse is legal
+
+    tape_record(t, 1, x0, x1)        // impulse: {10:3, 20:5}
+    tape_record(t, 1, x1, x2)        // impulse: {30:2, 20:-4}
+    tape_record(t, 1, x2, x3)        // impulse: ∅ (pruned — nothing moved)
+
+    print(tape_len(t))               // 3
+    print(tape_rec_kind(t, 1))       // 1 — the delta kind
+
+    // The replay == re-integration witness: fold from ∅ into a fresh
+    // Z-set; the result must equal the chain's endpoint x3 exactly.
+    ptr r = zset_new(0)
+    tape_replay(t, r)
+    print(zset_count(r, 10))         // 3
+    print(zset_count(r, 20))         // 1
+    print(zset_count(r, 30))         // 2
+    print(zset_total(r))             // 6
+    print(zset_total(x3))            // 6 — the direct computation agrees
+    print(zset_count(x3, 20))        // 1
+    print("PASS: tape_delta_g")
+}

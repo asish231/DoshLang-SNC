@@ -471,6 +471,20 @@ declare i64 @sn_hilbert_entry_val(ptr, i64)
 declare i64 @sn_hilbert_box_first(ptr, i64, i64, i64, i64)
 declare i64 @sn_hilbert_box_next(ptr, i64, i64, i64, i64, i64)
 declare i64 @sn_sfc_path()
+/* SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): the tape —
+   W2C's P5↔P2 elevation plan executable (§36–§38, §48 item 4). The
+   lane-backed chronicle header + the three record kinds; the two
+   record ABIs split by kind (kind 0's int payload vs kinds 1/2's
+   carrier pointers — the checker guarantees the kind literal). The
+   law checks (ILC on Tier-G triples, the mutator law on Tier-L
+   pairs) run inside sn_tape_record_p at the effect boundary. */
+declare ptr @sn_tape_new(ptr)
+declare void @sn_tape_record_i(ptr, i64, i64)
+declare void @sn_tape_record_p(ptr, i64, ptr, ptr)
+declare void @sn_tape_replay(ptr, ptr)
+declare i64 @sn_tape_len(ptr)
+declare i64 @sn_tape_rec_kind(ptr, i64)
+declare i64 @sn_tape_rec_payload(ptr, i64)
 ; Salt ζ — the fixpoint-bracket engine (SWARM RABBIT HOLE, Wave 9, Impl-N;
 ; W2C §3.3–§3.5). No sn_zfix_count / sn_zfix_negate exist at runtime: the
 ; admission checker ALWAYS rejects the two named divergence classes with

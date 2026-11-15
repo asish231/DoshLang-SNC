@@ -252,6 +252,23 @@ pub enum TypeAst {
     /// Entries sorted by d=2 Hilbert key on a lane; the sorted order
     /// IS the index. Slice 1 implements hilbert map<int, int>.
     Hilbert(Box<TypeAst>, Box<TypeAst>),
+    /// SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): the tape —
+    /// `tape<int>`, the append-only δ₀-chronicle (W2C §36–§38: the
+    /// P5↔P2 kinship's shape, made executable with tier-parametric
+    /// record kinds). Lane-backed header (the hilbert precedent:
+    /// never gc_track'd — E-GC-IN-LANE); slice 1 implements
+    /// tape<int> (the payloads are int64 pairs throughout).
+    Tape(Box<TypeAst>),
+    /// SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): E1's
+    /// extern-result annotation — `-> tape_delta(G)` / `-> tape_delta(L)`
+    /// (W2C §38: the extern declares the delta type of its results;
+    /// unannotated externs keep P2's default-unpure OPAQUE form). The
+    /// dec(n) keyword+parens type precedent; resolves to Type::Ptr
+    /// (the carrier object's ABI) with the tier recorded at the extern
+    /// registration — the annotation is the compile-time signature
+    /// discipline, not a runtime type. Tier code: 1 = G, 2 = L
+    /// (runtime.c's TAPE_TIER_G/TAPE_TIER_L).
+    TapeDelta(i64),
     Optional(Box<TypeAst>),
     Tuple(Vec<TypeAst>),
     Fn {

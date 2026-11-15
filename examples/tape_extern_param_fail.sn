@@ -1,0 +1,13 @@
+// SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): the E1
+// signature discipline — tape_delta types annotate extern RESULTS
+// (the delta type of what the extern PRODUCES). A delta-typed
+// parameter is not part of the slice-1 surface (what a delta-
+// consuming callee may assume about its input is the E3 chain-rule
+// boundary, named in the spec, not claimed here).
+extern "m" {
+    fn feed(tape_delta(G) x) -> int
+}
+
+fn main() {
+    print(feed(0))
+}

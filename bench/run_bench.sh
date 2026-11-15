@@ -574,6 +574,66 @@ if [ -n "${CONTRACT_ONLY:-}" ]; then
     exit 0
 fi
 
+# ---------- tape rows (Wave 16, Impl-U) ----------
+# bench/tape_bench.sn — the tape record kinds' price rows,
+# in-language (W2C §36–§38 — the P5↔P2 elevation plan; SWARM RABBIT
+# HOLE, Wave 16). Rows: the OPAQUE append (§36's free-monoid baseline
+# — the cheapest legal record) vs the DELTA record's premium (derive
+# ⊖ + the ILC law check at the effect boundary + flatten + append,
+# the typed record's honest price); the CHECKPOINT snapshot cost (the
+# O(support) base that makes replay start in O(1)); and the §36
+# replay-vs-reintegration economics — reps replays of the SAME
+# impulse multiset with (tape_replay_ck: the second half only — the
+# last checkpoint reset the base) vs without (tape_replay_full:
+# every impulse re-scanned from the zero state). THE CHECKSUMS OF THE
+# TWO REPLAY ROWS MUST BE IDENTICAL (replay == re-integration, the
+# cross-row witness self-checked in the benchmark). Every op phase
+# >= 100x the ms clock (the W2F discipline). Results:
+# bench/RESULTS_TAPE.md. TAPE_ONLY=1 ./run_bench.sh runs just these
+# rows.
+tape_rows() {
+    echo "-- building tape bench (Wave 16, Impl-U)"
+    "$SNC" tape_bench.sn -o "$OUT/sn_tape_bench" || exit 1
+    local rounds="${TAPE_ROUNDS:-1000}"
+    local warm=$((rounds / 10))
+    if [ "$warm" -lt 1 ]; then warm=1; fi
+    local f r b spec
+    b=sn_tape_bench
+    f="$OUT/$b.txt"
+    : > "$f"
+    echo "-- warmup $b (rounds=$warm)" >&2
+    "$OUT/$b" "$warm" >/dev/null 2>&1
+    echo "-- timed $b x$RUNS (rounds=$rounds)" >&2
+    for r in $(seq "$RUNS"); do
+        "$OUT/$b" "$rounds" >> "$f" 2>/dev/null
+    done
+    echo "-- tape medians (rounds=$rounds, K=100K records/round, median of $RUNS):"
+    for spec in \
+        "timer ns_per_op" \
+        "tape_opaque ns_per_op" \
+        "tape_opaque phase_ms" \
+        "tape_delta_g ns_per_op" \
+        "tape_delta_g phase_ms" \
+        "tape_ckpt ns_per_op" \
+        "tape_ckpt phase_ms" \
+        "tape_replay_ck ns_per_op" \
+        "tape_replay_ck phase_ms" \
+        "tape_replay_full ns_per_op" \
+        "tape_replay_full phase_ms"; do
+        set -- $spec
+        echo "  $1.$2 = $(median_row "$OUT/$b.txt" "$1" "$2")"
+    done
+    echo "-- tape checksums (must be identical across all runs; tape_replay_ck == tape_replay_full):"
+    grep -h "^BENCH row=" "$OUT/$b.txt" | grep -v "row=timer" | sort | uniq -c
+}
+
+if [ -n "${TAPE_ONLY:-}" ]; then
+    tape_rows
+    echo
+    echo "== done (TAPE_ONLY). raw runs in $OUT/sn_tape_bench.txt ; see RESULTS_TAPE.md =="
+    exit 0
+fi
+
 # ---------- run + collect ----------
 collect() {  # collect NAME -- cmd...
     local name="$1"; shift; shift
@@ -611,6 +671,9 @@ wave_rows
 
 # sfc rows (Wave 14, Impl-S): see sfc_rows above
 sfc_rows
+
+# tape rows (Wave 16, Impl-U): see tape_rows above
+tape_rows
 
 # per-run peak RSS (one run each; RSS is stable)
 echo "-- peak RSS (KB)"

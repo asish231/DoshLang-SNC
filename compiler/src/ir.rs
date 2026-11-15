@@ -2832,7 +2832,10 @@ impl Cx<'_> {
             | Type::Ref(_) | Type::Chan(_) | Type::Json | Type::Named(_)
             // Wave 14 (Impl-S): the SFC layouts are pointer-like
             // values (the lane-backed header pointer) — pass through.
-            | Type::Morton(_, _) | Type::Hilbert(_, _) => v,
+            | Type::Morton(_, _) | Type::Hilbert(_, _)
+            // Wave 16 (Impl-U): the tape is a pointer-like value (the
+            // lane-backed chronicle header) — the same pass-through.
+            | Type::Tape(_) => v,
             Type::Enum(en) if self.db.is_algebraic_enum(&en) => v,
             _ => {
                 let p = self.t();
@@ -4525,6 +4528,75 @@ impl Cx<'_> {
             "sfc_path" => {
                 let r = self.t();
                 self.line(&format!("{r} = call i64 @sn_sfc_path()"));
+                (r, Type::Int)
+            }
+            /* Tape builtins (SWARM RABBIT HOLE, Wave 16, Impl-U,
+               Cohort Delta; W2C §36–§38 + §48 item 4 — the P5↔P2
+               elevation plan made executable). The chronicle header
+               is lane-backed; the record kinds are 0=opaque,
+               1=delta, 2=checkpoint. The checker guarantees the kind
+               is a LITERAL, so the kind string is read here to pick
+               the ABI: kind 0 → sn_tape_record_i (the int payload),
+               kinds 1/2 → sn_tape_record_p (the carrier pointers);
+               anything else falls to the int form and the runtime's
+               unknown-kind [E-TAPE] refusal catches it (the
+               checker-refused shapes never reach here). */
+            "tape_new" => {
+                /* The name is a str value — already a ptr-typed SSA
+                   (the path_join/sb_append_str precedent: no as_ptr
+                   on str args). */
+                let s = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let r = self.t();
+                self.line(&format!("{r} = call ptr @sn_tape_new(ptr {s})"));
+                (r, Type::Tape(Box::new(Type::Int)))
+            }
+            "tape_record" => {
+                let t0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let t = self.as_ptr(t0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let kind = vs.get(1).map(|x| x.0.clone()).unwrap_or("0".into());
+                if kind == "0" {
+                    let v = vs.get(2).cloned().unwrap_or(("0".into(), Type::Int));
+                    let vb = self.as_bits(v.0, &v.1);
+                    self.line(&format!(
+                        "call void @sn_tape_record_i(ptr {t}, i64 {kind}, i64 {vb})"
+                    ));
+                } else {
+                    let a0 = vs.get(2).map(|x| x.0.clone()).unwrap_or("null".into());
+                    let a = self.as_ptr(a0, vs.get(2).map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                    let b0 = vs.get(3).map(|x| x.0.clone()).unwrap_or("null".into());
+                    let b = self.as_ptr(b0, vs.get(3).map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                    self.line(&format!(
+                        "call void @sn_tape_record_p(ptr {t}, i64 {kind}, ptr {a}, ptr {b})"
+                    ));
+                }
+                ("0".into(), Type::Void)
+            }
+            "tape_replay" => {
+                let t0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let t = self.as_ptr(t0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let g0 = vs.get(1).map(|x| x.0.clone()).unwrap_or("null".into());
+                let g = self.as_ptr(g0, vs.get(1).map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                self.line(&format!("call void @sn_tape_replay(ptr {t}, ptr {g})"));
+                ("0".into(), Type::Void)
+            }
+            "tape_len" => {
+                let t0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let t = self.as_ptr(t0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let r = self.t();
+                self.line(&format!("{r} = call i64 @sn_tape_len(ptr {t})"));
+                (r, Type::Int)
+            }
+            "tape_rec_kind" | "tape_rec_payload" => {
+                let t0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let t = self.as_ptr(t0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let i = self.sfc_i(&vs, 1);
+                let r = self.t();
+                let f = if n == "tape_rec_kind" {
+                    "sn_tape_rec_kind"
+                } else {
+                    "sn_tape_rec_payload"
+                };
+                self.line(&format!("{r} = call i64 @{f}(ptr {t}, i64 {i})"));
                 (r, Type::Int)
             }
             /* Salt-ζ fixpoint builtins (SWARM RABBIT HOLE, Wave 9,

@@ -1,0 +1,9 @@
+// SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): the checkpoint
+// is a CARRIER SNAPSHOT — a Tier-G Z-set or a Tier-L cell. A
+// Tier-O value has no carrier to snapshot (W2C §1.1: the ordered
+// summaries pay the cell-probe barriers; no delta-local law at any
+// price), so the checkpoint kind on O values is a checked refusal.
+fn main() {
+    tape<int> t = tape_new("co")
+    tape_record(t, 2, 5)
+}

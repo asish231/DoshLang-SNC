@@ -481,6 +481,12 @@ fn keyword(text: &str) -> TokenKind {
         // on fn declarations; `result` stays a contextual ident).
         "requires" => TokenKind::Requires,
         "ensures" => TokenKind::Ensures,
+        // SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): the tape
+        // — W2C's P5↔P2 elevation plan (§36–§38, §48 item 4). The
+        // chronicle type `tape<int>` and E1's extern-result annotation
+        // `-> tape_delta(G|L)`.
+        "tape" => TokenKind::TapeKw,
+        "tape_delta" => TokenKind::TapeDeltaKw,
         _ => TokenKind::Ident,
     }
 }

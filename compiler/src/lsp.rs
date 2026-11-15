@@ -937,6 +937,8 @@ pub fn type_name(t: &crate::types::Type) -> String {
             crate::types::morton_dims_label(dims)
         ),
         Hilbert(k, v) => format!("hilbert map<{}, {}>", type_name(k), type_name(v)),
+        // Wave 16 (Impl-U): the tape chronicle type.
+        Tape(e) => format!("tape<{}>", type_name(e)),
     }
 }
 
@@ -994,6 +996,10 @@ fn type_ast_name(t: &crate::ast::TypeAst) -> String {
             crate::types::morton_dims_label(dims)
         ),
         Hilbert(k, v) => format!("hilbert map<{}, {}>", type_ast_name(k), type_ast_name(v)),
+        // Wave 16 (Impl-U): the tape chronicle type; the E1
+        // annotation (the tier letters G/L display as written).
+        Tape(e) => format!("tape<{}>", type_ast_name(e)),
+        TapeDelta(t) => format!("tape_delta({})", if *t == 1 { "G" } else { "L" }),
     }
 }
 

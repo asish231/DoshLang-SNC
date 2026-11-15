@@ -735,6 +735,40 @@ impl Parser {
                 self.eat_gt()?;
                 Ok(TypeAst::Hilbert(Box::new(k), Box::new(v)))
             }
+            /* SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): the
+               tape types — W2C's P5↔P2 elevation plan executable
+               (§36–§38, §48 item 4). `tape<T>`: the δ₀-chronicle's
+               type (lane-backed; the elem discipline — slice 1 is
+               tape<int> — fires at the declaration site).
+               `tape_delta(G|L)`: E1's extern-result annotation (the
+               dec(n) keyword+parens precedent; the tier is validated
+               HERE — G or L, anything else is a parse error, so the
+               extern walk only ever sees a well-formed tier). */
+            TokenKind::TapeKw => {
+                self.bump();
+                self.eat(TokenKind::Lt)?;
+                let elem = self.parse_type()?;
+                self.eat_gt()?;
+                Ok(TypeAst::Tape(Box::new(elem)))
+            }
+            TokenKind::TapeDeltaKw => {
+                self.bump();
+                self.eat(TokenKind::LParen)?;
+                let tier = self.expect_ident()?;
+                let code = match tier.as_str() {
+                    "G" => 1,
+                    "L" => 2,
+                    _ => {
+                        return Err(self.error(
+                            "expected the delta tier G or L — tape_delta(G|L) types \
+                             the extern's results against the Tier-G carrier or a \
+                             Tier-L carrier (W2C §1.1; E1)",
+                        ));
+                    }
+                };
+                self.eat(TokenKind::RParen)?;
+                Ok(TypeAst::TapeDelta(code))
+            }
             TokenKind::Ident => {
                 let name = self.expect_ident()?;
                 if self.at(TokenKind::Lt) {
@@ -1017,6 +1051,12 @@ impl Parser {
             // through the typed-decl path like link/pool — the `<`
             // after the `list`/`map` keyword is unambiguous here.
             TokenKind::MortonKw | TokenKind::HilbertKw => true,
+            // SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): the
+            // tape declaration (`tape<int> t = ...`) parses through
+            // the typed-decl path — the `<` after `tape` is
+            // unambiguous (TapeDeltaKw never starts a decl: it is an
+            // extern-result annotation only, parsed in type position).
+            TokenKind::TapeKw => true,
             TokenKind::Ident => {
                 matches!(self.peek_n(1), TokenKind::Ident | TokenKind::Question)
                     // `Foo<Bar> x = ...` — generic type application in a
@@ -2338,6 +2378,8 @@ fn is_type_start(k: TokenKind) -> bool {
             // form looks_like_typed_decl holds the full context).
             | TokenKind::MortonKw
             | TokenKind::HilbertKw
+            // Wave 16 (Impl-U): the tape chronicle declaration.
+            | TokenKind::TapeKw
     )
 }
 

@@ -1,0 +1,20 @@
+// SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): the BOUNDARY
+// RULE — one tape, one ledger: the P2↔wave boundary rule (E0812's
+// bracket, NI(ii) "ports don't escape") extended to P5 (W2C §4's
+// E4). A tape op cannot cross a wave body: the wave stages its own
+// effects (contrib → J(W)) and the tape's chronicle must stay one
+// linear ledger of the fallback state — records program-order-
+// outside the wave only. The full tape surface is refused in-wave
+// (records AND reads: under the future parallel form a tape read is
+// schedule-dependent, and slice 1 refuses the whole seam rather
+// than hair-split it).
+ptr seam = lcell_new(1)
+
+fn main() {
+    tape<int> t = tape_new("w")
+    wave {
+        tape_record(t, 0, 1)
+        tape_replay(t, seam)
+        contrib(seam, 4, 0)
+    }
+}

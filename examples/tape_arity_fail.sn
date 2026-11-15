@@ -1,0 +1,9 @@
+// SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort Delta): the per-kind
+// ARITY rule — the record payload shape is part of the kind's
+// contract: opaque takes one int payload, delta takes the (prev,
+// next) carrier pair, checkpoint takes the carrier state.
+fn main() {
+    tape<int> t = tape_new("ar")
+    ptr z = zset_new(0)
+    tape_record(t, 1, z)
+}
