@@ -269,6 +269,24 @@ fn illegal_field_assignment() {
 }
 ```
 
+#### Rule 3: Pinned Lane Accumulator Budget (`E0802c`)
+The compiler automatically colors recursive `inout` list accumulators onto dedicated pinned execution lanes (Lanes L2 through L6) so their headers survive recursive chains and unwind in $\mathcal{O}(1)$ time. 
+
+Because lanes L2–L6 provide 5 hardware-isolated accumulator lanes per thread, having more than 5 live recursive accumulators simultaneously within one Strongly Connected Component (SCC) triggers `E0802c`:
+
+```snlang
+// FORBIDDEN: 6th simultaneous accumulator exceeds pinned lane hardware budget
+fn deep_recursive_pipeline(
+    list<int> a, list<int> b, list<int> c, 
+    list<int> d, list<int> e, list<int> f // 6th accumulator!
+) {
+    // ERROR E0802c: pinned lane budget exceeded (maximum 5 live accumulators)
+}
+```
+> **Compiler Diagnostic:**  
+> `error: E0802c: pinned lane budget exceeded (maximum 5 live accumulators in SCC); use explicit heap-backed list or restructure recursion [E0802c]`
+```
+
 ---
 
 ## 5. Memory Space Isolation (`E-GC-IN-LANE`)
@@ -300,7 +318,8 @@ A central pillar of the SNlang runtime is **Memory Space Isolation**. Pinned thr
 The compiler strictly verifies at compile time that lane-allocated structures (such as pinned lists or lane buffers) never cross into the garbage-collected domain:
 
 ```snlang
-fn illegal_cross_tier_capture() {
+// FORBIDDEN Direction 1: Cannot store managed GC reference into pinned lane
+fn illegal_gc_into_lane() {
     list<str> managed_strings = ["apple", "banana"] // Managed heap list
     
     region {
@@ -309,6 +328,17 @@ fn illegal_cross_tier_capture() {
         
         // ERROR E-GC-IN-LANE: Attempted to store managed GC reference into pinned lane
         pinned_acc.push(managed_strings[0])
+    }
+}
+
+// FORBIDDEN Direction 2: Cannot store lane pointer into a managed heap structure
+fn illegal_lane_into_gc() {
+    list<ptr> heap_list = [] // Heap-allocated GC list
+    
+    region {
+        ptr lane_buffer = lane_alloc(0, 512)
+        // ERROR E-GC-IN-LANE: Cannot store lane-allocated pointer into GC-managed object
+        heap_list.push(lane_buffer)
     }
 }
 ```

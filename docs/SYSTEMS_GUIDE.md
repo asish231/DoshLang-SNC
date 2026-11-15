@@ -10,11 +10,19 @@
 1. [Architecture Overview & Design Philosophy](#1-architecture-overview--design-philosophy)
 2. [Chapter 1: Deterministic Regional Memory & Elastic Arenas](#chapter-1-deterministic-regional-memory--elastic-arenas)
 3. [Chapter 2: Cache-Oblivious Space-Filling Collections](#chapter-2-cache-oblivious-space-filling-collections)
+   - [2.4 The Space-Filling Refusal Catalog (How SFC Fails)](#24-the-space-filling-refusal-catalog-how-sfc-layouts-fail)
 4. [Chapter 3: Deterministic Concurrency & Monotonic Semilattices](#chapter-3-deterministic-concurrency--monotonic-semilattices)
+   - [3.5 The Strict Wave Refusal Catalog (How Waves Fail)](#35-the-strict-wave-refusal-catalog-how-waves-fail)
 5. [Chapter 4: Contract-Based Static Verification](#chapter-4-contract-based-static-verification)
+   - [4.4 The Contract Refusal Catalog (How Contracts Fail)](#44-the-contract-refusal-catalog-how-contracts-fail)
 6. [Chapter 5: State Chronology & Differential Dataflow](#chapter-5-state-chronology--differential-dataflow)
+   - [5.5 The Chronology & Fixpoint Refusal Catalog (How Tapes & Fixpoints Fail)](#55-the-chronology--fixpoint-refusal-catalog-how-tapes-and-fixpoints-fail)
 7. [Chapter 6: Relocatable Links & Generational Slot Pools](#chapter-6-relocatable-links--generational-slot-pools)
+   - [6.3 The Links and Pools Refusal Catalog (How Links & Pools Fail)](#63-the-links-and-pools-refusal-catalog-how-links-and-pools-fail)
 8. [Chapter 7: Practical Systems Tutorials & Production Recipes](#chapter-7-practical-systems-tutorials--production-recipes)
+   - [Tutorial 7.1: 2D Stencils with Morton Lists](#tutorial-71-high-performance-2d-stencil-computation-with-morton-lists)
+   - [Tutorial 7.2: Real-Time Telemetry with Waves & LCells](#tutorial-72-conflict-free-real-time-telemetry-aggregation-with-waves--lcells)
+   - [Tutorial 7.3: Event Sourcing with Differential Tapes & Z-Sets](#tutorial-73-audit-compliant-event-sourcing-with-differential-tapes--z-sets)
 9. [Compiler Diagnostic Code Reference](#compiler-diagnostic-code-reference)
 
 ---
@@ -157,6 +165,47 @@ fn spatial_lookup() {
 * **`W-SFC-T5B` (Access Pattern Warning)**: The compiler detects naive row-major nested loops iterating over a `morton list` and emits a warning that row-major traversal wastes the space-filling cacheline guarantees.
 * **Hardware Intrinsics Dispatch**: On x86_64 CPUs supporting BMI2, coordinate bit-interleaving automatically lowers to single-cycle hardware instructions (`PDEP` / `PEXT`). On ARM64 (Apple Silicon), it lowers to an optimized software shift-OR sequence.
 
+### 2.4 The Space-Filling Refusal Catalog: How SFC Layouts Fail
+
+#### Refusal 1: Non-Power-of-Two or Rectangular Dimensions (`E-SFC`)
+```snlang
+// FORBIDDEN: Morton grid dimensions must be square equal powers of two
+morton list<int, dims=[10, 10]> invalid_a = morton_new(10, 10) // ERROR E-SFC
+morton list<int, dims=[16, 32]> invalid_b = morton_new(16, 32) // ERROR E-SFC
+```
+> **Compiler Diagnostic:**  
+> `error: E-SFC: morton list dimensions must be equal powers of two (e.g. [16, 16], [64, 64]) [E-SFC]`
+
+#### Refusal 2: Declared vs. Constructor Dimension Mismatch (`E-SFC`)
+```snlang
+// FORBIDDEN: Constructor arguments must match the type signature
+morton list<int, dims=[16, 16]> m = morton_new(32, 32) // ERROR E-SFC
+```
+> **Compiler Diagnostic:**  
+> `error: E-SFC: literal dimensions [32, 32] do not match declared type dims [16, 16] [E-SFC]`
+
+#### Refusal 3: Out-of-Order Hilbert Key Inserts (`E-SFC-ORDER`)
+```snlang
+// FORBIDDEN: Hilbert maps are sorted lanes; keys must be inserted in curve order
+hilbert map<int, int> h = hilbert_new(3)
+hilbert_insert(h, 4, 4, 100)
+hilbert_insert(h, 1, 1, 200) // RUNTIME ERROR [E-SFC-ORDER]
+```
+> **Compiler Diagnostic:**  
+> `runtime error: [E-SFC-ORDER]: hilbert map keys must be inserted in strictly ascending hilbert curve order`
+
+#### Advisory Warning: Naive Row-Major Loops Over Morton Memory (`W-SFC-T5B`)
+```snlang
+// LEGAL BUT DEGRADES PERFORMANCE: Iterating row-major loses spatial locality
+for (int y = 0, y < 16, y += 1) {
+    for (int x = 0, x < 16, x += 1) {
+        int v = morton_get(m, x, y) // WARNING W-SFC-T5B
+    }
+}
+```
+> **Compiler Diagnostic:**  
+> `warning: W-SFC-T5B: row-major iteration over morton storage destroys cache locality; iterate in curve order (morton_scan_get) or use soa`
+
 ---
 
 ## Chapter 3: Deterministic Concurrency & Monotonic Semilattices
@@ -212,6 +261,149 @@ fn main() {
 * **`E0812` (Purity Kill-Switch)**: Code executed inside `wave { }` must be a pure mathematical function of the captured state. The compiler rejects wall-clock reads (`time_now_ms`), environment lookups, channel receives, and locks inside wave blocks via static interprocedural analysis.
 * **`E-R1` (Quiescent Capture Violation)**: Modifying a seam cell concurrently during an active wave is rejected. Calling `read_W` outside a wave or `read_J` before a join point triggers a compile-time refusal.
 * **`E-LRET` (Monotonicity Violation)**: Join-semilattices do not admit negation or decrement. Attempting to retract or clear an `lcell` is forbidden.
+
+### 3.5 The Strict Wave Refusal Catalog: How Waves Fail
+
+To protect deterministic confluence, the compiler acts as a strict mathematical verifier. Below are the exact failure scenarios and the compiler diagnostics they trigger:
+
+#### Refusal 1: Reading System Clocks (`E0812`)
+```snlang
+// FORBIDDEN: Injects OS execution schedule into wave
+wave {
+    int now = time_now_ms() // ERROR E0812
+}
+```
+> **Compiler Diagnostic:**  
+> `error: E0812: wave body reads schedule-dependent state 'time_now_ms' — wave bodies must be pure functions of the frozen capture (Lemma WD's premise); this is the kill switch: the determinism grade degrades without it [E0812]`
+
+#### Refusal 2: Environment Lookups & IO (`E0812`)
+```snlang
+// FORBIDDEN: External environment read breaks purity
+wave {
+    str key = os_getenv("API_KEY") // ERROR E0812
+}
+```
+> **Compiler Diagnostic:**  
+> `error: E0812: wave body reads schedule-dependent state 'os_getenv' [E0812]`
+
+#### Refusal 3: Channel Receives Inside Wave (`E0812`)
+```snlang
+// FORBIDDEN: Channel receive timing is non-deterministic
+chan<int> ch
+wave {
+    int val, bool ok = ch.receive() // ERROR E0812
+}
+```
+> **Compiler Diagnostic:**  
+> `error: E0812: wave body reads schedule-dependent state 'receive' [E0812]`
+
+#### Refusal 4: Spawning Concurrent Tasks (`E0812`)
+```snlang
+// FORBIDDEN: In SNlang, the wave IS the parallelism
+wave {
+    spawn { do_work() } // ERROR E0812
+}
+```
+> **Compiler Diagnostic:**  
+> `error: E0812: wave body spawns — the wave IS the parallelism [E0812]`
+
+#### Refusal 5: Nested Waves (`E0812`)
+```snlang
+// FORBIDDEN: Nested waves violate quiescence proofs
+wave {
+    wave { // ERROR E0812
+        contrib(c, 10, 0)
+    }
+}
+```
+> **Compiler Diagnostic:**  
+> `error: E0812: a wave body may not nest a wave [E0812]`
+
+#### Refusal 6: Early Returns, Breaks, or Defer (`E0812`)
+```snlang
+// FORBIDDEN: Execution path from contrib to J(W) must be unconditional
+wave {
+    if (cond) {
+        return 0 // ERROR E0812: early return breaks join guarantee
+    }
+}
+```
+> **Compiler Diagnostic:**  
+> `error: E0812: a wave body may not return early [E0812]`
+
+#### Refusal 7: Fallback Reads (`read_S`) or Fallback Sync Ops Inside Wave (`E0812`)
+```snlang
+// FORBIDDEN: Seam cells inside wave can only use read_W and contrib
+wave {
+    int v = lcell_value(my_cell) // ERROR E0812: read_S fallback read
+    lcell_merge(my_cell, other)  // ERROR E0812: fallback sync op
+}
+```
+> **Compiler Diagnostic:**  
+> `error: E0812: wave body reads seam cell 'my_cell' in fallback mode (read_S) [E0812]`  
+> `error: E0812: wave body performs the fallback sync op 'lcell_merge' [E0812]`
+
+#### Refusal 8: Fallback Merges After a Wave (`E-R1`)
+```snlang
+// FORBIDDEN: Modifying seam cell after wave without provable synchronization
+wave {
+    contrib(peak_latency, 100, 0)
+}
+lcell_inflate(peak_latency, 200, 0) // ERROR E-R1
+```
+> **Compiler Diagnostic:**  
+> `error: E-R1: capture of 'peak_latency' is not R1-quiescent: a fallback merge into 'peak_latency' is not HB-before this wave — determinism would be conditional; make the merge program-order-before the wave, or use contrib-only [E-R1]`
+
+#### Refusal 9: Concurrent Waves Sharing Seam Cells Across Functions (`E-R1`)
+```snlang
+// FORBIDDEN: Waves in different functions sharing seam cells without sequential edge
+fn task_a() { wave { contrib(shared_cell, 10, 0) } }
+fn task_b() { wave { contrib(shared_cell, 20, 0) } } // ERROR E-R1
+```
+> **Compiler Diagnostic:**  
+> `error: E-R1: two waves share seam cell 'shared_cell' — neither capture can be R1-quiescent w.r.t. the other; compose them sequentially [E-R1]`
+
+#### Refusal 10: `read_W` and `contrib` Used Outside Wave (`E-R1`)
+```snlang
+// FORBIDDEN: Staging contributions without an active wave join
+fn main() {
+    contrib(my_cell, 50, 0) // ERROR E-R1
+}
+```
+> **Compiler Diagnostic:**  
+> `error: E-R1: contrib stages a payload into the enclosing wave's join (J(W)) — no wave encloses this call [E-R1]`
+
+#### Refusal 11: Calling `read_J` Before Wave Join Has Occurred (`E-R1`)
+```snlang
+// FORBIDDEN: Temporal ordering violation
+fn main() {
+    int val = read_J(peak_latency) // ERROR E-R1: join has not happened!
+    wave { ... }
+}
+```
+> **Compiler Diagnostic:**  
+> `error: E-R1: read_J requires J(W) to have happened — 'peak_latency' has no wave joined at this point [E-R1]`
+
+#### Refusal 12: Function-Local Variables Cannot Be Seam Cells (`E-R1`)
+```snlang
+// FORBIDDEN: Seam cells must be declared at module scope
+fn main() {
+    ptr local_cell = lcell_new(0)
+    wave {
+        contrib(local_cell, 10, 0) // ERROR E-R1
+    }
+}
+```
+> **Compiler Diagnostic:**  
+> `error: E-R1: 'local_cell' is not a seam cell — a seam cell is a module-scope 'ptr' declared with an lcell_new initializer [E-R1]`
+
+#### Refusal 13: Lattice Retraction Rejection (`E-LRET`)
+```snlang
+// FORBIDDEN: Join-semilattices can only inflate; retractions do not exist
+lcell_retract(peak_latency, 50) // ERROR E-LRET
+```
+> **Compiler Diagnostic:**  
+> `error: exact retraction on a Tier-L join-semilattice is impossible (the merge operator is non-embeddable: x⊔x = x ⇒ [x] = 0 — Grothendieck triviality; retraction on Tier L is tombstoned or none, never exact); use a Tier-G Z-set (zset_*) for exact retraction [E-LRET]`
 
 ---
 
@@ -270,6 +462,59 @@ verified fn strictly_positive_add(int a, int b) -> int
 * **`E0701` (Strict Non-Linear Refusal)**: In a `verified fn`, non-linear expressions that cannot be solved at compile time produce a hard compiler error.
 * **Refuted Contracts**: If the solver proves an invariant is mathematically impossible (e.g., `requires(x > 10 and x < 5)`), the compiler reports `REFUTED` at compile time.
 
+### 4.4 The Contract Refusal Catalog: How Contracts Fail
+
+#### Refusal 1: Variable-by-Variable Products in `verified fn` (`E0701`)
+```snlang
+// FORBIDDEN: Non-linear arithmetic (x * y) cannot be solved by DBM in verified fn
+verified fn compute_area(int x, int y) -> int 
+    requires(x > 0 and y > 0)
+    ensures(result == x * y) // ERROR E0701
+{
+    return x * y
+}
+```
+> **Compiler Diagnostic:**  
+> `error: E0701: Tier N non-linear atom 'result == x * y' in verified fn cannot be proved at compile time [E0701]`
+
+#### Refusal 2: Variable Division in `verified fn` (`E0701`)
+```snlang
+// FORBIDDEN: Variable division is non-linear and undecidable for DBM
+verified fn safe_div(int x, int y) -> int 
+    requires(y > 0)
+    ensures(result == x / y) // ERROR E0701
+{
+    return x / y
+}
+```
+> **Compiler Diagnostic:**  
+> `error: E0701: Tier N division atom 'result == x / y' in verified fn cannot be proved at compile time [E0701]`
+
+#### Refusal 3: Runtime Contract Assertion Violation (`[E-0702]`)
+```snlang
+// Degrades to runtime assertion in standard fn, fails fast at runtime if violated
+fn get_element(list<int> xs, int i) -> int requires(0 <= i < xs.length()) {
+    return xs[i]
+}
+
+fn main() {
+    list<int> xs = [10, 20]
+    get_element(xs, 5) // RUNTIME FAIL-FAST [E-0702]
+}
+```
+> **Runtime Diagnostic:**  
+> `runtime error: contract assertion failed '0 <= i < xs.length()' [E-0702]`
+
+#### Refusal 4: Mathematically Contradictory Invariants (`REFUTED`)
+```snlang
+// FORBIDDEN: DBM detects a negative diagonal cycle in the zone
+fn impossible(int x) requires(x > 10 and x < 5) {
+    // Empty zone!
+}
+```
+> **Compiler Diagnostic:**  
+> `warning: W-CONTRACT: contract atom 'x > 10 and x < 5' is REFUTED at compile time; runtime assertion will always fail`
+
 ---
 
 ## Chapter 5: State Chronology & Differential Dataflow
@@ -324,6 +569,64 @@ fn calculate_reachability(ptr graph_edges, ptr initial_seeds) {
   - Rejects replaying a delta-chain without a base checkpoint snapshot.
 * **`E-TAPE-WAVE`**: Tapes cannot be recorded inside `wave { }` blocks to preserve wave purity.
 
+### 5.5 The Chronology & Fixpoint Refusal Catalog: How Tapes and Fixpoints Fail
+
+#### Refusal 1: "One Tape, One Ledger" Carrier Mismatch (`[E-TAPE]`)
+```snlang
+// FORBIDDEN: Cannot mix differential multiset (Tier-G) and semilattice (Tier-L) records on one tape
+tape<int> t = tape_new("mixed_ledger")
+tape_record(t, 1, zset_prev, zset_next) // Fixes tape to Tier-G
+tape_record(t, 1, lcell_prev, lcell_next) // RUNTIME ERROR [E-TAPE]
+```
+> **Runtime Diagnostic:**  
+> `runtime error: [E-TAPE]: tape_record on tape 'mixed_ledger': one tape, one ledger — the tape already chronicles a Tier-G ledger and this record is Tier-L`
+
+#### Refusal 2: Replaying State-Relative Deltas Without Base Checkpoint (`[E-TAPE]`)
+```snlang
+// FORBIDDEN: Tier-L semilattice deltas are state-relative and require an anchor checkpoint
+tape<int> t = tape_new("lcell_tape")
+tape_record(t, 1, lcell_a, lcell_b) // Delta record without checkpoint!
+tape_replay(t, target)              // RUNTIME ERROR [E-TAPE]
+```
+> **Runtime Diagnostic:**  
+> `runtime error: [E-TAPE]: tape_replay on tape 'lcell_tape': Tier-L fragments are state-relative and this tape has no checkpoint to re-integrate from`
+
+#### Refusal 3: Replaying Opaque Records (`[E-TAPE]`)
+```snlang
+// FORBIDDEN: Opaque records have no mathematical delta algebra and cannot integrate
+tape<int> t = tape_new("audit")
+tape_record(t, 0, 42) // Opaque record
+tape_replay(t, target) // RUNTIME ERROR [E-TAPE]
+```
+> **Runtime Diagnostic:**  
+> `runtime error: [E-TAPE]: tape_replay hit an opaque record in the replay window — opaque payloads have no algebra and cannot integrate`
+
+#### Refusal 4: Tape Logging Prohibited Inside Waves (`E-TAPE-WAVE`)
+```snlang
+// FORBIDDEN: Logging to tape involves side effects; forbidden in wave
+wave {
+    tape_record(my_tape, 2, snapshot) // ERROR E-TAPE-WAVE
+}
+```
+> **Compiler Diagnostic:**  
+> `error: E-TAPE-WAVE: tape operations are prohibited inside wave bodies [E-TAPE-WAVE]`
+
+#### Refusal 5: Counting-Through-Recursion Divergence in Fixpoint (`[E-ZADM]`)
+```snlang
+// FORBIDDEN: Infinite height carrier prevents Knaster-Tarski quiescence
+zfix_count(...) // COMPILE ERROR [E-ZADM]
+```
+> **Compiler Diagnostic:**  
+> `error: fixpoint body diverges: counting-through-recursion — the body increments a ℤ-valued count through the recursive variable each round, so the per-key carrier has infinite height and the convergence theorem's premise fails [E-ZADM]`
+
+#### Refusal 6: Negation-Through-Recursion Divergence in Fixpoint (`[E-ZADM]`)
+```snlang
+// FORBIDDEN: Negation/retraction makes the fixpoint non-monotonic
+zfix_negate(...) // COMPILE ERROR [E-ZADM]
+```
+> **Compiler Diagnostic:**  
+> `error: fixpoint body diverges: negation-through-recursion — the body applies ⊖/negation through the recursive variable, so it is NOT monotone in the recursive variable and Knaster–Tarski does not apply [E-ZADM]`
+
 ---
 
 ## Chapter 6: Relocatable Links & Generational Slot Pools
@@ -366,6 +669,71 @@ fn pool_example() {
   - `pool<T>`: Read-only outside an `unfrozen (P) { ... }` block.
   - `pool<T> thread_local`: Confined to the declaring thread; thread transfer is rejected with `E0803.1`.
   - `pool<T> synchronized`: Thread-safe mutex-protected pool.
+
+### 6.3 The Links and Pools Refusal Catalog: How Links and Pools Fail
+
+#### Refusal 1: Copying Structs Containing Self-Relative Links by Value (`E0801`)
+```snlang
+blueprint Node {
+    int val
+    link<Node, u16> next
+}
+
+fn illegal_copy() {
+    new Node a()
+    let b = a // ERROR E0801: cannot copy struct containing link<T, u16> by value!
+}
+```
+> **Compiler Diagnostic:**  
+> `error: E0801: cannot copy struct containing self-relative link by value; use relocate_range [E0801]`
+
+#### Refusal 2: Passing Structs Containing Links by Value (`E0801`)
+```snlang
+fn process_node(Node n) { ... } // ERROR E0801: must pass by ref<Node>
+```
+> **Compiler Diagnostic:**  
+> `error: E0801: cannot pass struct containing self-relative link by value [E0801]`
+
+#### Refusal 3: Capturing Thread-Local Pool Across Spawn or Channel (`E0803.1`)
+```snlang
+pool<int> thread_local my_pool = pool_new<int>(16)
+
+fn main() {
+    let h = my_pool.insert(42)
+    spawn {
+        print(my_pool.get(h)) // ERROR E0803.1: thread_local pool handle captured!
+    }
+}
+```
+> **Compiler Diagnostic:**  
+> `error: E0803.1: cannot capture/send handle 'h' from pool 'my_pool' in unscoped spawn/chan: 'my_pool' is 'thread_local' [E0803]`
+
+#### Refusal 4: Capturing Pool Handle in Unfrozen Scope (`E0803.2`)
+```snlang
+pool<int> global_pool = pool_new<int>(16)
+
+fn main() {
+    unfrozen (global_pool) {
+        let h = global_pool.insert(100)
+        spawn {
+            print(global_pool.get(h)) // ERROR E0803.2: racing with active mutator!
+        }
+    }
+}
+```
+> **Compiler Diagnostic:**  
+> `error: E0803.2: cannot capture/send handle 'h' from pool 'global_pool' in unscoped spawn/chan: 'global_pool' is unfrozen in this scope [E0803]`
+
+#### Refusal 5: Mutating Frozen Global Pool Without Unfrozen Window (`E0803.3`)
+```snlang
+pool<int> global_pool = pool_new<int>(16)
+
+fn main() {
+    global_pool.insert(50) // ERROR E0803.3: global pool is frozen by default!
+}
+```
+> **Compiler Diagnostic:**  
+> `error: E0803.3: cannot mutate global pool 'global_pool': global pools are frozen by default. Wrap the mutation in 'unfrozen (global_pool) { ... }' [E0803]`
 
 ---
 
