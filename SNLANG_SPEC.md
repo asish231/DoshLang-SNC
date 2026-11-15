@@ -1,6 +1,6 @@
 # SNlang — The SafarNow Language
 
-**Version:** 0.2  
+**Version:** 0.3.1  
 **Created by:** SafarNow  
 **Paradigm:** Compiled, Strongly-Typed, Object-Oriented, Concurrent  
 **Philosophy:** Easy syntax, native LLVM, opt-in null — not “as fast as C” by slogan, and not a Go/Rust clone.
@@ -371,7 +371,7 @@ SNlang includes zero-overhead native allocators for high-throughput systems prog
      - `pool<T> thread_local` — **ThreadConfined**: mutations legal on the declaring thread only; handles (and the pool) captured by spawn/chan = **E0803.1**. The runtime carries a home-thread tag as the backstop (a foreign-thread mutation fail-fasts).
      - `pool<T> synchronized` — **Synchronized**: a mutex-protected vault — every `insert`/`set`/`remove` takes the pool's lock; handles Sendable everywhere. No two threads can ever interleave insert/remove on one pool — the data-race-freedom condition for the vault.
      - **The `unfrozen (p) { ... }` window** — the structured single-thread mutation window on a Frozen pool (the `frozen { }` block's syntactic mirror): inside, mutations are legal on the declaring thread; at exit the pool re-freezes (early returns re-freeze; a panic never resumes). **E0803.2** rejects capturing/sending `p`'s handles (or `p` itself) in an unscoped spawn/chan *inside* the window — the receiving thread could race the freelist with the mutator; move the capture outside the window or declare the pool `synchronized`. Mode conflicts are checked too: an `unfrozen` window refuses a `thread_local`/`synchronized` pool (each mode has its own discipline) and refuses to nest inside a `frozen (p)` block; `frozen (p)` refuses a `synchronized` pool.
-     - **Construction:** module-scope pools are real runtime objects — each declared pool is constructed at `main`'s entry with its declared mode (`sn_pool_new_mode`) and registered as a permanent GC root (`sn_gc_register_global`): the pool is module-scoped and immortal, and without registration an unlucky collection would sweep it (a bug the Wave-10 benchmark caught).
+     - **Construction:** module-scope pools are real runtime objects — each declared pool is constructed at `main`'s entry with its declared mode (`sn_pool_new_mode`) and registered as a permanent GC root (`sn_gc_register_global`): the pool is module-scoped and immortal, and without registration an unlucky collection would sweep it (a bug caught during pool stress testing).
      - **Soundness:** a Frozen pool has no legal write path, so any number of threads holding handles cannot corrupt or race the freelist; ThreadConfined handles never leave the owning thread (capture rejected; the home-thread tag refuses the rest); Synchronized pools serialize every freelist mutation behind a lock; the `unfrozen` window restores single-thread, structured, capture-blocked mutation. **Pool objects are not copyable values** — `pool<T> q = p`, `q = p`, and passing `p` by value into a `pool<T>`-typed parameter are all rejected (the alias would rebind the runtime object under a local name whose mutation the checker cannot mode-check; only handles cross, and the pool is used by its declared name). The checker is the gate; the runtime's `frozen_depth`, vault lock, and home-thread tag are the enforcement backstop (the E-LKIND two-layer precedent).
      - **The honest capture-site caveat:** E0803.2 keys on the capture SITE's window depth (the spec's rule) — a task spawned *outside* a window may still be running when a *later* window opens. The A6c kill (two threads **mutating** one freelist → corruption → memory unsafety) is absolutely prevented: the window's mutations are confined to the declaring thread and every other mode serializes its mutators. A concurrent *reader* can never corrupt the freelist (reads do not write it); the residual is the reader's narrow generation-check-vs-`grow` window (a stale read aborts fail-fast per the generational design). A task-lifetime capture rule (blocking captures across windows) is the later-slice work item.
      - **The diagnostics:** `E0803.1: cannot capture/send handle '{h}' from pool '{P}' in unscoped spawn/chan: '{P}' is 'thread_local' — handles carry its home-thread tag and never leave the declaring thread. Declare '{P}' 'synchronized' for cross-thread access. [E0803]` · `E0803.2: cannot capture/send handle '{h}' from pool '{P}' in unscoped spawn/chan: '{P}' is unfrozen in this scope (mutable window) and the receiving thread could race its freelist. Move the capture outside the 'unfrozen ({P})' block, or declare '{P}' 'synchronized'. [E0803]` · `E0803.3: cannot mutate global pool '{P}' ({op}): global pools are frozen by default. Wrap the mutation in 'unfrozen ({P}) { ... }', or declare the pool 'thread_local' (single-thread) or 'synchronized' (locked). [E0803]`
@@ -385,7 +385,7 @@ SNlang includes zero-overhead native allocators for high-throughput systems prog
    - **Inline lowering** (`-O1+`): constant-size lane allocations compile to a 3-instruction bump (load top, bump, store) with a guard branch routing to the loud runtime path; region exit is a 1-store watermark restore.
    - **T-FIBR poison-fill** (`--poison` / `-O0` / debug builds): lane bytes are filled with `0xAA` on allocation and re-poisoned on rewind — the read-before-write guard (E0807), unconditional across all codegen paths. Release builds emit zero extra instructions.
    - **Pinned-lane accumulator coloring** (compiler-assigned): recursive `inout` list parameters that grow across a recursive call are automatically assigned to dedicated pinned lanes (L2–L6) — each pinned lane hosts exactly one growable for its entire SCC lifetime, so the accumulator is never buried under descendant scratch. The 6th simultaneously-live accumulator fires **E0802c** (the budget error — never silent reuse). An explicit `lane_alloc` on a pinned lane is the user-declared discharge; scratch lanes (L0/L1) for SCC accumulators fire **E0802**.
-    - **The lane-aware items pool** (Wave 12): a lane-backed list's header dies at the rewind that covers it, and the *same rewind frees its grown items array* (a per-lane registry of lane-backed list headers; the rewind pops the covered suffix — O(#freed), never O(#live); no ref to lane memory can escape per E-GC-IN-LANE, so header and array are unreachable at the rewind). The E-NESTLED grown-array lifecycle: element storage is slab-backed under 65,536 elements (a 512 KB window carved from the shared 256 MB list slab — reused, never freed), malloc'd above the window, freed at the rewind when lane-backed. Heap-backed lists never enter the registry — `sn_release`/`gc_free` own their arrays.
+   - **The lane-aware items pool**: a lane-backed list's header dies at the rewind that covers it, and the *same rewind frees its grown items array* (a per-lane registry of lane-backed list headers; the rewind pops the covered suffix — O(#freed), never O(#live); no ref to lane memory can escape per E-GC-IN-LANE, so header and array are unreachable at the rewind). The E-NESTLED grown-array lifecycle: element storage is slab-backed under 65,536 elements (a 512 KB window carved from the shared 256 MB list slab — reused, never freed), malloc'd above the window, freed at the rewind when lane-backed. Heap-backed lists never enter the registry — `sn_release`/`gc_free` own their arrays.
    - **Escape checker** (E-ESCAPE): storing a reference into a destination requires the target to *outlive* the holder (the region-poset `⊑ₗ` law). A reference declared in a region that exits before the destination's region fires the error: "the target dies before the holder."
    - **GC scoping** (E-GC-IN-LANE): GC-managed memory (created via `new`/list literals — tracked by the garbage collector) and lane-backed memory (created via `lane_alloc` — untracked bump bytes) cannot reference each other. The GC cannot trace into lanes (its roots are globals+stacks+pushed values only), and lane rewinds don't respect the GC heap — a cross-category reference is a checked error in both directions.
    - **Task nursery lanes:** spawned tasks loan lanes from their thread's pool (`SnLane.parent`); at `nursery` join, each loaned lane resets to base in one store — the child's entire allocation reclaimed O(1).
@@ -407,7 +407,7 @@ SNlang includes zero-overhead native allocators for high-throughput systems prog
      > `exact retraction on a Tier-L join-semilattice is impossible (the merge operator is non-embeddable: x⊔x = x ⇒ [x] = 0 — Grothendieck triviality; retraction on Tier L is tombstoned or none, never exact); use a Tier-G Z-set (zset_*) for exact retraction [E-LRET]`
    - **E-LKIND (tier confusion, runtime-enforced):** the surface type of a cell is an untyped `ptr`, so the checker cannot see the carrier — the runtime fail-fasts on carrier mismatch (`cannot merge a max cell with a gset cell — the ⊔ of different carriers is undefined`), on kind mismatch (an L op on a non-LCell, or an LCell handed to `zset_merge` — the Tier-G twin of the same rule). `SN_LATTICE_CHECK=1` turns on per-merge in-engine law self-checks (idempotence + commutativity); the exhaustive randomized law harness is `tests/systems/test_lcell.c`.
    - See `examples/lcell_*.sn` (golden) and `tests/systems/test_lcell.c` (systems) for the executable proofs.
-5. **Salt ζ — the Fixpoint Bracket + the Admission Checker (`std.zeta` / `ZFix`):**
+5. **The Bounded Fixpoint Engine + Admission Checker (`std.zeta` / `ZFix`):**
    - The fixpoint semantics of the differential calculus (W2C §3, the δ₀/∫ bracket): the ζ engine runs the ADMITTED body — transitive closure `reach(a) :- edge(a,b), reach(b)` — as a bracket of **semi-naïve rounds** (Thm 4b: the incrementalized fixpoint IS classical semi-naïve evaluation — Bancilhon–Ramakrishnan SIGMOD 1986, derived from the calculus): each round derives ONLY from the previous round's delta δ₀^(r), folds the new facts into the integral ∫, then tests quiescence.
    - **The convergence theorem, executable (W2C §3.3):** a MONOTONE body (in the recursive variable) over a FINITE-HEIGHT per-key carrier ⇒ the bracket terminates in **≤ height rounds at the LEAST fixpoint** (Knaster–Tarski; Cousot–Cousot Pacific J. Math. 82(1) 1979). Both premises hold for the admitted closure body: monotone by construction; the carrier is presence {0,1} over the keys of the FINITE edge universe (sets over a finite universe qualify). The bound is observable: on a chain the bracket takes exactly the diameter many rounds (`zfix_rounds`); on a seed-only graph it is quiescent at once (0 rounds).
    - **The two named divergence classes — recognized intrinsics, ALWAYS rejected at compile time with E-ZADM** (admission is UNDECIDABLE in general; the checker is the sufficient condition priced at expressiveness — "arbitrary SQL/Datalog" shrinks to the stratified-monotone fragment — mandatory per the no-handwaving rule; refusals are compile-time errors, never silent divergence, W2C §3.5):
@@ -441,7 +441,7 @@ With this system, a programmer can build **any** data structure (linked lists, s
 
 ## 10.5 Self-Relative Links — `link<T, u16>` (the E0801 copy discipline)
 
-**SWARM RABBIT HOLE — Wave 11 / DIFF-5; kills G1 §1 A2 → S4 (STRATA §2.4.6's NoRelLinkCopy closure).**
+**Relocatable Graph Storage — Safe Relative Pointers and Relocation Boundaries (E0801).**
 
 ### The type
 
@@ -1245,7 +1245,7 @@ Nested `fn` and `fn(int x) -> int { ... }` lambdas are values (limited captures,
 
 ## 27. Wave Regions — Theorem WS, executable (implemented)
 
-A **wave region** is a deterministic observation bracket over module-scope Tier-L seam cells — the executable form of the wave-seam composition theorem (SWARM RABBIT HOLE, W2B §3/§4: the typed read-mode surface + **Thm WS**, the campaign's centerpiece).
+A **wave region** is a deterministic observation bracket over module-scope Tier-L seam cells — the executable form of the wave-seam composition theorem (**Theorem WS**: the typed read-mode surface + verified confluent join semantics).
 
 ```text
 ptr results = lcell_new(1)          // module scope: a SEAM CELL (carrier 0=max, 1=gset, 2=lww)
@@ -1288,7 +1288,7 @@ fn main() {
 
 ## 28. SFC Layouts — A2's space-filling-geometry decision table, executable (implemented)
 
-**`morton list<T, dims=[n1, n2]>`** and **`hilbert map<K, V>`** bake the curve into the collection, not the algorithm (SWARM RABBIT HOLE, Wave 14, Impl-S, Cohort Delta; A2 §2.4 — the decision table, verbatim scope):
+**`morton list<T, dims=[n1, n2]>`** and **`hilbert map<K, V>`** bake the curve into the collection, not the algorithm (optimal space-filling cacheline locality across multi-dimensional traversals):
 
 | Layout | The decision-table role |
 |---|---|
@@ -1328,9 +1328,9 @@ while (i != -1) { use(hilbert_entry_val(h, i)); i = hilbert_box_next(h, x0, y0, 
 
 ---
 
-## 29. Salt ε — the Numeric Contract Layer: requires/ensures, the decidable ladder, and the typed boundary (implemented)
+## 29. The Numeric Contract Layer: requires/ensures, the Decidable Ladder, and the Typed Boundary (implemented)
 
-**`fn f(params) requires(cond) ensures(cond) { ... }`** — the numeric contract layer (SWARM RABBIT HOLE, Wave 15, Impl-T, Cohort Delta; A4's Presburger decidable ladder + the final report §7.3's boundary rule, slice 1). NOTE: the `contract` keyword is the trait/interface system (§15) — the numeric layer's surface is the two clause heads. Multiple clauses are allowed and conjoin; the requires condition is checked at every call site (the caller proves it or the call degrades), the ensures condition is the function's own proof obligation over its parameters and `result` (the contextual return-value name, allowed in ensures only, not a keyword).
+**`fn f(params) requires(cond) ensures(cond) { ... }`** — the numeric contract layer (Presburger decidable ladder, compile-time DBM zone discharge, and typed runtime boundary rules). NOTE: the `contract` keyword is the trait/interface system (§15) — the numeric layer's surface is the two clause heads. Multiple clauses are allowed and conjoin; the requires condition is checked at every call site (the caller proves it or the call degrades), the ensures condition is the function's own proof obligation over its parameters and `result` (the contextual return-value name, allowed in ensures only, not a keyword).
 
 ```text
 fn get(list<int> xs, int i) -> int requires(0 <= i < xs.length()) {
@@ -1378,7 +1378,7 @@ For `r = x % m` with m's interval known positive, the engine injects **two DBM e
 
 ## 30. Tape Record Kinds — W2C's P5↔P2 elevation plan, executable (implemented)
 
-**`tape<int> t = tape_new("name")`** — the append-only **δ₀-chronicle**: discrete impulses against an integrated state, ordered by a clock, replay = re-integration from a checkpoint (SWARM RABBIT HOLE, Wave 16, Impl-U, Cohort Delta; W2C §36–§38 + §48 item 4 — a P2-sanctioned record kind, like wave's contrib).
+**`tape<int> t = tape_new("name")`** — the append-only **$\delta_0$-chronicle**: discrete impulses against an integrated state, ordered by an execution clock, where replay equals re-integration from a base checkpoint.
 
 **The kinship, ruled honestly (W2C §36):** the tape's SHAPE is the δ₀-chronicle's — true as stated. The ALGEBRA is not: no group on opaque entries (a free monoid at best — differentiation vacuous), no ℐ/𝒟 pair, no chain rule. The elevation is **tier-parametric**: what the tape's records can DO depends on what the recorded values ARE, and the compiler classifies before the first record is written.
 
@@ -1508,3 +1508,301 @@ fn main() {
 - **LLVM Lowering**:
   - `irq fn` lowers with LLVM calling convention `x86_intr` (`x86_intrcc`) and attribute `"no-red-zone"="true"`.
   - Automatically preserves all touched CPU scratch registers and terminates with `iretq` (x86_64) or `eret` (AArch64).
+
+---
+
+## 33. Formal Grammar Specification (EBNF)
+
+This section provides the complete, authoritative Context-Free Grammar for SNlang 0.3.1 specified in Extended Backus–Naur Form (EBNF).
+
+### 33.1 Notation & Conventions
+* `Symbol ::= Definition` defines a non-terminal symbol.
+* `"token"` denotes a literal terminal keyword, operator, or punctuation mark.
+* `[ Item ]` denotes an optional item (0 or 1 occurrence).
+* `{ Item }` denotes 0 or more occurrences.
+* `Item*` denotes 0 or more occurrences; `Item+` denotes 1 or more occurrences.
+* `A | B` denotes an alternative choice.
+* `( ... )` groups elements.
+
+---
+
+### 33.2 Lexical Grammar
+
+```ebnf
+Letter              ::= [a-zA-Z_]
+Digit               ::= [0-9]
+HexDigit            ::= [0-9a-fA-F]
+
+Ident               ::= Letter ( Letter | Digit )*
+IntegerLiteral      ::= Digit+ | "0x" HexDigit+ | "0b" [01]+
+FloatLiteral        ::= Digit+ "." Digit+
+DecimalLiteral      ::= Digit+ "." Digit+
+StringLiteral       ::= '"' ( [^"\\] | "\\" . )* '"'
+ByteLiteral         ::= "0x" HexDigit HexDigit
+
+SingleLineComment   ::= "//" [^\n]*
+MultiLineComment    ::= "/*" ( [^*] | "*"+ [^*/] )* "*"+ "/"
+```
+
+#### Reserved Keywords
+```text
+abstract, and, any, as, asm, async, await, blueprint, bool, byte, chan,
+closed, const, contract, dec, default, defer, else, ensures, enum, errdefer,
+error, extern, float, fn, for, from, frozen, guard, guarded, handle, hilbert,
+if, in, int, i8, i16, i32, irq, let, link, list, lock, map, match, mmio,
+morton, mut, new, none, not, nursery, or, otherwise, packed, pool, ptr,
+record, ref, region, requires, return, skip, spawn, static, stop, str,
+tape, tape_delta, try, unfrozen, u8, u16, u32, u64, use, verified, wave, while
+```
+
+---
+
+### 33.3 Syntactic Grammar
+
+#### Program & Items
+```ebnf
+Program             ::= Item*
+
+Item                ::= UseItem
+                      | FnItem
+                      | BlueprintItem
+                      | RecordItem
+                      | EnumItem
+                      | ContractItem
+                      | ExternItem
+                      | ExtensionItem
+                      | Stmt
+
+UseItem             ::= "use" Ident ( "." Ident )*
+```
+
+#### Function Declarations & Contracts
+```ebnf
+FnItem              ::= FnModifier? "fn" Ident [ "<" TypeParams ">" ] 
+                        "(" ParamList? ")" [ "->" Type ] 
+                        ContractClause* Block
+
+FnModifier          ::= "verified" | "async" | "irq"
+
+ParamList           ::= Param ( "," Param )*
+Param               ::= Type Ident [ "=" Expr ]
+
+ContractClause      ::= "requires" "(" Expr ")"
+                      | "ensures" "(" Expr ")"
+```
+
+#### Object-Oriented Definitions
+```ebnf
+BlueprintItem       ::= "blueprint" Ident [ "<" TypeParams ">" ] [ "from" Ident ] 
+                        "{" BlueprintMember* "}"
+
+BlueprintMember     ::= FieldDecl
+                      | MethodDecl
+
+FieldDecl           ::= [ "closed" | "guarded" ] Type Ident [ "=" Expr ]
+
+MethodDecl          ::= [ "closed" | "guarded" | "static" | "abstract" ]
+                        "fn" Ident [ "<" TypeParams ">" ] 
+                        "(" ParamList? ")" [ "->" Type ] 
+                        ContractClause* ( Block | ";" )
+
+RecordItem          ::= [ "packed" ] "record" Ident "{" FieldDecl* "}"
+
+EnumItem            ::= "enum" Ident "{" EnumVariant ( "," EnumVariant )* ","? "}"
+EnumVariant         ::= Ident [ "(" Type Ident? ")" ]
+
+ContractItem        ::= "contract" Ident "{" ContractMethod* "}"
+ContractMethod      ::= "fn" Ident "(" ParamList? ")" [ "->" Type ]
+
+ExtensionItem       ::= "extension" Ident "{" MethodDecl* "}"
+
+ExternItem          ::= "extern" StringLiteral "{" ExternFnDecl* "}"
+ExternFnDecl        ::= "fn" Ident "(" ParamList? ")" [ "->" Type ]
+
+TypeParams          ::= TypeParam ( "," TypeParam )*
+TypeParam           ::= [ "out" | "in" ] Ident [ ":" Ident ]
+```
+
+#### Types
+```ebnf
+Type                ::= TypeBase [ "?" ]
+
+TypeBase            ::= PrimitiveType
+                      | FixedPointType
+                      | CollectionType
+                      | SpatialType
+                      | ChronologyType
+                      | PointerType
+                      | ConcurrencyType
+                      | HardwareType
+                      | FunctionType
+                      | TupleType
+                      | NamedType
+
+PrimitiveType       ::= "int" | "i8" | "i16" | "i32" 
+                      | "u8" | "u16" | "u32" | "u64"
+                      | "float" | "str" | "bool" | "byte" | "error" | "any"
+
+FixedPointType      ::= "dec" "(" IntegerLiteral ")"
+
+CollectionType      ::= "list" "<" Type ">"
+                      | "map" "<" Type "," Type ">"
+
+SpatialType         ::= "morton" "list" "<" Type "," "dims" "=" "[" IntegerLiteral ( "," IntegerLiteral )* "]" ">"
+                      | "hilbert" "map" "<" Type "," Type ">"
+
+ChronologyType      ::= "tape" "<" Type ">"
+                      | "tape_delta" "(" ( "G" | "L" ) ")"
+
+PointerType         ::= "ptr"
+                      | "ref" "<" Type ">"
+                      | "mut" "<" Type ">"
+                      | "pool" "<" Type ">"
+                      | "handle" "<" Type ">"
+                      | "link" "<" Type [ "," "u16" ] ">"
+
+ConcurrencyType     ::= "chan" "<" Type ">"
+
+HardwareType        ::= "mmio" "<" Type ">"
+
+FunctionType        ::= "fn" "(" [ Type ( "," Type )* ] ")" [ "->" Type ]
+
+TupleType           ::= "(" Type ( "," Type )+ ")"
+
+NamedType           ::= Ident [ "<" Type ( "," Type )* ">" ]
+```
+
+#### Statements & Regional Scopes
+```ebnf
+Block               ::= "{" Stmt* "}"
+
+Stmt                ::= StmtIf
+                      | StmtWhile
+                      | StmtFor
+                      | StmtMatch
+                      | StmtReturn
+                      | StmtGuard
+                      | StmtRegion
+                      | StmtNursery
+                      | StmtWave
+                      | StmtFrozen
+                      | StmtUnfrozen
+                      | StmtStop
+                      | StmtSkip
+                      | StmtSpawn
+                      | StmtLock
+                      | StmtDefer
+                      | StmtErrdefer
+                      | StmtAsm
+                      | StmtNew
+                      | StmtDecl
+                      | StmtAssign
+                      | StmtExpr
+
+StmtIf              ::= "if" "(" Expr ")" Block ( "else" "if" "(" Expr ")" Block )* [ "else" Block ]
+StmtWhile           ::= "while" "(" Expr ")" Block
+StmtFor             ::= "for" "(" StmtDecl "," Expr "," StmtAssign ")" Block
+                      | "for" Ident "in" Expr Block
+
+StmtMatch           ::= "match" "(" Expr ")" "{" MatchArm* "}"
+MatchArm            ::= Pattern Block
+Pattern             ::= Ident [ "." Ident [ "(" Ident ")" ] ]
+                      | "none"
+                      | "default"
+
+StmtReturn          ::= "return" [ Expr ( "," Expr )* ] [ "from" Ident ]
+StmtGuard           ::= "guard" [ "(" ] Expr [ ")" ] ( "otherwise" | "else" ) Block
+
+StmtRegion          ::= "region" Block
+StmtNursery         ::= "nursery" Block
+StmtWave            ::= "wave" Block
+StmtFrozen          ::= "frozen" "(" Ident ( "," Ident )* ")" Block
+StmtUnfrozen        ::= "unfrozen" "(" Ident ")" Block
+
+StmtStop            ::= "stop"
+StmtSkip            ::= "skip"
+
+StmtSpawn           ::= "spawn" ( Block | CallExpr )
+StmtLock            ::= "lock" [ "(" Ident ")" ] Block
+
+StmtDefer           ::= "defer" Block
+StmtErrdefer        ::= "errdefer" Block
+StmtAsm             ::= "asm" StringLiteral [ ":" StringLiteral ]
+
+StmtNew             ::= [ "new" ] Ident Ident "(" ArgList? ")"
+StmtDecl            ::= ( "let" | "const" ) Ident [ ":" Type ] "=" Expr
+                      | Type Ident ( "," Ident )* [ "=" Expr ( "," Expr )* ]
+StmtAssign          ::= AssignLValue AssignOp Expr
+AssignOp            ::= "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^="
+
+AssignLValue        ::= Ident
+                      | Expr "." Ident
+                      | Expr "[" Expr "]"
+                      | "*" Expr
+
+StmtExpr            ::= Expr
+```
+
+#### Expressions & Precedence Ladder
+Expressions follow strict precedence order (lowest to highest):
+
+| Precedence | Associativity | Category | Operators / Syntax |
+| :---: | :---: | :--- | :--- |
+| **1** | Left | Null Coalescing | `otherwise` |
+| **2** | Left | Logical Disjunction | `or` |
+| **3** | Left | Logical Conjunction | `and` |
+| **4** | Left | Bitwise OR | `\|` |
+| **5** | Left | Bitwise XOR | `^` |
+| **6** | Left | Bitwise AND | `&` |
+| **7** | None | Comparison Chains | `==`, `!=`, `<`, `<=`, `>`, `>=` |
+| **8** | Left | Additive | `+`, `-` |
+| **9** | Left | Multiplicative | `*`, `/`, `%` |
+| **10** | Right | Exponentiation | `**` |
+| **11** | Right | Unary Prefix | `-`, `not`, `~`, `try`, `*` (deref) |
+| **12** | Left | Postfix | `(args)` (call), `[index]` (index), `.field` (access), `!!` (non-null assertion) |
+| **13** | — | Primary | Ident, Literals, `none`, `result`, Parenthesized `(Expr)` |
+
+```ebnf
+Expr                ::= OtherwiseExpr
+OtherwiseExpr       ::= OrExpr [ "otherwise" OrExpr ]
+OrExpr              ::= AndExpr ( "or" AndExpr )*
+AndExpr             ::= BitOrExpr ( "and" BitOrExpr )*
+BitOrExpr           ::= BitXorExpr ( "|" BitXorExpr )*
+BitXorExpr          ::= BitAndExpr ( "^" BitAndExpr )*
+BitAndExpr          ::= CmpExpr ( "&" CmpExpr )*
+
+CmpExpr             ::= AddExpr [ CmpOp AddExpr ( CmpOp AddExpr )* ]
+CmpOp               ::= "==" | "!=" | "<" | "<=" | ">" | ">="
+
+AddExpr             ::= MulExpr ( ( "+" | "-" ) MulExpr )*
+MulExpr             ::= PowExpr ( ( "*" | "/" | "%" ) PowExpr )*
+PowExpr             ::= UnaryExpr [ "**" PowExpr ]
+
+UnaryExpr           ::= ( "-" | "not" | "~" | "try" | "*" ) UnaryExpr
+                      | PostfixExpr
+
+PostfixExpr         ::= PrimaryExpr ( CallSuffix | IndexSuffix | MemberSuffix | "!!" )*
+CallSuffix          ::= "(" ArgList? ")"
+IndexSuffix         ::= "[" Expr "]"
+MemberSuffix        ::= "." Ident
+
+PrimaryExpr         ::= Ident
+                      | IntegerLiteral
+                      | FloatLiteral
+                      | DecimalLiteral
+                      | StringLiteral
+                      | ByteLiteral
+                      | "true"
+                      | "false"
+                      | "none"
+                      | "result"
+                      | ListLiteral
+                      | MapLiteral
+                      | TupleLiteral
+                      | "(" Expr ")"
+
+ListLiteral         ::= "[" [ Expr ( "," Expr )* ] "]"
+MapLiteral          ::= "{" [ Expr ":" Expr ( "," Expr ":" Expr )* ] "}"
+TupleLiteral        ::= "(" Expr ( "," Expr )+ ")"
+ArgList             ::= Expr ( "," Expr )*
+```

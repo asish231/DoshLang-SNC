@@ -220,4 +220,4 @@ Commit `sn.lock.toml` in apps. Registry `index.json` format and recipes: [docs/P
 | [**docs/RFC_BAREMETAL_KERNEL_MASTER_SPEC.md**](docs/RFC_BAREMETAL_KERNEL_MASTER_SPEC.md) | **Bare-Metal Kernel RFC** — Freestanding runtime, MMIO registers, and IRQ static safety |
 | [**docs/PACKAGES.md**](docs/PACKAGES.md) | **Package Management** — `sn.toml` manifest, dependencies, lockfiles, and publishing |
 | [**docs/HTTP.md**](docs/HTTP.md) | **Networking & Services** — HTTP client, configuration, and TLS verification |
-| [**SNLANG_SPEC.md**](SNLANG_SPEC.md) | **Language Specification** — Comprehensive formal language definition and grammar |
+| [**SNLANG_SPEC.md**](SNLANG_SPEC.md) | **Formal Language Specification** — Authoritative formal grammar (EBNF), type system, operational semantics, and runtime ABI |
