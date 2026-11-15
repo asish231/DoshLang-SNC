@@ -1423,3 +1423,88 @@ fn main() {
 - **E-GC-IN-LANE** — the tape is lane-backed (the hilbert precedent: the header, the record directory, and the flat payload buffer live on lane 0, never gc_track'd, `sn_release` a no-op backstop, refused in GC-managed holders); the records hold RAW int64 pairs only — no GC pointer ever crosses into the chronicle (the derived d/m^δ objects are built, law-checked, flattened onto the lane, and released inside the record call).
 
 **The honest slice-1 boundary.** Slice 1 implements `tape<int>` (the payloads are int64 pairs throughout — other element types are the named boundary) and **function-local** chronicles (a module-scope tape wants the DIFF-4 slot pattern — the named slice-2 form; refused, never silently lowered). **E3 — the chain rule** (transporting typed deltas through derived views, making the tape an impulse stream *in the calculus* — W2C §38's ingredient (3)) is the **named slice-2 boundary**: slice 1 records and replays typed deltas against the LANDED carriers; it does not compose them through user views. **No user-body delta certifier** (W2C §6.4's Propel-style checked-not-proven class) and **no new incrementalization mathematics** (the final report §395 item 11): the compiler's job is classification — which records carry a law, which tier's law it is, and what the replay may honestly claim. Benchmarked in `bench/RESULTS_TAPE.md` (the typed record's ~190× premium over the opaque append — the premium IS the law check; the checkpoint's window economics: O(window) replay vs the O(K) re-scan); runtime mechanics in `tests/systems/test_tape.c` (checks 24/24b — the ILC law on randomized Tier-G triples, the mutator law on all three Tier-L carriers, the replay == re-integration witness on randomized streams with mid-chain checkpoints, the opaque refusal, the one-tape-one-ledger/no-base/tier backstops, fork-probed verbatim); the compile-time arms in `examples/tape_*.sn` + `compiler/tests/golden.rs` (the kind-literal rule, the Tier-O/mixed refusals, the E1 signature discipline, the E-TAPE-WAVE boundary rule, the E-LRET-adjacent ⊖ refusal — all verbatim).
+
+
+---
+
+## 31. Bare-Metal Kernel Expansion: MMIO Type Semantics, Freestanding Mode, and Extended Inline Assembly
+
+### 1. `volatile<T>` / `mmio<T>` Type Semantics
+- **Type Syntax**: `mmio<u8>`, `mmio<u16>`, `mmio<u32>`, `mmio<u64>` (restricting `T` to primitive scalar widths). `volatile<T>` aliases `mmio<T>`. Non-scalar arguments (aggregates, records, strings, lists) are rejected with `[E-MMIO-INVALID-TYPE]`.
+- **Operations**:
+  - `reg.read() -> T`: volatile load of width $\mathrm{sizeof}(T)$ from the bound address.
+  - `reg.write(val: T) -> void`: volatile store of width $\mathrm{sizeof}(T)$ to the bound address.
+  - `reg.address() -> u64`: underlying memory address introspection.
+  - Implicit dereference (`*reg`), direct assignment (`reg = val`), and compound arithmetic (`reg += val`) are rejected at compile time.
+- **Escape Analysis (`E-MMIO-ESCAPE`)**:
+  - Taking references (`&reg`, `ref<mmio<T>>`, `mut<mmio<T>>`, `ptr`) is strictly rejected at compile-time (`E-MMIO-ESCAPE`).
+  - Device registers cannot be declared as fields of GC-managed blueprints (`new Blueprint()`), nor captured across escaping heap closures.
+  - Cannot be captured or transferred across threads in `spawn`, `go`, or `chan<T>` without explicit mutual exclusion.
+- **LLVM Lowering**:
+  - Lowers to LLVM `ptr`.
+  - Emits `load volatile <iN>, ptr %addr, align <N/8>` and `store volatile <iN> %val, ptr %addr, align <N/8>`.
+  - Sequential consistency among volatile operations within each thread is preserved; LLVM optimizer passes (`DSE`, `GVN`, `LICM`) are forbidden from eliding, coalescing, or hoisting volatile accesses.
+
+### 2. GC Link-Out Rule in `--freestanding` Mode
+- **Compilation Flag**: `--freestanding` compiles kernel binaries without standard C runtime, POSIX pthreads, or the garbage collector runtime.
+- **Compile-Time Diagnostic**: Any call to `new T()` is rejected at compile-time with:
+  `E-NO-GC-IN-FREESTANDING: dynamic GC heap allocation 'new T()' is forbidden in --freestanding mode. Use stack allocation, 'region { }' elastic arenas, pinned lanes, or 'std.pool'.`
+- **Zero GC Symbols**: LLVM IR emission conditionally suppresses all `sn_gc_*` declarations and calls. Binaries link with `runtime_freestanding.c`, guaranteeing zero unresolved GC symbols.
+
+### 3. Extended Inline Assembly `asm { ... }`
+- **Syntax**:
+  ```snlang
+  asm {
+      "<template>"
+      in("<constraint>") <expr>,
+      out("<constraint>") <lvalue>,
+      inout("<constraint>") <ident>,
+      clobber("<reg>" | "memory" | "cc")
+  }
+  ```
+- **Register Constraints**: Supports `"rax"`, `"rbx"`, `"rcx"`, `"rdx"`, `"rsi"`, `"rdi"`, general register `"r"`, memory `"m"`, immediate `"i"`, and subregisters (`"al"`, `"ax"`, `"eax"`, `"dl"`, etc.).
+- **Operand Bitwidth Validation**: Mismatch between operand bitwidth and constraint register width produces compile-time diagnostic `[E-ASM-OPERAND-WIDTH]`.
+- **Volatile Emission**: Lowers to LLVM `call void asm sideeffect "<template>", "<constraints>"(...)`. The `sideeffect` attribute guarantees immunity from dead-code elimination and speculative hoisting; `clobber("memory")` acts as an LLVM compiler memory fence.
+
+
+---
+
+## 32. Bare-Metal Kernel Expansion: The Novel `irq fn` Static Interrupt Safety Discipline
+
+### 1. Mathematical Typing Invariants & Interrupt Execution Context
+- **Interrupt Context**: Hardware interrupt service routines (`irq fn`) execute asynchronously at elevated hardware Interrupt Priority Levels ($\mathrm{ipl} \ge 2$), interrupting arbitrary instructions on a core. The context has no schedulable Task Control Block ($\mathrm{tid} = \bot$) and operates on a dedicated, bounded Interrupt Stack Table (IST) frame.
+- **Prohibition of Re-entrancy & State Inconsistency**: Hardware interrupts are non-reentrant for their vector until End-of-Interrupt (EOI) signaling. Access to shared mutable kernel state must be protected by wait-free atomic primitives.
+- **Prohibition of Allocation Deadlock (Theorem 1)**: Preempting a thread while it holds an internal allocator spinlock or metadata, followed by dynamic allocation inside the ISR on the same core, produces an unrecoverable uniprocessor self-deadlock ($c \to c$). Dynamic allocation is strictly prohibited.
+- **Prohibition of Sleep-in-Atomic (Theorem 2)**: Schedulers require an active TCB ($\mathrm{tid} \neq \bot$) to suspend and yield. Blocking or sleeping inside an ISR results in undefined behavior, hardware interrupt mask freeze, or catastrophic IST stack corruption.
+
+### 2. The Three Static Invariants Checked at Compile-Time
+1. **`E-IRQ-ALLOC` — Static Prohibition of Dynamic Memory Allocation**:
+   - Rejects all heap allocations (`new T()`), dynamic string concatenation, array resizing/growing, and unbounded closures.
+   - Rejects elastic lane expansion that can invoke the external page memory provider (`sn_set_memory_provider`).
+   - Permitted: Lexical stack variables (subject to static stack consumption bound $S(f) \le \mathrm{LIMIT}_{\mathrm{IST}}$) and pre-allocated, bounded pinned-lane scratchpad memory ($\pi_{\mathrm{irq}}$) restored via `region { }` without dynamic page requests.
+2. **`E-IRQ-BLOCK` — Static Prohibition of Blocking Synchronization**:
+   - Rejects acquiring sleeping mutexes (`std.sync.Mutex`, `pthread_mutex_t`), channel operations (`chan.send()`, `chan.recv()`), coroutine yielding (`await`), semaphores, condition variables, and `thread.sleep()`.
+   - Rejects unbounded spinlocks over non-atomic variables.
+3. **`E-IRQ-INTERPROC` — Interprocedural Purity Propagation**:
+   - Constructs the call graph $\mathcal{G} = (V, E)$ from all `irq fn` entrypoints ($\mathcal{V}_{\mathrm{irq\_roots}}$).
+   - Computes transitive effect closure $\mathcal{E}^*(u) = \mathcal{E}_{\mathrm{local}}(u) \cup \bigcup_{(u, v)} \mathcal{E}^*(v)$ via Tarjan's SCC and Knaster-Tarski fixpoint iteration.
+   - Any function transitively reachable from an `irq fn` that performs an allocating or blocking operation is rejected with `[E-IRQ-INTERPROC]`, detailing the complete call trace $f_{\mathrm{irq}} \to g_1 \to \dots \to v$.
+   - Function pointers invoked in `irq fn` must explicitly carry the `irq fn(...) -> T` capability; passing unannotated `fn` pointers is rejected with `[E-IRQ-CAPABILITY]`. Unbounded recursion cycles are rejected with `[E-IRQ-RECURSION]`.
+
+### 3. Concurrency Integration & Permitted Primitives
+- **Lock-Free Atomics**:
+  - `AtomicBool`, `AtomicU8`, `AtomicU16`, `AtomicU32`, `AtomicU64`, `AtomicInt`, `AtomicPtr`.
+  - Operations: `.load(order)`, `.store(val, order)`, `.fetch_add`, `.fetch_sub`, `.fetch_or`, `.fetch_and`, `.fetch_xor`, `.compare_exchange_weak`, `.compare_exchange_strong`.
+  - Supported orderings: `Relaxed`, `Acquire`, `Release`, `AcqRel`, `SeqCst`.
+  - Lowering: Zero-lock hardware atomic instructions (`lock cmpxchg`, `lock xadd`, `lock or`, etc.), guaranteed wait-free $\mathcal{O}(1)$.
+- **Wait-Free SPSC Ring Buffer (`SpscRing<T, const N: u64>`)**:
+  - Statically pre-allocated buffer of power-of-two capacity $N = 2^k$.
+  - Atomic `head` written exclusively by `irq fn` (Producer); atomic `tail` written exclusively by thread/worker (Consumer).
+  - Wait-free `.push(item: T) -> bool` executes in bounded step count without loops or locks; returns `false` on buffer overrun.
+  - Provably free of torn reads and overwrites via Acquire-Release memory order semantics.
+- **Deferred Bottom-Half Signaling (SoftIRQ)**:
+  - Top-half `irq fn` acknowledges hardware (e.g., LAPIC EOI), pushes events to SPSC ring, and sets an atomic bit in a global pending mask (`softirq_pending.fetch_or(1 << IRQ_ID, MemoryOrder.Release)`).
+  - The kernel interrupt exit trampoline inspects `softirq_pending` and dispatches deferred bottom-half workers (`softirq fn`) at $\mathrm{ipl} = 1$ with interrupts enabled, where heavier processing safely occurs.
+- **LLVM Lowering**:
+  - `irq fn` lowers with LLVM calling convention `x86_intr` (`x86_intrcc`) and attribute `"no-red-zone"="true"`.
+  - Automatically preserves all touched CPU scratch registers and terminates with `iretq` (x86_64) or `eret` (AArch64).
