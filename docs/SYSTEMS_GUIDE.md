@@ -14,7 +14,8 @@
 5. [Chapter 4: Contract-Based Static Verification](#chapter-4-contract-based-static-verification)
 6. [Chapter 5: State Chronology & Differential Dataflow](#chapter-5-state-chronology--differential-dataflow)
 7. [Chapter 6: Relocatable Links & Generational Slot Pools](#chapter-6-relocatable-links--generational-slot-pools)
-8. [Compiler Diagnostic Code Reference](#compiler-diagnostic-code-reference)
+8. [Chapter 7: Practical Systems Tutorials & Production Recipes](#chapter-7-practical-systems-tutorials--production-recipes)
+9. [Compiler Diagnostic Code Reference](#compiler-diagnostic-code-reference)
 
 ---
 
@@ -365,6 +366,257 @@ fn pool_example() {
   - `pool<T>`: Read-only outside an `unfrozen (P) { ... }` block.
   - `pool<T> thread_local`: Confined to the declaring thread; thread transfer is rejected with `E0803.1`.
   - `pool<T> synchronized`: Thread-safe mutex-protected pool.
+
+---
+
+## Chapter 7: Practical Systems Tutorials & Production Recipes
+
+This chapter provides step-by-step, production-grade architectural recipes demonstrating how to compose SNlang's advanced systems features in real-world scenarios.
+
+---
+
+### Tutorial 7.1: High-Performance 2D Stencil Computation with Morton Lists
+
+#### Context & Architectural Challenge
+In numerical physics, image convolutions, and computational fluid dynamics, algorithms repeatedly compute new cell values as a function of neighboring cells (a stencil computation). In conventional row-major memory layouts:
+$$\text{Cell}(x, y) = \text{Data}[y \times \text{Stride} + x]$$
+Traversing vertical neighbors ($(x, y-1)$ and $(x, y+1)$) forces the CPU to jump across entire memory rows ($\text{Stride} \times 8\text{ bytes}$), causing frequent L1 and L2 hardware cache line evictions.
+
+By using **Morton $Z$-order Lists (`morton list`)**, spatial 2D locality is mapped to 1D contiguous memory, keeping vertical and horizontal neighbors close in the hardware cache lines.
+
+#### Complete Implementation: 2D Heat Diffusion Simulation
+```snlang
+// A 16x16 Heat Diffusion Simulation Grid
+fn run_diffusion_simulation() {
+    // 1. Allocate a 16x16 power-of-two Morton grid
+    // Dimensions MUST be equal powers of two (Invariant E-SFC)
+    morton list<int, dims=[16, 16]> current_grid = morton_new(16, 16)
+    morton list<int, dims=[16, 16]> next_grid = morton_new(16, 16)
+
+    // 2. Initialize thermal heat source in the center (8, 8)
+    morton_set(current_grid, 8, 8, 1000)
+
+    // 3. Stencil Computation Step
+    // To preserve hardware cache locality, we iterate along the 1D space-filling curve!
+    int total_cells = 16 * 16
+    for (int code = 0, code < total_cells, code += 1) {
+        // Extract 2D coordinates from the bit-interleaved Morton index
+        int x = morton_x(code)
+        int y = morton_y(code)
+
+        // Skip boundary cells for stability
+        if (x > 0 && x < 15 && y > 0 && y < 15) {
+            // Read 4-point Laplacian neighbors:
+            int center = morton_scan_get(current_grid, code)
+            int left   = morton_get(current_grid, x - 1, y)
+            int right  = morton_get(current_grid, x + 1, y)
+            int top    = morton_get(current_grid, x, y - 1)
+            int bottom = morton_get(current_grid, x, y + 1)
+
+            // Compute discrete Laplacian: (left + right + top + bottom) / 4
+            int diffused_temp = (left + right + top + bottom) / 4
+            morton_set(next_grid, x, y, diffused_temp)
+        }
+    }
+}
+```
+
+#### Allowed vs. Forbidden Patterns
+
+* **Allowed (Cache-Optimized Curve Traversal)**:
+  ```snlang
+  // ALLOWED: Iterating by Morton curve code achieves optimal L1/L2 cache locality
+  for (int code = 0, code < 256, code += 1) {
+      int val = morton_scan_get(grid, code)
+  }
+  ```
+* **Forbidden (Non-Power-of-Two Dimensions — `E-SFC`)**:
+  ```snlang
+  // FORBIDDEN: Compiler error E-SFC: dimensions must be equal powers of two (e.g. 16, 32, 64)
+  morton list<int, dims=[10, 10]> invalid_grid = morton_new(10, 10)
+  ```
+* **Performance Warning (Naive Row-Major Loops — `W-SFC-T5B`)**:
+  ```snlang
+  // WARNING W-SFC-T5B: Nested row-major loops over morton storage degrade spatial curve locality
+  for (int y = 0, y < 16, y += 1) {
+      for (int x = 0, x < 16, x += 1) {
+          int val = morton_get(grid, x, y)
+      }
+  }
+  ```
+
+---
+
+### Tutorial 7.2: Conflict-Free Real-Time Telemetry Aggregation with Waves & LCells
+
+#### Context & Architectural Challenge
+In high-throughput multi-core services (such as game servers, financial exchanges, and distributed monitoring), thousands of worker tasks concurrently update shared telemetry metrics (such as peak latency, total error counts, and active client sessions). Traditional approaches use locks or atomic compare-and-swap (CAS) loops, causing severe thread contention and non-deterministic metric snapshots.
+
+SNlang solves this using **Join-Semilattices (`lcell`)** and **Deterministic Wave Blocks (`wave { ... }`)**.
+
+#### Complete Implementation: Confluent Telemetry Collector
+```snlang
+// Seam cells: module-level shared mutable state constrained to semilattices
+ptr peak_latency_cell = lcell_new(0) // Carrier 0: High-Water Mark / Max (⊔ = max)
+ptr active_sessions   = lcell_new(1) // Carrier 1: Grow-Only Set / G-Set (⊔ = union)
+
+fn simulate_concurrent_telemetry() {
+    // 1. Initial baseline inflation
+    lcell_inflate(peak_latency_cell, 45, 0)
+
+    // 2. Deterministic Wave Region:
+    // Captures a frozen snapshot κ of all seam cells at entry.
+    // All tasks inside observe this identical snapshot regardless of thread arrival order!
+    wave {
+        // Read frozen snapshot value:
+        int base_peak = read_W(peak_latency_cell)
+
+        // Multiple concurrent worker contributions:
+        // Worker 1 observed a spike of 120 ms:
+        contrib(peak_latency_cell, 120, 0)
+
+        // Worker 2 observed a spike of 85 ms:
+        contrib(peak_latency_cell, 85, 0)
+
+        // Worker 3 registered active client sessions:
+        contrib(active_sessions, 9001, 0)
+        contrib(active_sessions, 9002, 0)
+
+    } // WAVE JOIN POINT J(W):
+      // All contributions fold deterministically:
+      // peak_latency_cell = max(45, 120, 85) = 120
+      // active_sessions = {9001, 9002}
+
+    // 3. Post-Join Observation:
+    int final_peak = read_J(peak_latency_cell)
+    assert(final_peak == 120)
+
+    int session_count = lcell_len(active_sessions)
+    assert(session_count == 2)
+    assert(lcell_has(active_sessions, 9001) == true)
+}
+```
+
+#### Allowed vs. Forbidden Patterns
+
+* **Allowed (Monotonic Inflation & Staged Contributions)**:
+  ```snlang
+  // ALLOWED: Contributing higher values or new elements to the semilattice
+  contrib(peak_latency_cell, 150, 0)
+  ```
+* **Forbidden (Impure Operations inside Wave — `E0812`)**:
+  ```snlang
+  wave {
+      // FORBIDDEN E0812: Impure function call inside wave region!
+      // Reading clocks, disk IO, network calls, and locks are strictly rejected.
+      int now = time_now_ms() 
+      print("Processing wave...")
+  }
+  ```
+* **Forbidden (Monotonicity Violation — `E-LRET`)**:
+  ```snlang
+  // FORBIDDEN E-LRET: Semilattices are strictly grow-only!
+  // Decrementing or retracting an lcell element is mathematically impossible.
+  lcell_deflate(peak_latency_cell, 10)
+  ```
+* **Forbidden (Premature Post-Join Read — `E-R1`)**:
+  ```snlang
+  wave {
+      // FORBIDDEN E-R1: Cannot call read_J() inside an active wave before the join boundary!
+      int current = read_J(peak_latency_cell)
+  }
+  ```
+
+---
+
+### Tutorial 7.3: Audit-Compliant Event Sourcing with Differential Tapes & Z-Sets
+
+#### Context & Architectural Challenge
+Mission-critical systems (such as financial ledgers, inventory trackers, and compliance auditing engines) require complete historical provenance and time-travel debugging. Storing full database copies on every event wastes gigabytes of memory, while storing unindexed log streams makes state reconstruction slow ($\mathcal{O}(N)$ over all events).
+
+SNlang combines **Differential $\mathbb{Z}$-Sets** (multisets with positive/negative integer counts) and **Append-Only Execution Tapes (`tape<T>`)** to provide instant incremental state tracking and deterministic replay.
+
+#### Complete Implementation: Financial Account Balance Ledger
+```snlang
+fn run_account_ledger() {
+    // 1. Initialize differential Z-sets for state tracking
+    // Carrier Kind 0 = Standard Multiset Algebra
+    ptr balance_v0 = zset_new(0)
+    ptr balance_v1 = zset_new(0)
+    ptr balance_v2 = zset_new(0)
+
+    // 2. Initialize execution tape (named "account_audit_ledger")
+    tape<int> ledger_tape = tape_new("account_audit_ledger")
+
+    // State V1: User 101 deposits $500, User 102 deposits $250
+    zset_add(balance_v1, 101, 500)
+    zset_add(balance_v1, 102, 250)
+
+    // Record baseline CHECKPOINT (Record Kind 2):
+    tape_record(ledger_tape, 2, balance_v1)
+
+    // State V2: User 101 transfers $100 to User 102
+    // Differential representation: User 101 (-100), User 102 (+100)
+    zset_add(balance_v2, 101, 400) // Multiplicity is 400
+    zset_add(balance_v2, 102, 350) // Multiplicity is 350
+
+    // Record DELTA (Record Kind 1) representing transition V1 -> V2:
+    tape_record(ledger_tape, 1, balance_v1, balance_v2)
+
+    // 3. Deterministic State Reconstruction & Replay:
+    // Replay reads the base checkpoint and folds the differential deltas!
+    ptr reconstructed_state = zset_new(0)
+    tape_replay(ledger_tape, reconstructed_state)
+
+    // Verify balances match exactly:
+    int user_101_balance = zset_count(reconstructed_state, 101)
+    int user_102_balance = zset_count(reconstructed_state, 102)
+
+    assert(user_101_balance == 400)
+    assert(user_102_balance == 350)
+}
+
+// Bounded Reachability with Semi-Naïve Fixpoint Convergence
+fn verify_account_network(ptr transaction_graph, ptr seed_accounts) -> bool {
+    // Creates a bounded differential fixpoint engine
+    ptr fixpoint = zfix_new(transaction_graph, seed_accounts)
+    
+    // Executes iterative Knaster-Tarski semi-naïve fixpoint closure:
+    int iteration_rounds = zfix_run(fixpoint)
+    
+    // Query reachability:
+    return zfix_has(fixpoint, 999) // Returns true if account 999 is connected
+}
+```
+
+#### Allowed vs. Forbidden Patterns
+
+* **Allowed (Checkpoint Baseline Followed by Delta Records)**:
+  ```snlang
+  // ALLOWED: Always establish a checkpoint before chaining state-relative deltas
+  tape_record(my_tape, 2, state_initial)
+  tape_record(my_tape, 1, state_initial, state_next)
+  ```
+* **Forbidden (Replaying Deltas Without Baseline Checkpoint — `E-TAPE`)**:
+  ```snlang
+  // FORBIDDEN E-TAPE: Cannot replay state-relative deltas without an anchor checkpoint
+  tape<int> broken_tape = tape_new("broken")
+  tape_record(broken_tape, 1, state_a, state_b) // Missing checkpoint!
+  tape_replay(broken_tape, reconstructed)       // Runtime Error [E-TAPE]
+  ```
+* **Forbidden (Mixing Algebraic Carrier Tiers on One Tape — `E-TAPE`)**:
+  ```snlang
+  // FORBIDDEN E-TAPE: "One tape, one ledger" invariant!
+  // Mixing differential multiset records with semilattice records on the same tape is rejected.
+  tape_record(ledger_tape, 1, semilattice_a, semilattice_b)
+  ```
+* **Forbidden (Recording Tapes Inside Waves — `E-TAPE-WAVE`)**:
+  ```snlang
+  wave {
+      // FORBIDDEN E-TAPE-WAVE: Tape logging involves allocation and IO; forbidden inside wave
+      tape_record(ledger_tape, 2, state_v1)
+  }
+  ```
 
 ---
 

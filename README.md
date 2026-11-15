@@ -215,7 +215,8 @@ Commit `sn.lock.toml` in apps. Registry `index.json` format and recipes: [docs/P
 | Guide | Description |
 |---|---|
 | [**docs/LANGUAGE.md**](docs/LANGUAGE.md) | **Core Language Tour** — Basic syntax, types, control flow, functions, OOP, and errors |
-| [**docs/SYSTEMS_GUIDE.md**](docs/SYSTEMS_GUIDE.md) | **Advanced Systems Architecture** — Regional memory, SFC, waves, contracts, and tapes |
+| [**docs/MEMORY_SAFETY.md**](docs/MEMORY_SAFETY.md) | **Memory Safety & Tiered Execution** — 4 memory spaces, pinned lanes, $O(1)$ regions, escape analysis, and poison guards |
+| [**docs/SYSTEMS_GUIDE.md**](docs/SYSTEMS_GUIDE.md) | **Advanced Systems Architecture** — Regional memory, SFC, waves, contracts, tapes, and production tutorials |
 | [**docs/RFC_BAREMETAL_KERNEL_MASTER_SPEC.md**](docs/RFC_BAREMETAL_KERNEL_MASTER_SPEC.md) | **Bare-Metal Kernel RFC** — Freestanding runtime, MMIO registers, and IRQ static safety |
 | [**docs/PACKAGES.md**](docs/PACKAGES.md) | **Package Management** — `sn.toml` manifest, dependencies, lockfiles, and publishing |
 | [**docs/HTTP.md**](docs/HTTP.md) | **Networking & Services** — HTTP client, configuration, and TLS verification |

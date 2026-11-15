@@ -23,22 +23,102 @@ str? nick = none
 str shown = nick otherwise "anon"
 ```
 
-## Control
+## Control & Pattern Matching
 
 `if` / `else if` / `else`, `while`, counted `for`, `for in`, `match`, `stop`, `skip`, `defer`.
 
-## Errors
+### Algebraic Enums & Pattern Matching
+
+SNlang supports tagged unions (algebraic data types) with payload variants and strict compile-time exhaustiveness checking:
+
+```sn
+enum Token {
+    Ident(str name),
+    Number(int val),
+    Eof
+}
+
+fn describe(Token tok) {
+    match (tok) {
+        Token.Ident(name) {
+            print("Identifier: {name}")
+        }
+        Token.Number(val) {
+            print("Number: {val}")
+        }
+        Token.Eof {
+            print("End of File")
+        }
+    }
+}
+```
+
+The compiler enforces exhaustive coverage:
+- Omitting a variant from `match` without a `default` arm triggers a compile error.
+- Matching on nullable `T?` requires covering `none` and value arms or providing `default`.
+
+```sn
+str? nickname = none
+match (nickname) {
+    none {
+        print("Anonymous user")
+    }
+    str name {
+        print("Welcome, {name}")
+    }
+}
+```
+
+## Errors & Failure Handling
+
+SNlang avoids exceptions in favor of explicit, zero-cost error values and tuple returns `(T, error)`:
 
 ```sn
 fn div(int a, int b) -> (int, error) {
     if (b == 0) {
-        return 0, error("div0")
+        return 0, error("division by zero")
     }
     return a / b, none
 }
 ```
 
-`try expr` early-returns on error (Zig-style).
+### The `try` Operator
+To avoid tedious `if (err != none)` boilerplate, the `try` operator unwraps the value or immediately returns the error from the enclosing function (Zig/Rust-style early return):
+
+```sn
+fn compute(int a, int b) -> (int, error) {
+    int quotient = try div(a, b)
+    return quotient * 2, none
+}
+```
+
+## Function Contracts & Static Invariant Proving
+
+SNlang features a built-in formal verification layer using Difference Bound Matrix (DBM) zone analysis. Functions declare mathematical preconditions (`requires`) and postconditions (`ensures`):
+
+```sn
+// Precondition proved at compile time: array bounds check is completely eliminated!
+fn get_item(list<int> xs, int i) -> int requires(0 <= i < xs.length()) {
+    return xs[i]
+}
+
+// Postcondition with contextual return-value binding (`result`):
+fn clamp(int x) -> int requires(0 <= x <= 100) ensures(0 <= result <= 100) {
+    return x
+}
+
+// Strict formal verification: Tier N non-linear expressions are rejected at compile time
+verified fn add_positive(int a, int b) -> int 
+    requires(a > 0 and b > 0) 
+    ensures(result > 0) 
+{
+    return a + b
+}
+```
+
+- **Compile-Time Discharge:** Proved linear contracts incur **zero CPU instructions at runtime**.
+- **Safe Degradation:** In standard `fn`, unprovable invariants degrade safely to typed runtime assertions (`[E-0702]`).
+- **Verified Mode (`verified fn`):** Unprovable or non-linear expressions produce a hard compilation error (`E0701`).
 
 ## Modules
 
@@ -490,6 +570,7 @@ See `examples/std_test.sn`.
 
 For high-performance systems architecture and bare-metal programming:
 
-* **[Advanced Systems Guide](SYSTEMS_GUIDE.md)**: Deterministic regional memory (`region { }`), cache-oblivious collections (`morton list`, `hilbert map`), confluent race-free concurrency (`wave { }`, `lcell`), contract-driven static verification (`requires`, `ensures`), and differential state chronology (`tape`, `zset`, `zfix`).
+* **[Memory Safety & Tiered Execution Architecture](MEMORY_SAFETY.md)**: Deep dive into the 4 memory tiers, pinned thread lanes, $O(1)$ lexical region scopes (`region { }`), affine escape analysis (`E0802`), memory space isolation (`E-GC-IN-LANE`), poison safety (`T-FIBR`), and nursery lane carving.
+* **[Advanced Systems Guide](SYSTEMS_GUIDE.md)**: Deterministic regional memory, cache-oblivious collections (`morton list`, `hilbert map`), confluent race-free concurrency (`wave { }`, `lcell`), contract-driven static verification (`requires`, `ensures`), and differential state chronology (`tape`, `zset`, `zfix`).
 * **[Bare-Metal Kernel Architecture Spec](RFC_BAREMETAL_KERNEL_MASTER_SPEC.md)**: Freestanding mode (`--freestanding`), pluggable page allocators, hardware volatile registers (`mmio<T>`), and static interrupt safety (`irq fn`).
 * **[Formal Language Specification](../SNLANG_SPEC.md)**: The authoritative formal specification for the SNlang grammar, type system, and runtime ABI.
