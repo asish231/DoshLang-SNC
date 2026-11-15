@@ -645,9 +645,9 @@ SNlang has a **teaching OOP subset**, not full Java/C++ OOP:
 
 ---
 
-## 14. Inheritance
+## 14. Inheritance & The Diamond Problem Invariant
 
-Use `from` to inherit from another blueprint.
+Use `from` to inherit from another blueprint. SNlang enforces **Single Implementation Inheritance**: a blueprint can inherit state and code from at most **one** parent blueprint.
 
 ```text
 blueprint Animal {
@@ -662,6 +662,11 @@ blueprint Animal {
 blueprint Dog from Animal {
     str breed
 
+    // Method overriding and calling super:
+    fn describe() -> str {
+        return super.describe() + " (" + self.breed + ")"
+    }
+
     fn bark() {
         print("Woof!")
     }
@@ -674,11 +679,22 @@ print(rex.describe())
 rex.bark()
 ```
 
+### Elimination of the Diamond Problem
+Languages allowing multiple class inheritance (like C++) suffer from the **Diamond Problem** (duplicate state allocation, ambiguous method resolution, and runtime `this`-pointer thunk overhead).
+
+In SNlang:
+* **Single Linear Memory Layout**: Subclass fields append directly after the parent's fields in linear memory.
+* **Zero Pointer Adjustments**: Casting a child pointer to a parent pointer is a zero-cost operation at byte offset 0.
+* **Single Primary Vtable**: Every object instance possesses exactly one `vptr` at offset 0.
+
 ---
 
-## 15. Contracts (Interfaces)
+## 15. Contracts (Interfaces) & Abstract Blueprints
 
-`contract` defines a set of functions that a blueprint **must** implement.
+A `contract` defines a behavioral specification (interfaces / traits) without state:
+* **Zero State**: Contracts cannot declare fields.
+* **Multiple Conformance**: A blueprint can implement multiple contracts using `follows Contract1, Contract2, ...`.
+* **Zero Diamond Ambiguity**: Because contracts contain no fields, implementing multiple contracts can never duplicate state or cause memory collisions.
 
 ```text
 contract Drawable {
@@ -686,15 +702,50 @@ contract Drawable {
     fn resize(int width, int height)
 }
 
-blueprint Circle follows Drawable {
-    int radius
+contract Clickable {
+    fn on_click(int x, int y)
+}
+
+blueprint Button from UIElement follows Drawable, Clickable {
+    str label
 
     fn draw() {
-        print("Drawing circle with radius " + cast(self.radius, str))
+        print("Drawing button: " + self.label)
     }
 
     fn resize(int width, int height) {
-        self.radius = width / 2
+        self.width = width
+        self.height = height
+    }
+
+    fn on_click(int x, int y) {
+        print("Clicked!")
+    }
+}
+```
+
+### Abstract Blueprints vs. Contracts
+* **`contract` (Interface)**: Holds only method signatures, zero fields/state, supports multiple conformance via `follows`.
+* **Abstract Blueprint (Abstract Class)**: Declared via `abstract fn` inside a `blueprint`. Can hold fields/state, concrete methods, and abstract signatures. Cannot be instantiated directly (`new AbstractType()` is a compile error). Supports single inheritance via `from`.
+
+```text
+blueprint Shape {
+    int x
+    int y
+
+    fn move(int dx, int dy) {
+        self.x += dx
+        self.y += dy
+    }
+
+    abstract fn area() -> int // Subclasses must implement
+}
+
+blueprint Circle from Shape {
+    int radius
+
+    fn area() -> int {
+        return 3 * self.radius * self.radius
     }
 }
 ```

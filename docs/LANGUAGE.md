@@ -129,29 +129,152 @@ use mylib.calc
 
 Search order: importer dir, `packages/`, `stdlib/`, path deps in `sn.toml`.
 
-## OOP
+## Object-Oriented Architecture (OOP)
 
-`blueprint`, `from`, `super.method()`, `closed` / `guarded` fields and methods,
-and `blueprint Box<T>` monomorphization.
+SNlang provides a robust, strongly-typed object model built on **Blueprints**, **Single Class Inheritance**, and **Multiple Contract Conformance**.
 
-- **Vtable dispatch** — every class gets a per-class vtable emitted as an LLVM
-  global. Calls go through the object's vptr slot, so overriding a method in a
-  subclass works without any `type_id` comparison chain.
-- **Heterogeneous lists** — `list<Animal>` accepts any subclass instance:
-  `zoo.push(dog)`, `zoo.push(cat)`.
-- **Contract-typed variables** — `Drawable d = circle` with full checking.
-- **Static members** — `static fn create() -> int` on a blueprint, called as
-  `Counter.create()`. Static methods have no `self` and may not use it; static
-  methods never occupy a vtable slot.
-- **Abstract methods** — `abstract fn area() -> int` declares a signature with no
-  body. A blueprint with unimplemented abstract methods cannot be instantiated,
-  and subclasses must supply implementations.
-- **Method-level access** — `closed fn audit() -> int` is private to the
-  blueprint that declares it, while a subclass may still call it on itself.
-- **Generic constraints and variance**
-  - `blueprint Holder<T: Printable>` requires the argument to satisfy a contract.
-  - `blueprint Producer<out T>` is covariant, `blueprint Consumer<in T>` is
-    contravariant, and a plain `<T>` is invariant.
+```sn
+blueprint Point {
+    int x
+    int y
+
+    fn distance_squared() -> int {
+        return self.x * self.x + self.y * self.y
+    }
+}
+```
+
+### 1. Single Inheritance (`from Parent`)
+A blueprint can inherit fields and concrete method implementations from at most **one** parent blueprint using the `from` keyword:
+
+```sn
+blueprint Animal {
+    str species
+    int legs
+
+    fn describe() -> str {
+        return self.species + " with " + cast(self.legs, str) + " legs"
+    }
+}
+
+blueprint Dog from Animal {
+    str breed
+
+    // Override parent method and invoke super:
+    fn describe() -> str {
+        return super.describe() + " (Breed: " + self.breed + ")"
+    }
+
+    fn bark() {
+        print("Woof!")
+    }
+}
+```
+
+### 2. Elimination of the Diamond Problem
+Languages with multiple class inheritance (such as C++) suffer from the **Diamond Problem**: if class `D` inherits from both `B` and `C`, and both inherit from `A`, `D` faces ambiguous state duplication (`A::field` duplicated twice) and method resolution conflicts. Solving this requires virtual base tables (`vbtable`), runtime pointer adjustments (`this`-pointer thunks), and multiple `vptrs` inside every object.
+
+**SNlang completely eliminates the Diamond Problem by design**:
+* **Strict Single Inheritance**: Blueprints can only inherit state and concrete code from a single parent (`from`).
+* **Flat C-Struct Memory Layout**: A child blueprint's fields are laid out contiguously immediately after the parent's fields in memory. Casting from child to parent is a zero-cost operation at byte offset 0.
+* **Single Vtable (`vptr`)**: Every blueprint instance holds exactly one `vptr` at offset 0, matching raw C ABI performance with zero pointer thunks.
+
+### 3. Multiple Contract Conformance (`follows Contract1, Contract2, ...`)
+When a blueprint needs to satisfy multiple roles, it implements **Contracts** (behavioral interfaces) using `follows`:
+
+```sn
+contract Drawable {
+    fn draw()
+    fn resize(int width, int height)
+}
+
+contract Clickable {
+    fn on_click(int x, int y)
+}
+
+// Inherits state from UIElement, implements behavior for Drawable and Clickable:
+blueprint Button from UIElement follows Drawable, Clickable {
+    str label
+
+    fn draw() {
+        print("Rendering button: {self.label}")
+    }
+
+    fn resize(int width, int height) {
+        self.width = width
+        self.height = height
+    }
+
+    fn on_click(int x, int y) {
+        print("Button clicked at ({x}, {y})")
+    }
+}
+```
+
+* **No State in Contracts**: Contracts define function signatures only; they **cannot hold fields**.
+* **Zero Diamond Ambiguity**: Because contracts carry no data, implementing multiple contracts can never duplicate memory or cause state collision.
+* **Contract-Typed Polymorphism**: Variables can be typed as contracts (`Drawable d = button`), checked statically at compile time.
+
+### 4. Abstract Classes vs. Contracts
+
+| Feature | `contract Foo` (Interface) | `blueprint Bar { abstract fn ... }` (Abstract Class) |
+| :--- | :---: | :---: |
+| **Can hold fields/state?** | **No** (pure behavior) | **Yes** (holds member variables) |
+| **Can hold concrete methods?** | **No** (signatures only) | **Yes** (mix of concrete and abstract methods) |
+| **Multiple inheritance?** | **Yes** (`follows A, B, C`) | **No** (Single `from Parent`) |
+| **Direct instantiation?** | **No** | **No** (Rejected at compile time) |
+
+```sn
+// Abstract blueprint: holds state and concrete methods, but cannot be instantiated directly:
+blueprint Shape {
+    int x
+    int y
+
+    fn move(int dx, int dy) {
+        self.x += dx
+        self.y += dy
+    }
+
+    abstract fn area() -> int // Subclasses MUST implement this
+}
+
+blueprint Rectangle from Shape {
+    int width
+    int height
+
+    fn area() -> int {
+        return self.width * self.height
+    }
+}
+```
+Attempting `new Shape()` triggers a compile error: `abstract blueprint cannot be instantiated`.
+
+### 5. Access Control
+SNlang provides three clean levels of visibility:
+* **`open`** (default): Accessible from anywhere.
+* **`closed`**: Strictly private to the declaring blueprint (cannot be accessed by external code or subclasses).
+* **`guarded`**: Protected; accessible by the declaring blueprint and any child blueprints that inherit from it.
+
+```sn
+blueprint Account {
+    open str owner
+    closed dec(2) balance = 0.00
+    guarded int security_pin
+
+    closed fn recalculate_interest() {
+        // internal helper only
+    }
+}
+```
+
+### 6. Devirtualization, Generics & Variance
+* **Direct Devirtualization (1B calls/sec)**: When the concrete receiver type is known at compile time, the compiler bypasses the `vptr` and lowers calls directly to `@sn_m_{Blueprint}_{method}` with full LLVM inlining.
+* **Heterogeneous Lists**: `list<Animal>` accepts any subclass instance (`zoo.push(dog)`, `zoo.push(cat)`).
+* **Generic Monomorphization**: `blueprint Box<T>` monomorphizes into specialized zero-overhead types.
+* **Type Bounds & Variance**:
+  * `blueprint Container<T: Drawable>`: Enforces that type argument `T` must implement contract `Drawable`.
+  * `blueprint Producer<out T>`: Covariant in `T`.
+  * `blueprint Consumer<in T>`: Contravariant in `T`.
 
 ## Concurrency & Structured Concurrency
 
