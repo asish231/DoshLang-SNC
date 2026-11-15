@@ -94,11 +94,20 @@ typedef struct Str {
 typedef struct List {
     int64_t rc;
     int64_t kind;
-    int64_t elem_kind; /* 0=i64, 1=ptr */
+    int64_t elem_kind; /* 0=i64, 1=owned ptr (ARC), 2=borrow (ref/mut/ptr; no ARC — Wave 12 Impl-Q) */
     int64_t len;
     int64_t cap;
     int64_t *items;
 } List;
+
+/* Thread-local storage macro (used by the list slab's grown-list registry
+   below and the lane section; kept with the list code because the
+   registry is the earliest user — Wave 12, Impl-Q). */
+#ifdef _WIN32
+#define SN_TLS __declspec(thread)
+#else
+#define SN_TLS __thread
+#endif
 
 typedef struct Map {
     int64_t rc;
@@ -1089,6 +1098,9 @@ void sn_release(void *p) {
     switch (o->kind) {
     case KIND_LIST: {
         List *l = (List *)p;
+        /* elem_kind == 1 = owned handles only (the pointee law, Wave 12
+           Impl-Q): borrow-kind (2) elements are slot/lane addresses —
+           releasing them would corrupt the target local's value. */
         if (l->elem_kind == 1) {
             for (int64_t i = 0; i < l->len; i++) sn_release((void *)(intptr_t)l->items[i]);
         }
@@ -1467,6 +1479,90 @@ static int list_is_slab_backed(List *l) {
     return p >= g_list_slab_base && p < g_list_slab_limit;
 }
 
+/* SWARM RABBIT HOLE — Wave 12 (Impl-Q): the lane-aware items pool —
+   closing the caveat Impl-K's Wave-8 benchmark flagged
+   (bench/RESULTS_PINNED_LANE.md): the 1-store lane restore reclaims the
+   list HEADER (48 B lane bump memory) but did NOT reclaim the GROWN
+   items arrays — each list gets one 512 KB slab window; past 65,536
+   elements list_grow mallocs a bigger array and abandons the window;
+   a lane-backed header has NO release path (lane bytes die at the
+   rewind, never free()), so at N=100K per chain ~1 MB leaked per chain.
+   W2A §1.5 E-NESTLED grown-array lifecycle: slab window under 65,536
+   elements, malloc'd above, freed at the rewind when lane-backed.
+
+   Registry of lane-backed lists: sn_list_new_lane records the header;
+   sn_lane_restore walks the registry and frees the items array of every
+   header inside the rewound range [watermark, old_top). Heap-backed
+   lists (sn_list_new) never enter this registry — sn_release/gc_free
+   own their arrays (their !list_is_slab_backed free is the twin of the
+   gate in the walk below). */
+#define SN_GROWN_LANES 8 /* == SN_LANE_COUNT, asserted beside g_tls_lanes */
+typedef struct {
+    void **hdrs; /* lane-backed list headers, in bump order */
+    int64_t len, cap;
+} LaneGrown;
+static SN_TLS LaneGrown g_lane_grown[SN_GROWN_LANES];
+static SN_TLS int64_t g_lane_items_freed;
+
+static void lane_grown_register(void *header, int64_t lane_id) {
+    /* Clamp exactly as sn_lane_ensure does, so the registry lane matches
+       the lane the header actually lives on. */
+    if (lane_id < 0 || lane_id >= SN_GROWN_LANES) lane_id = 0;
+    LaneGrown *g = &g_lane_grown[lane_id];
+    if (g->len == g->cap) {
+        int64_t ncap = g->cap ? g->cap * 2 : 16;
+        void **nh = (void **)realloc(g->hdrs, (size_t)ncap * sizeof(void *));
+        if (!nh) {
+            fprintf(stderr, "out of memory\n");
+            exit(1);
+        }
+        g->hdrs = nh;
+        g->cap = ncap;
+    }
+    g->hdrs[g->len++] = header;
+}
+
+/* The rewind walk: free the grown items arrays of every lane-backed
+   list whose header dies at THIS rewind. RECLAIM INVARIANT: a
+   lane-backed list's header dies at the rewind that covers it, and the
+   SAME rewind frees its grown items array — no ref to lane memory can
+   escape (E-GC-IN-LANE), so the header and its array are unreachable at
+   the rewind: freeing them there is safe, correct, and free of double
+   frees. Registry order is bump order (entries are appended at
+   allocation), and a rewind to watermark W kills exactly the entries
+   created after W — a SUFFIX of the array, popped from the end. The
+   walk is therefore O(#lists freed by THIS rewind), never O(#live
+   lane-backed lists): a restore of an empty range touches one entry,
+   and a non-LIFO restore to a deep watermark pops its whole covering
+   suffix in one pass. Slab windows are NEVER freed — they are carved
+   from the shared 256 MB slab, not malloc'd (the list_is_slab_backed
+   gate); only the grown arrays are malloc'd, and only those need
+   freeing. Heap-backed lists (sn_list_new) never enter this registry —
+   sn_release/gc_free own their arrays. */
+static void lane_grown_rewind(int64_t lane_id, void *watermark, void *old_top) {
+    if (lane_id < 0 || lane_id >= SN_GROWN_LANES) lane_id = 0;
+    LaneGrown *g = &g_lane_grown[lane_id];
+    while (g->len > 0) {
+        void *h = g->hdrs[g->len - 1];
+        if ((uint8_t *)h < (uint8_t *)watermark) break; /* below the range: still live */
+        g->len--;
+        if ((uint8_t *)h < (uint8_t *)old_top) {        /* inside [wm, top): dead */
+            List *l = (List *)h;
+            if (l->items && !list_is_slab_backed(l)) {
+                free(l->items);
+                g_lane_items_freed++;
+            }
+        }
+    }
+}
+
+/* Test/diagnostic surface for the lane-aware items pool (Wave 12). */
+int64_t sn_lane_items_freed(void) { return g_lane_items_freed; }
+int64_t sn_lane_lists_live(int64_t lane_id) {
+    if (lane_id < 0 || lane_id >= SN_GROWN_LANES) lane_id = 0;
+    return g_lane_grown[lane_id].len;
+}
+
 void *sn_list_new(int64_t elem_kind) {
     List *l = (List *)xmalloc(sizeof(List));
     l->rc = 1;
@@ -1503,6 +1599,10 @@ void *sn_list_new_lane(int64_t elem_kind, int64_t lane_id) {
     l->len = 0;
     l->items = list_alloc_backing(4);
     l->cap = list_is_slab_backed(l) ? 65536 : 4;
+    /* Wave 12 (Impl-Q): the header dies at the lane's rewind — register
+       it so the rewind can free the grown items array (the lane-aware
+       items pool; the reclaim invariant above lane_grown_register). */
+    lane_grown_register(l, lane_id);
     return l;
 }
 
@@ -1528,7 +1628,21 @@ void sn_list_push_i64(void *p, int64_t v) {
 void sn_list_push_ptr(void *p, void *v) {
     List *l = (List *)p;
     list_grow(l);
-    sn_retain(v);
+    /* SWARM RABBIT HOLE — Wave 12 (Impl-Q): the pointee retention law,
+       closing Impl-J's Wave-8 flag (escape_ref_outer_ok deferred the
+       runtime retain to this tier). elem_kind 1 = owned handles: ARC as
+       before (list<str>/list<Point>/json elements — the legitimate use).
+       elem_kind 2 (and the pre-split 0 of an empty typed literal) =
+       borrows: the element is a ref<T>/mut<T>/raw-ptr SLOT or lane
+       address, not an object header — retain the POINTEE object (for a
+       scalar target there is none), never the slot. The old blind
+       sn_retain(v) treated the slot as an Obj header and incremented
+       the target local's value: list<ref<int>> of locals was broken
+       (x=99 became 100 at the push, and sn_release's element loop
+       decremented it back at list death). The borrow discipline owns
+       the target's lifetime (E-ESCAPE's region poset proves the target
+       outlives the list), so borrows retain nothing. */
+    if (l->elem_kind == 1) sn_retain(v);
     l->items[l->len++] = (int64_t)(intptr_t)v;
 }
 
@@ -1568,8 +1682,17 @@ void sn_list_set_i64(void *p, int64_t i, int64_t v) {
 void sn_list_set_ptr(void *p, int64_t i, void *v) {
     List *l = (List *)p;
     bounds(l, i);
-    sn_release((void *)(intptr_t)l->items[i]);
-    sn_retain(v);
+    /* The pointee law's release half (Wave 12, Impl-Q): only owned-kind
+       (elem_kind 1) lists ARC their elements — the symmetric fix of the
+       push-side retain. Borrow-kind elements are slot/lane addresses;
+       releasing them would decrement the target local's value (and, at
+       small values, fall through into the kind switch on bytes past the
+       slot). sn_release's KIND_LIST arm and sn_list_clear already gate
+       on elem_kind == 1. */
+    if (l->elem_kind == 1) {
+        sn_release((void *)(intptr_t)l->items[i]);
+        sn_retain(v);
+    }
     l->items[i] = (int64_t)(intptr_t)v;
 }
 
@@ -7565,12 +7688,6 @@ void sn_go_spawn(void (*fn)(void *), void *arg) {
 /*  SN-Strata Elastic Lanes, Generational Slot Vaults & Multi-Frame RF   */
 /* --------------------------------------------------------------------- */
 
-#ifdef _WIN32
-#define SN_TLS __declspec(thread)
-#else
-#define SN_TLS __thread
-#endif
-
 #define SN_LANE_COUNT 8
 #define SN_LANE_RESERVE_BYTES (256ULL * 1024ULL * 1024ULL) /* 256 MB virtual reservation per lane */
 #define SN_LANE_COMMIT_STEP   (64ULL * 1024ULL)
@@ -7635,6 +7752,10 @@ _Static_assert(offsetof(SnLane, limit) == 24, "llvm.rs gep field 3 (limit) must 
 _Static_assert(offsetof(SnLane, initialized) == 32, "llvm.rs gep field 4 (initialized) must stay at offset 32");
 _Static_assert(offsetof(SnLane, frozen_depth) == 36, "llvm.rs gep field 5 (frozen_depth) must stay at offset 36");
 _Static_assert(sizeof(SnLane) == 48, "llvm.rs lane stride (sizeof %sn_lane_t) must stay 48");
+/* Wave 12 (Impl-Q): the lane-aware items pool's registry is sized
+   SN_GROWN_LANES at the list section (before SN_LANE_COUNT is defined);
+   this ties the two constants together. */
+_Static_assert(SN_LANE_COUNT == SN_GROWN_LANES, "lane items registry size must mirror SN_LANE_COUNT");
 /* D0 gap #5 (Impl-F, Wave 6): the ν lane the CURRENT task of this thread
    loaned from its nursery (-1 = none). sn_lane_alloc's loaned-lane backstop
    and sn_nursery_loan_lane both consult it; it lives here (not in the carve
@@ -7707,6 +7828,15 @@ void sn_lane_restore(int64_t lane_id, void *watermark) {
         exit(1);
     }
     if (watermark && (uint8_t *)watermark >= l->base && (uint8_t *)watermark <= l->limit) {
+        /* Wave 12 (Impl-Q) — the lane-aware items pool: free the grown
+           items arrays of every lane-backed list header inside the
+           rewound range BEFORE the poison fill overwrites the headers
+           (the walk reads header->items). The header dies at this
+           rewind (no ref to lane memory can escape — E-GC-IN-LANE), so
+           its array is unreachable here: the reclaim invariant
+           documented at lane_grown_rewind. Registry walk cost:
+           O(#lists this rewind frees) — a suffix pop, not a scan. */
+        lane_grown_rewind(lane_id, watermark, l->top);
         /* T-FIBR "rewind re-poisons" (W4A repair 2): in debug/poison builds
            the freed range [watermark, old_top) is re-filled with 0xAA before
            the top store, so no byte below the new top is ever trusted as

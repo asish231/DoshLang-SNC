@@ -301,6 +301,14 @@ Use `value(p)` to dereference — get the data the pointer points to.
 int y = value(p)    // y = 42
 ```
 
+A `ref<T>` is a **non-owning borrow**. Storing one in a list (`list<ref<int>>`) keeps the
+target's address, never a reference count: the runtime does no ARC on a borrow element —
+not on the slot (which is not an object; the old blind retain corrupted the target
+local's value) and not on the pointee (the target's owner holds it). The target's value is
+unchanged by the push and the list read gives the right pointee
+(`examples/list_ref_local_roundtrip_ok.sn`); the E-ESCAPE region ordering guarantees the
+target outlives the list.
+
 ### Writing to an Address
 
 ```text
@@ -377,6 +385,7 @@ SNlang includes zero-overhead native allocators for high-throughput systems prog
    - **Inline lowering** (`-O1+`): constant-size lane allocations compile to a 3-instruction bump (load top, bump, store) with a guard branch routing to the loud runtime path; region exit is a 1-store watermark restore.
    - **T-FIBR poison-fill** (`--poison` / `-O0` / debug builds): lane bytes are filled with `0xAA` on allocation and re-poisoned on rewind — the read-before-write guard (E0807), unconditional across all codegen paths. Release builds emit zero extra instructions.
    - **Pinned-lane accumulator coloring** (compiler-assigned): recursive `inout` list parameters that grow across a recursive call are automatically assigned to dedicated pinned lanes (L2–L6) — each pinned lane hosts exactly one growable for its entire SCC lifetime, so the accumulator is never buried under descendant scratch. The 6th simultaneously-live accumulator fires **E0802c** (the budget error — never silent reuse). An explicit `lane_alloc` on a pinned lane is the user-declared discharge; scratch lanes (L0/L1) for SCC accumulators fire **E0802**.
+    - **The lane-aware items pool** (Wave 12): a lane-backed list's header dies at the rewind that covers it, and the *same rewind frees its grown items array* (a per-lane registry of lane-backed list headers; the rewind pops the covered suffix — O(#freed), never O(#live); no ref to lane memory can escape per E-GC-IN-LANE, so header and array are unreachable at the rewind). The E-NESTLED grown-array lifecycle: element storage is slab-backed under 65,536 elements (a 512 KB window carved from the shared 256 MB list slab — reused, never freed), malloc'd above the window, freed at the rewind when lane-backed. Heap-backed lists never enter the registry — `sn_release`/`gc_free` own their arrays.
    - **Escape checker** (E-ESCAPE): storing a reference into a destination requires the target to *outlive* the holder (the region-poset `⊑ₗ` law). A reference declared in a region that exits before the destination's region fires the error: "the target dies before the holder."
    - **GC scoping** (E-GC-IN-LANE): GC-managed memory (created via `new`/list literals — tracked by the garbage collector) and lane-backed memory (created via `lane_alloc` — untracked bump bytes) cannot reference each other. The GC cannot trace into lanes (its roots are globals+stacks+pushed values only), and lane rewinds don't respect the GC heap — a cross-category reference is a checked error in both directions.
    - **Task nursery lanes:** spawned tasks loan lanes from their thread's pool (`SnLane.parent`); at `nursery` join, each loaned lane resets to base in one store — the child's entire allocation reclaimed O(1).

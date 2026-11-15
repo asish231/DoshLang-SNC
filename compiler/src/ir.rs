@@ -489,6 +489,30 @@ fn lower_extern(f: &FnItem, db: &CheckDb) -> String {
     )
 }
 
+/// List element kind fed to sn_list_new / sn_list_new_lane.
+/// SWARM RABBIT HOLE — Wave 12 (Impl-Q), the push_ptr pointee retention
+/// fix (closing Impl-J's Wave-8 flag): 0 = i64 elements, 1 = OWNED
+/// pointer elements (str/blueprint/closure/... handles — the runtime
+/// ARC's them with sn_retain at push and sn_release at list death),
+/// 2 = BORROW elements (ref<T>/mut<T>/raw ptr): the element is a slot
+/// or lane address, not an object header — the runtime retains NOTHING
+/// (the pointee of a scalar target is not an object, and a ref into an
+/// object-typed binding is kept alive by the binding itself; the
+/// checker's E-ESCAPE region poset owns the target's lifetime). The old
+/// blind retain treated the slot as an Obj header and clobbered the
+/// target local's value (list<ref<int>> of locals was broken). No
+/// owned object type is assignable to ref/mut/ptr elements, so the
+/// split is exhaustive.
+fn list_elem_kind(elem: &Type) -> i64 {
+    if matches!(elem, Type::Ref(_) | Type::Mut(_) | Type::Ptr) {
+        2
+    } else if elem.is_ptr() || matches!(elem, Type::Optional(_)) {
+        1
+    } else {
+        0
+    }
+}
+
 /// C ABI mapping for a parameter type.
 fn ffi_param_ty(t: &Type) -> String {
     match t {
@@ -912,18 +936,14 @@ impl Cx<'_> {
             _ if let Some(x) = els.first() => self.lookup_ty(x),
             _ => Type::Int,
         };
-        let kind = if elem.is_ptr() || matches!(elem, Type::Optional(_)) {
-            1
-        } else {
-            0
-        };
+        let kind = list_elem_kind(&elem);
         let l = self.t();
         self.line(&format!(
             "{l} = call ptr @sn_list_new_lane(i64 {kind}, i64 {lane})"
         ));
         for el in els {
             let (v, vt) = self.expr(el);
-            if kind == 1 {
+            if kind != 0 {
                 self.line(&format!("call void @sn_list_push_ptr(ptr {l}, ptr {v})"));
             } else {
                 let vb = self.as_bits(v, &vt);
@@ -2147,12 +2167,12 @@ impl Cx<'_> {
                 } else {
                     Type::Int
                 };
-                let kind = if et.is_ptr() || matches!(et, Type::Optional(_)) { 1 } else { 0 };
+                let kind = list_elem_kind(&et);
                 let l = self.t();
                 self.line(&format!("{l} = call ptr @sn_list_new(i64 {kind})"));
                 for el in els {
                     let (v, vt) = self.expr(el);
-                    if kind == 1 {
+                    if kind != 0 {
                         self.line(&format!("call void @sn_list_push_ptr(ptr {l}, ptr {v})"));
                     } else {
                         let vb = self.as_bits(v, &vt);

@@ -6,3 +6,7 @@ rss go_escape_bench 1026896
 rss sn_lane_bench_poison 236240
 rss sn_pinned_lane_bench 737056
 rss c_pinned_lane_bench 614464
+rss sn_pinned_lane_bench 421856
+rss c_pinned_lane_bench 428912
+rss sn_pinned_lane_bench 421840
+rss c_pinned_lane_bench 424176

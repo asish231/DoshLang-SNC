@@ -101,6 +101,11 @@ heap_gc {11, 12, 24, 26, 43} µs; pin/heap alloc 2 ns/elem in every run of both 
   **The mandate's O(1) reclaim is confirmed for the header; element-pool reclamation is
   the open gap this measurement exposes** (a per-lane items-pool, or header-at-restore
   epoch sweep, would close it).
+  **→ CLOSED in Wave 12 (Impl-Q):** the lane-aware items pool (a per-lane registry of
+  lane-backed list headers; `sn_lane_restore` frees the grown items array of every
+  header the rewind covers — the §6 re-run supersedes this caveat's numbers). Only the
+  abandoned slab *windows'* touched pages stay resident by design: windows are carved
+  from the process-lifetime 256 MB slab, never freed.
 - **The mandate's "N frees" is not what this heap does.** SNlang lists pool their
   elements: a heap list's death is 1 untrack + 2 frees — not 100,000 frees. The
   per-object-free shape (one `new`-blueprint object per element, freed individually) was
@@ -145,3 +150,48 @@ heap_gc {11, 12, 24, 26, 43} µs; pin/heap alloc 2 ns/elem in every run of both 
 alloc regression (2 ns/elem both) and one real cost the swarm should schedule: the
 element arrays the 1-store restore leaves behind (~1 MB leaked per 100K-element chain,
 measured in RSS).
+
+## 6 · Wave-12 addendum (Impl-Q): the lane-aware items pool — §4's first caveat CLOSED
+
+**Fix (compiler/runtime.c, Wave 12, Impl-Q):** a per-lane TLS registry of lane-backed
+list headers (`lane_grown_register` at `sn_list_new_lane`; `SN_TLS` layout frozen — the
+registry is a parallel array, not a SnLane field). `sn_lane_restore` pops the registry
+suffix covered by the rewind — registry order is bump order, so the rewound range
+[watermark, top) is exactly the entries created after the watermark — and frees each
+dead header's items array, gated on `!list_is_slab_backed`. **Reclaim invariant: a
+lane-backed list's header dies at the rewind that covers it, and the same rewind frees
+its grown items array** (no ref to lane memory can escape — E-GC-IN-LANE — so header
+and array are unreachable at the rewind; the pop is O(#freed), never O(#live)).
+Slab windows (lists under 65,536 elements) are NEVER freed — carved from the shared
+256 MB slab, not malloc'd; heap-backed lists never enter the registry (sn_release/gc_free
+own their arrays). Runtime checks: tests/systems/test_lane_items.c (20/20b, ASan-clean);
+the direct probe: 32 grown chains at HEAD → +32,768 KB in the default malloc zone, fixed
+→ +0 KB.
+
+**Re-run:** same machine (M4), same protocol (`PIN_ONLY=1 PIN_CHAINS=200 RUNS=5`,
+medians of 5; the runner's raw files refreshed in `results/`, Wave-8 originals kept as
+`results/*_w8_implk.txt`). Checksums identical in 5/5 runs of each binary:
+`len_total=20,000,000`, `sum_total=999,990,000,000`, `depth_total=990,000`,
+`pin_lane_used_bytes=48`.
+
+| Row | Wave 8 (committed) | Wave 12 (post-fix) | Honest reading |
+|---|---:|---:|---|
+| peak RSS .sn (chains=200) | 737,056 KB | **421,840 KB** | **−315,216 KB (−42.8%)**: the grown arrays reclaimed per rewind |
+| peak RSS C twin | 614,464 KB | **424,176 KB** | **−190,288 KB (−31.0%)**: same |
+| pin chain reclaim (N=100K grown) | 5 ns | **225 ns** {190,205,225,355,510} | the old 5 ns **never reclaimed the 1 MB array — it leaked it**; the honest reclaim pays its `free` (~200 ns), landing next to the heap's |
+| heap chain reclaim | 240 ns | **170 ns** {160,170,170,180,245} | same free + untrack + header free; the 48× gap for *grown* lists was the leak's artifact |
+| pin_resetpair (1M pairs, no lists) | 4 ns | **5 ns** (5/5 runs) | the registry's empty-registry check: **+1 ns per rewind** |
+| pin_life (1M empty pinned lifecycles) | 17 ns | **26 ns** {25,26,26,27,31} | +9 ns: register append + suffix-pop + slab test per lifecycle |
+| heap_life (control, untouched path) | 34 ns | **42 ns** {39,41,42,42,50} | moved without any code change on it — ±8 ns on the small rows is session drift |
+| heap_gc (one pass, 200 lists) | 24–26 µs | **26 µs** | unchanged |
+| alloc rows (pin/heap, both binaries) | 2 ns/elem | **2 ns/elem** | unchanged; the fix touches no push path |
+
+**What changed in the story:** for lists *under* the 65,536-element window the reclaim is
+still the 1-store O(1) rewind (5 ns, `pin_resetpair` +1 ns for the registry check; the
+window is reused-not-freed by design). For lists that GROW past the window, the pinned
+reclaim now costs what honest reclamation costs — the array free — and the 48× headline
+applies only to the header + under-window case, no longer to grown chains whose memory
+used to simply never come back. RSS at chains=200 stops growing at the grown-array half
+of the leak; the abandoned slab windows' touched pages (~512 KB/list) stay resident by
+slab design (a future madvise/decommit at the grow transition is the remaining, out-of-
+scope half of the footprint).

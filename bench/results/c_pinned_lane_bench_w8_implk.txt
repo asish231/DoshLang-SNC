@@ -1,0 +1,45 @@
+BENCH row=timer clock_ns=17 ops=1000000 checksum=1682327130642455912
+BENCH row=pin elem_alloc_ns=2 elem_read_ns=0 chain_reclaim_ns=5 chain_alloc_us=227.50 chains=200 elems=20000000 len_total=20000000 sum_total=999990000000 depth_total=990000
+pin_lane_used_bytes=48
+BENCH row=heap elem_alloc_ns=2 elem_read_ns=0 chain_reclaim_ns=240 chain_alloc_us=228.01 chains=200 elems=20000000 len_total=20000000 sum_total=999990000000 depth_total=990000
+BENCH row=heap_gc gc_ns=11000 gc_objs_before=200 gc_objs_after=0 gc_freed=200 gc_elems=20000000
+BENCH row=pin_resetpair pair_ns=3 ops=1000000
+BENCH row=pin_life cycle_ns=17 ops=1000000 checksum=1000000
+BENCH row=heap_life cycle_ns=35 ops=1000000 checksum=1000000
+PINNED_LANE_BENCH_DONE
+BENCH row=timer clock_ns=16 ops=1000000 checksum=1682570840861661912
+BENCH row=pin elem_alloc_ns=2 elem_read_ns=0 chain_reclaim_ns=10 chain_alloc_us=218.63 chains=200 elems=20000000 len_total=20000000 sum_total=999990000000 depth_total=990000
+pin_lane_used_bytes=48
+BENCH row=heap elem_alloc_ns=2 elem_read_ns=0 chain_reclaim_ns=285 chain_alloc_us=227.94 chains=200 elems=20000000 len_total=20000000 sum_total=999990000000 depth_total=990000
+BENCH row=heap_gc gc_ns=24000 gc_objs_before=200 gc_objs_after=0 gc_freed=200 gc_elems=20000000
+BENCH row=pin_resetpair pair_ns=4 ops=1000000
+BENCH row=pin_life cycle_ns=18 ops=1000000 checksum=1000000
+BENCH row=heap_life cycle_ns=34 ops=1000000 checksum=1000000
+PINNED_LANE_BENCH_DONE
+BENCH row=timer clock_ns=17 ops=1000000 checksum=1682815657941297912
+BENCH row=pin elem_alloc_ns=2 elem_read_ns=0 chain_reclaim_ns=5 chain_alloc_us=217.85 chains=200 elems=20000000 len_total=20000000 sum_total=999990000000 depth_total=990000
+pin_lane_used_bytes=48
+BENCH row=heap elem_alloc_ns=2 elem_read_ns=0 chain_reclaim_ns=185 chain_alloc_us=220.93 chains=200 elems=20000000 len_total=20000000 sum_total=999990000000 depth_total=990000
+BENCH row=heap_gc gc_ns=12000 gc_objs_before=200 gc_objs_after=0 gc_freed=200 gc_elems=20000000
+BENCH row=pin_resetpair pair_ns=3 ops=1000000
+BENCH row=pin_life cycle_ns=16 ops=1000000 checksum=1000000
+BENCH row=heap_life cycle_ns=34 ops=1000000 checksum=1000000
+PINNED_LANE_BENCH_DONE
+BENCH row=timer clock_ns=16 ops=1000000 checksum=1683053207022481912
+BENCH row=pin elem_alloc_ns=2 elem_read_ns=0 chain_reclaim_ns=0 chain_alloc_us=219.38 chains=200 elems=20000000 len_total=20000000 sum_total=999990000000 depth_total=990000
+pin_lane_used_bytes=48
+BENCH row=heap elem_alloc_ns=2 elem_read_ns=0 chain_reclaim_ns=220 chain_alloc_us=221.94 chains=200 elems=20000000 len_total=20000000 sum_total=999990000000 depth_total=990000
+BENCH row=heap_gc gc_ns=43000 gc_objs_before=200 gc_objs_after=0 gc_freed=200 gc_elems=20000000
+BENCH row=pin_resetpair pair_ns=4 ops=1000000
+BENCH row=pin_life cycle_ns=18 ops=1000000 checksum=1000000
+BENCH row=heap_life cycle_ns=34 ops=1000000 checksum=1000000
+PINNED_LANE_BENCH_DONE
+BENCH row=timer clock_ns=18 ops=1000000 checksum=1683328022820756912
+BENCH row=pin elem_alloc_ns=2 elem_read_ns=0 chain_reclaim_ns=5 chain_alloc_us=230.72 chains=200 elems=20000000 len_total=20000000 sum_total=999990000000 depth_total=990000
+pin_lane_used_bytes=48
+BENCH row=heap elem_alloc_ns=2 elem_read_ns=1 chain_reclaim_ns=305 chain_alloc_us=226.45 chains=200 elems=20000000 len_total=20000000 sum_total=999990000000 depth_total=990000
+BENCH row=heap_gc gc_ns=26000 gc_objs_before=200 gc_objs_after=0 gc_freed=200 gc_elems=20000000
+BENCH row=pin_resetpair pair_ns=4 ops=1000000
+BENCH row=pin_life cycle_ns=17 ops=1000000 checksum=1000000
+BENCH row=heap_life cycle_ns=35 ops=1000000 checksum=1000000
+PINNED_LANE_BENCH_DONE

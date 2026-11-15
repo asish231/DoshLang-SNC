@@ -393,6 +393,19 @@ fn escape_ref_into_outer_ok() {
     assert_out("examples/escape_ref_outer_ok.sn", "5\n1\n");
 }
 
+/// SWARM RABBIT HOLE — Wave 12 (Impl-Q): the push_ptr pointee retention
+/// fix — closing Impl-J's Wave-8 flag (escape_ref_outer_ok deferred the
+/// runtime retain to this tier). A `ref<int>` of a local pushed into a
+/// `list<ref<int>>` is a borrow of the slot: the runtime must not ARC the
+/// slot address (the old blind sn_retain treated the slot as an Obj
+/// header and clobbered the local 99 -> 100), and the list read must
+/// give the right pointee. Both push spellings (named ref, inline
+/// address()).
+#[test]
+fn list_ref_local_roundtrip_ok() {
+    assert_out("examples/list_ref_local_roundtrip_ok.sn", "99\n99\n99\n99\n");
+}
+
 /// The discharge side of the same rule: a heap-backed list local passed
 /// inout into the recursive accumulator has no lane assignment, so the
 /// E0802 wiring must NOT over-fire off the lane model — the program

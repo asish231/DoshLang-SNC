@@ -695,10 +695,62 @@ else
     FAILURES=$((FAILURES + 1))
 fi
 
+# 20. The lane-aware items pool — the Wave-12 runtime mechanics
+#     (SWARM RABBIT HOLE, Wave 12, Impl-Q; closing Impl-K's Wave-8
+#     benchmark caveat in bench/RESULTS_PINNED_LANE.md). The per-lane
+#     registry of lane-backed list headers: grown (malloc'd) items
+#     arrays are freed at the rewind that covers their header (the
+#     reclaim invariant), slab windows (lists under 65,536 elements)
+#     are NEVER freed, nested watermarks free exactly the covering
+#     set, heap-backed lists stay off the registry, and the release
+#     side of the push_ptr pointee law is proven (borrow-kind lists
+#     release without touching the slots; owned-kind lists still ARC
+#     their elements). Built twice: plain, then ASan (20b).
+echo "-----------------------------------------------------------------"
+echo "20. LANE-AWARE ITEMS POOL (test_lane_items.c)"
+echo "-----------------------------------------------------------------"
+OUT_LANEITEMS="/tmp/snc_test_lane_items"
+rm -f "$OUT_LANEITEMS"
+if clang -O1 -g -o "$OUT_LANEITEMS" "$DIR/test_lane_items.c" "$ROOT/compiler/runtime.c" -lpthread 2>/dev/null; then
+    OUTPUT=$("$OUT_LANEITEMS")
+    echo "$OUTPUT"
+    if echo "$OUTPUT" | grep -q "PASS:"; then
+        echo ">>> test_lane_items(.c): PASSED"
+    else
+        echo ">>> test_lane_items(.c): FAILED"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> test_lane_items(.c): BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+echo ""
+
+# 20b. The ASan stress pass of the same lane-aware items pool test
+echo "-----------------------------------------------------------------"
+echo "20b. LANE-AWARE ITEMS POOL, ASAN STRESS (test_lane_items.c)"
+echo "-----------------------------------------------------------------"
+OUT_LANEITEMS_ASAN="/tmp/snc_test_lane_items_asan"
+rm -f "$OUT_LANEITEMS_ASAN"
+if clang -O1 -g -fsanitize=address -o "$OUT_LANEITEMS_ASAN" "$DIR/test_lane_items.c" "$ROOT/compiler/runtime.c" -lpthread 2>/dev/null; then
+    OUTPUT=$(ASAN_OPTIONS=detect_leaks=0 "$OUT_LANEITEMS_ASAN" 2>&1)
+    echo "$OUTPUT"
+    if echo "$OUTPUT" | grep -q "PASS:"; then
+        echo ">>> test_lane_items(.c ASan): PASSED (no ASan reports over the grown-array reclaim / nested rewinds / slab non-frees)"
+    else
+        echo ">>> test_lane_items(.c ASan): FAILED"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> test_lane_items(.c ASan): BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
 echo ""
 echo "================================================================="
 if [ $FAILURES -eq 0 ]; then
-    echo "  ALL SYSTEMS & SECURITY TESTS PASSED (29 checks)"
+    echo "  ALL SYSTEMS & SECURITY TESTS PASSED (31 checks)"
     exit 0
 else
     echo "  $FAILURES SYSTEMS TESTS FAILED"

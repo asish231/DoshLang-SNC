@@ -1,0 +1,25 @@
+// SWARM RABBIT HOLE — Wave 12 (Impl-Q): the push_ptr pointee retention
+// fix (closing Impl-J's Wave-8 flag — escape_ref_outer_ok.sn deferred the
+// runtime retain to this tier with "the pushed target 'y' is never read
+// after the push"). A `ref<int>` of a local is a stack-slot address, not
+// an object header: pushing it into a `list<ref<int>>` must retain the
+// POINTEE (for a scalar target, nothing — the borrow discipline owns the
+// target's lifetime), never the slot. The round trip: the local's value
+// is UNCHANGED by the push (the old blind sn_retain treated the slot as
+// an Obj header and clobbered 99 -> 100), and the list read gives the
+// right pointee. Both push spellings: the named ref and the inline
+// address().
+//
+// Run-OK golden case (tests/golden.rs).
+
+fn main() {
+    int x = 99
+    list<ref<int>> box = []
+    ref<int> r = address(x)
+    box.push(r)
+    print(x)
+    print(value(box[0]))
+    box.push(address(x))
+    print(x)
+    print(value(box[1]))
+}
