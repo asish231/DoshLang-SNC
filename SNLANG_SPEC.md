@@ -1243,3 +1243,47 @@ Nested `fn` and `fn(int x) -> int { ... }` lambdas are values (limited captures,
 
 `sn.toml` + `snc pkg init|add|build|list`. `use foo.bar` resolves through `packages/` and `stdlib/`. See README.
 
+## 27. Wave Regions — Theorem WS, executable (implemented)
+
+A **wave region** is a deterministic observation bracket over module-scope Tier-L seam cells — the executable form of the wave-seam composition theorem (SWARM RABBIT HOLE, W2B §3/§4: the typed read-mode surface + **Thm WS**, the campaign's centerpiece).
+
+```text
+ptr results = lcell_new(1)          // module scope: a SEAM CELL (carrier 0=max, 1=gset, 2=lww)
+ptr peak    = lcell_new(0)
+
+fn main() {
+    lcell_inflate(peak, 10, 0)       // fallback merge, program-order-BEFORE the wave (R1's provable arm)
+
+    wave {
+        int base = read_W(peak)      // the frozen capture κ (deterministic read mode)
+        contrib(results, base - 8, 0)  // stage a payload; ⊔-applied at J(W)
+        contrib(peak, base * 2, 0)
+    }
+    // J(W) happened here: the staged multiset folded into the cells
+    print(read_J(peak))              // 20 — κ₀ ⊔ ⊔𝒰_W (fold-valued; schedule-independent)
+    print(lcell_len(results))        // 2 — the fold observed via the fallback reads
+}
+```
+
+**The theorem, in brief.** Under the C-conditions the checker enforces, every observation in and after a wave is fully deterministic: in-wave (Part 1 — the body is a pure function of the frozen capture κ, Lemma WD), at the join (Part 2 — the fold's result is independent of staging order, grouping, duplication, and thread count, by the Tier-L carrier's checked lattice laws; contributions are ONE atomic ⊔-merge per cell, Lemma NI(ii)), and composed (Part 3 — sequential waves on one cell compose, J(Wᵢ) → capture(W_{i+1})). Wave owns observation; the semilattice owns the seams.
+
+**The typed read-mode surface (the mode is in the type).**
+
+| Mode | Op | Meaning |
+|---|---|---|
+| `read_W(c)` | in-wave | the frozen capture κ's readout — deterministic (W2B §3) |
+| `contrib(c, a, b)` | in-wave | stage the payload pair (exactly an `lcell_inflate` offer); ⊔-applied at J(W) |
+| `read_J(c)` | after J(W) | the folded readout — fold-valued, schedule-independent; the checker verifies the wave provably closed (a branch-local wave does not certify the fall-through path) |
+| `lcell_value`/`len`/`has` | fallback (`read_S`) | defined + session-monotone, **schedule-dependent — never deterministic**; refused on captured cells in-wave (E0812) |
+| `lcell_merge`/`lcell_inflate` | fallback (S1) | the fallback merge path; into a *claimed* seam cell, legal only program-order-before the wave |
+
+**The checked side conditions.**
+
+- **E0812 — the purity kill switch.** The wave body must be a pure function of κ (Lemma WD's premise). Rejected, as compile errors: wall-clock (`time_now_ms`), env/argv/IO reads, chan receives, `spawn`/`nursery`/`go`/`lock` (the wave IS the parallelism), nested waves, early `return`/`stop` (the exit edge contrib→exit→J(W) is structural; termination is the runtime contract E0810·R), `defer`, `unfrozen` windows, asm, calls to impure functions (an **interprocedural** call-graph fixpoint — a wall-clock read one call away does not slip through), method calls (outside the wave-purity fragment), and the fallback sync ops (`lcell_inflate`/`lcell_merge` — the J0 immediate merge is not the default). Without the gate, the determinism grade would degrade *undetected* (W2B §4.6 case (d)) — so it fires.
+- **E-R1 — quiescent capture (Rule R1).** A seam cell's capture is legal only if every fallback merge into it is HB-before the capture or after J(W). Lexical order can prove only the **before** arm (a textually-later merge can sit *between* two J(W)s when the wave is loop-shaped), so: fallback merges into a claimed seam cell are legal only program-order-before the wave; a second wave on the same cell is legal only as sequential composition inside one function body (`two waves share seam cell 'c' — neither capture can be R1-quiescent w.r.t. the other` is case (b), *a theorem, not a defect*: concurrent waves give confluence, never value determinism); `read_W`/`contrib` outside a wave, on a non-seam cell, or `read_J` before the join are named refusals.
+
+**The runtime.** `wave { }` lowers to `sn_wave_new` + one `sn_wave_capture` per captured cell (sorted; pointer identity is the slot key, so aliases resolve) + the body + `sn_wave_join` — the **J2 batched canonical fold**: per cell, the staged multiset folds into one offer cell (any internal order — the laws make it order-independent) and joins through ONE `sn_lcell_merge` (atomic, and running the `SN_LATTICE_CHECK=1` law self-checks on exactly the event the theorem quantifies over). Runtime backstops (`[E-R1]`, fail-fast): read_W/contrib on an uncaptured cell, a cell captured twice, an out-of-range slot.
+
+**The honest boundary (slice-1).** The body runs ONCE, single-tile — the wave IS the parallelism in the model, and the *parallel* form (spawn-per-tile + live-arity barrier, DBM emit ranges, the canonical (sender,seq) k-way merge) is future surface this API is shaped for (the staging buffer is the tile payload interface; the fold already ignores arrival order by construction). The frozen κ is realized by the static discipline (nothing can merge into the cell between capture and J(W)), not a runtime copy — the copy becomes necessary exactly when tiles run concurrently. Wave-internal termination is not proved (E0810·R, the runtime contract — Rice, honestly relocated). The mode analysis is name-based on the module-scope binding: an aliased read (`ptr p = s; lcell_value(p)`) slips past the read_S refusal — in slice-1 that alias reads the same frozen value (single tile, no concurrent merges), so the residual is a discipline hole, not a soundness hole; it becomes load-bearing only under the parallel form (where the snapshot closes it by construction). Benchmarked in `bench/RESULTS_WAVE.md`; runtime mechanics in `tests/systems/test_wave.c` (checks 21/21b); the compile-time arms in `examples/wave_*.sn` + `compiler/tests/golden.rs`.
+
+

@@ -181,6 +181,13 @@ struct Cx<'a> {
     /// Impl-B): while non-zero, the inline lane bump/reset lowering keeps
     /// the checked runtime calls, preserving the loud frozen-lane errors.
     frozen_depth: usize,
+    /// SWARM RABBIT HOLE — Wave 13 (Impl-R): the lexically open wave
+    /// contexts' SSA values (the SnWave* returned by sn_wave_new),
+    /// innermost last. read_W/contrib lower against the innermost
+    /// open wave; the checker guarantees there is exactly one (nested
+    /// waves are E0812), and the stack shape keeps the lowering
+    /// honest if that ever relaxes.
+    wave_stack: Vec<String>,
 }
 
 /// Coverage instrumentation state for the current lowering pass.
@@ -414,6 +421,20 @@ pub fn lower(programs: &[Program], db: &CheckDb, files: &[SourceFile]) -> IrModu
             globals.push(format!("@sn_g_{name} = internal global ptr null"));
         }
     }
+    // SWARM RABBIT HOLE — Wave 13 (Impl-R): the seam cells' runtime
+    // slots — the same @sn_g_{name} convention (W2B §4.1: the seam
+    // cells ARE the module-scope Tier-L cells). Each module-scope
+    // `ptr NAME = lcell_new(k)` becomes a real runtime object
+    // constructed at main entry (the DIFF-4 global-pool pattern:
+    // module initializers never run as code); the carrier literal k
+    // is the compile-time fact the checker recorded at collect.
+    {
+        let mut names: Vec<&String> = db.lcell_globals.keys().collect();
+        names.sort();
+        for name in names {
+            globals.push(format!("@sn_g_{name} = internal global ptr null"));
+        }
+    }
     IrModule {
         strings,
         functions,
@@ -596,6 +617,7 @@ fn lower_fn(
         active_nurseries: Vec::new(),
         active_regions: Vec::new(),
         frozen_depth: 0,
+        wave_stack: Vec::new(),
     };
     let mut params_ll = Vec::new();
     if bp.is_some() && !f.is_static {
@@ -668,6 +690,27 @@ fn lower_fn(
             cx.line(&format!("call void @sn_gc_register_global(ptr {r})"));
             cx.line(&format!("store ptr {r}, ptr @sn_g_{name}"));
         }
+        // SWARM RABBIT HOLE — Wave 13 (Impl-R): the seam cells'
+        // construction — the module-scope Tier-L cells (W2B §4.1),
+        // built right after the global pools (sorted, so the
+        // emission is deterministic). Each is gc_track'd and
+        // registered as a permanent root exactly like a global pool:
+        // the only reference is the LLVM global slot, invisible to
+        // the precise-root pushes, and a swept seam cell would be a
+        // use-after-free the tier exists to make impossible.
+        {
+            let mut names: Vec<(&String, &i64)> =
+                db.lcell_globals.iter().map(|(n, k)| (n, k)).collect();
+            names.sort_by(|a, b| a.0.cmp(b.0));
+            for (name, carrier) in names {
+                let r = cx.t();
+                cx.line(&format!(
+                    "{r} = call ptr @sn_lcell_new(i64 {carrier})"
+                ));
+                cx.line(&format!("call void @sn_gc_register_global(ptr {r})"));
+                cx.line(&format!("store ptr {r}, ptr @sn_g_{name}"));
+            }
+        }
     }
     for s in &f.body {
         cx.stmt(s);
@@ -724,6 +767,7 @@ impl Cx<'_> {
             | Stmt::NurseryBlock { span, .. }
             | Stmt::Frozen { span, .. }
             | Stmt::Unfrozen { span, .. }
+            | Stmt::Wave { span, .. }
             | Stmt::Asm { span, .. } => span,
             Stmt::NestedFn(_) => return None,
         };
@@ -758,6 +802,7 @@ impl Cx<'_> {
             | Stmt::NurseryBlock { span, .. }
             | Stmt::Frozen { span, .. }
             | Stmt::Unfrozen { span, .. }
+            | Stmt::Wave { span, .. }
             | Stmt::Asm { span, .. } => span,
             Stmt::NestedFn(_) => return,
         };
@@ -1767,6 +1812,61 @@ impl Cx<'_> {
                     self.line(&format!("call void @sn_pool_freeze(ptr {pv})"));
                 }
             }
+            // SWARM RABBIT HOLE — Wave 13 (Impl-R, Cohort Delta): the
+            // WAVE REGION's lowering (W2B §4.2's event structure,
+            // literalized):
+            //   (e1) wave entry: allocate the SnWave context and
+            //        CAPTURE the seam cells — one sn_wave_capture per
+            //        cell the checker registered (CheckDb.
+            //        wave_captures, sorted names), each cell loaded
+            //        from its module slot @sn_g_{name} (the DIFF-4
+            //        global-pool convention; lvalue_addr resolves the
+            //        global). The capture registers pointer identity —
+            //        the runtime's slot table is the read_W/contrib
+            //        lookup, so aliases resolve to the same slot.
+            //   (e2) the body: read_W/contrib lower against the
+            //        innermost open wave (wave_stack.last()) — the
+            //        checker guarantees exactly one (nested waves are
+            //        E0812).
+            //   (e3) wave exit = J(W): sn_wave_join — the J2 batched
+            //        canonical fold (one atomic ⊔ per seam cell; the
+            //        join frees the context). The checker rejects
+            //        early returns in the body (the exit edge
+            //        contrib→exit→J(W) is structural), so the join is
+            //        reached on every path that leaves the block.
+            Stmt::Wave { body, span } => {
+                let key = (span.file, span.start, span.end);
+                let captures = self
+                    .db
+                    .wave_captures
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_default();
+                let w = self.t();
+                self.line(&format!(
+                    "{w} = call ptr @sn_wave_new(i64 {})",
+                    captures.len()
+                ));
+                for (i, name) in captures.iter().enumerate() {
+                    let (ca, _) = self.lvalue_addr(&Expr {
+                        kind: ExprKind::Ident(name.clone()),
+                        span: Span::dummy(),
+                    });
+                    let cv = self.t();
+                    self.line(&format!("{cv} = load ptr, ptr {ca}"));
+                    self.line(&format!(
+                        "call void @sn_wave_capture(ptr {w}, i64 {i}, ptr {cv})"
+                    ));
+                }
+                self.wave_stack.push(w.clone());
+                for s in body {
+                    self.stmt(s);
+                }
+                self.wave_stack.pop();
+                if !self.terminated {
+                    self.line(&format!("call void @sn_wave_join(ptr {w})"));
+                }
+            }
             Stmt::Guard { cond, else_body, .. } => {
                 let (c, _) = self.expr(cond);
                 let c1 = self.as_i1(c);
@@ -1940,6 +2040,7 @@ impl Cx<'_> {
                 active_nurseries: Vec::new(),
                 active_regions: Vec::new(),
                 frozen_depth: 0,
+                wave_stack: Vec::new(),
             };
             for (i, (n, t)) in cap_tys.iter().enumerate() {
                 let slot = child.t();
@@ -2047,14 +2148,16 @@ impl Cx<'_> {
                     (n.clone(), Type::Blueprint(n.clone()))
                 } else if let (Some(t), true) = (
                     self.db.globals.get(n).cloned(),
-                    self.db.global_pools.contains_key(n),
+                    // SWARM RABBIT HOLE — Wave 13 (Impl-R): the global
+                    // POOL objects and the SEAM CELLS (module-scope
+                    // Tier-L lcells) are the real runtime globals —
+                    // each @sn_g_{n} slot (constructed at main's
+                    // entry) holds the object pointer; every use
+                    // loads it. Module-level reads of anything else
+                    // remain check-only (the pre-DIFF-4 behavior).
+                    self.db.global_pools.contains_key(n)
+                        || self.db.lcell_globals.contains_key(n),
                 ) {
-                    // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O):
-                    // the global pool object's read — the @sn_g_{n} slot
-                    // (constructed at main's entry) holds the pool
-                    // pointer; every use loads it. Module-level reads
-                    // of anything else remain check-only (the pre-wave
-                    // behavior).
                     let v = self.t();
                     self.line(&format!("{v} = load ptr, ptr @sn_g_{n}"));
                     (v, t)
@@ -4070,6 +4173,44 @@ impl Cx<'_> {
                 self.line(&format!("{r} = call i64 @sn_lcell_has(ptr {p}, i64 {eb})"));
                 (r, Type::Bool)
             }
+            /* SWARM RABBIT HOLE — Wave 13 (Impl-R): the wave seam's
+               read-mode surface (W2B §3), lowered. read_W/contrib
+               run against the ENCLOSING wave context (wave_stack's
+               innermost entry — the checker guarantees it exists:
+               outside a wave both are E-R1 refusals, and nested waves
+               are E0812). read_J lowers to the same sn_lcell_value
+               the fallback read uses — the fold-valued MODE is the
+               checked temporal claim (E-R1 at the call), the value
+               is the fold J(W) left in the cell. */
+            "read_W" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let cell = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let w = self.wave_stack.last().cloned().unwrap_or("null".into());
+                let r = self.t();
+                self.line(&format!(
+                    "{r} = call i64 @sn_wave_read_w(ptr {w}, ptr {cell})"
+                ));
+                (r, Type::Int)
+            }
+            "contrib" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let cell = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let a = vs.get(1).cloned().unwrap_or(("0".into(), Type::Int));
+                let ab = self.as_bits(a.0, &a.1);
+                let b = vs.get(2).map(|x| x.0.clone()).unwrap_or("0".into());
+                let w = self.wave_stack.last().cloned().unwrap_or("null".into());
+                self.line(&format!(
+                    "call void @sn_wave_contrib(ptr {w}, ptr {cell}, i64 {ab}, i64 {b})"
+                ));
+                ("0".into(), Type::Void)
+            }
+            "read_J" => {
+                let p0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let p = self.as_ptr(p0, vs.first().map(|x| x.1.clone()).unwrap_or(Type::Ptr));
+                let r = self.t();
+                self.line(&format!("{r} = call i64 @sn_lcell_value(ptr {p})"));
+                (r, Type::Int)
+            }
             /* Salt-ζ fixpoint builtins (SWARM RABBIT HOLE, Wave 9,
                Impl-N; W2C §3.3–§3.5): the admitted closure bracket over
                Tier-G (zfix_new) and Tier-L (zfix_new_l) carriers, the
@@ -5715,6 +5856,7 @@ impl Cx<'_> {
                 active_nurseries: Vec::new(),
                 active_regions: Vec::new(),
                 frozen_depth: 0,
+                wave_stack: Vec::new(),
             };
             let mut pll = vec!["ptr %env".to_string()];
             for p in params {
@@ -5827,6 +5969,7 @@ fn lower_ext_fn(
         active_nurseries: Vec::new(),
         active_regions: Vec::new(),
         frozen_depth: 0,
+        wave_stack: Vec::new(),
     };
     let mut params_ll = vec!["ptr %p_self".to_string()];
     for p in &f.params {

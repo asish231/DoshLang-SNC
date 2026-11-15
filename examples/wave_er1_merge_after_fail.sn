@@ -1,0 +1,28 @@
+// SWARM RABBIT HOLE — Wave 13 (Impl-R): Rule R1 (quiescent capture)
+// — the non-quiescent case (W2B §4.3: "capture legal only if every
+// fallback merge into c is HB-before the capture or after J(W);
+// otherwise c enters by contrib/messages only. Without R1:
+// conditional determinism"). The static slice-1 rule keeps ONLY the
+// provable arm — a fallback merge program-order-BEFORE the wave —
+// because "after J(W)" is unprovable by lexical order alone (a
+// textually-later merge can still sit BETWEEN two J(W)s when the
+// wave is in a loop: the exact conditional-determinism window).
+// Mixed use — a merge after the wave on a seam cell — is therefore
+// a checked compile error. MUST FAIL TO COMPILE.
+
+ptr c = lcell_new(1)
+
+fn main() {
+    wave {
+        contrib(c, 1, 0)
+    }
+
+    // The mixed-use merge: not HB-before the capture, and not
+    // provably after J(W) (loop-shaped capture would reintroduce
+    // the window). E-R1 fires HERE, at the merge.
+    ptr late = lcell_new(1)
+    lcell_inflate(late, 5, 0)
+    lcell_merge(c, late)
+
+    print("unreachable")
+}

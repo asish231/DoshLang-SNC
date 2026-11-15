@@ -2561,6 +2561,196 @@ int64_t sn_lcell_carrier(void *p) {
 }
 
 /* --------------------------------------------------------------------- */
+/*  SnWave — the wave region context (SWARM RABBIT HOLE, Wave 13,        */
+/*  Impl-R, Cohort Delta; W2B §3 the typed read-mode surface + §4 the    */
+/*  wave-seam composition theorem, Thm WS — the campaign's centerpiece   */
+/*  made executable).                                                     */
+/*                                                                       */
+/*  A wave region `wave { ... }` is a DETERMINISTIC OBSERVATION BRACKET   */
+/*  over module-scope Tier-L seam cells (W2B §4.1):                       */
+/*    entry  — sn_wave_capture registers the seam cells the body uses    */
+/*             (the compiler emits one capture per cell, in sorted        */
+/*             name order; pointer identity is the slot key);             */
+/*    body   — read_W observes the frozen capture κ (the static          */
+/*             discipline E0812/R1 makes the cell immutable through     */
+/*             the body: fallback merges are legal only program-order-    */
+/*             before the wave, and contribs only STAGE); contrib(c,a,b) */
+/*             stages the payload pair (a,b) — exactly an lcell_inflate   */
+/*             offer — into the per-cell buffer, the contribution        */
+/*             multiset 𝒰_W(c);                                           */
+/*    exit   — sn_wave_join is J(W), the J2 BATCHED CANONICAL FOLD: per  */
+/*             cell, the staged multiset folds into ONE offer cell      */
+/*             (any internal order — the carrier's laws make it          */
+/*             order/grouping/duplication-independent, Lemma 1) and      */
+/*             joins the seam cell through sn_lcell_merge — a single     */
+/*             atomic ⊔ per cell per wave. Lemma NI(ii): "contributions   */
+/*             ARE atomic ⊔-merges on seam cells — the same event class  */
+/*             the tier's theorems quantify over."                       */
+/*                                                                       */
+/*  Thm WS Part 2 (join confluence): read_J after the block sees         */
+/*  κ₀(c) ⊔ ⊔𝒰_W(c), independent of staging order (commutativity),        */
+/*  grouping (associativity), duplication (idempotence — the S5          */
+/*  at-least-once dividend), and thread count. The fold's correctness    */
+/*  IS the Tier-L carrier's checked lattice laws — this section adds no  */
+/*  algebra, only the staging buffer and the join discipline W3.         */
+/*                                                                       */
+/*  SLICE-1 BOUNDARY (the honest scope, W2B §4.7): the body runs ONCE,   */
+/*  single-tile — the wave IS the parallelism in the model, and the      */
+/*  parallel-tile instantiation (sn_go_spawn per tile + the live-arity    */
+/*  barrier, the DBM emit ranges, the (sender,seq) k-way merge) is the   */
+/*  documented future form this API is shaped for (the staging buffer   */
+/*  is the tile payload interface; the fold already ignores arrival     */
+/*  order by construction). No locks: the single-tile join is            */
+/*  trivially atomic; the frozen κ is realized by the STATIC rules      */
+/*  (nothing can change the cell between capture and J(W)), not by a    */
+/*  runtime copy — the copy becomes necessary exactly when tiles run    */
+/*  concurrently.                                                        */
+/* --------------------------------------------------------------------- */
+typedef struct SnWaveSlot {
+    SnLCell *cell;  /* the seam cell — pointer identity is the key */
+    int64_t n;      /* |𝒰_W(cell)| — staged payloads */
+    int64_t cap;
+    int64_t *pa;    /* payload a (value/element/HWM offer) */
+    int64_t *pb;    /* payload b (the LWW logical clock; 0 elsewhere) */
+} SnWaveSlot;
+
+typedef struct SnWave {
+    int64_t nslots;
+    SnWaveSlot *slots;
+} SnWave;
+
+void *sn_wave_new(int64_t nslots) {
+    if (nslots < 0) nslots = 0;
+    SnWave *w = (SnWave *)xmalloc(sizeof(SnWave));
+    w->nslots = nslots;
+    w->slots = nslots > 0 ? (SnWaveSlot *)xmalloc(sizeof(SnWaveSlot) * (size_t)nslots) : NULL;
+    return w;
+}
+
+/* Register seam cell #i. The compiler calls this once per captured
+   cell at wave entry (sorted name order — the slot index is internal
+   bookkeeping; every lookup is by pointer identity, so indices carry
+   no semantic weight). A duplicate cell would fold the same seam
+   twice — idempotent by the laws, but it means the compiler's capture
+   set was malformed: fail fast (the E-LKIND backstop pattern). */
+void sn_wave_capture(void *wave, int64_t i, void *cell) {
+    SnWave *w = (SnWave *)wave;
+    if (!w || i < 0 || i >= w->nslots || !cell) {
+        fprintf(stderr,
+                "runtime error: wave capture of slot %lld rejected (wave context "
+                "malformed) [E-R1]\n",
+                (long long)i);
+        exit(1);
+    }
+    for (int64_t k = 0; k < w->nslots; k++) {
+        if (w->slots[k].cell == cell) {
+            fprintf(stderr,
+                    "runtime error: seam cell %p captured twice by one wave "
+                    "(the fold is idempotent, but the capture set is malformed) "
+                    "[E-R1]\n",
+                    cell);
+            exit(1);
+        }
+    }
+    w->slots[i].cell = (SnLCell *)cell;
+    w->slots[i].n = 0;
+    w->slots[i].cap = 0;
+    w->slots[i].pa = NULL;
+    w->slots[i].pb = NULL;
+}
+
+static SnWaveSlot *wave_slot_of(SnWave *w, void *cell) {
+    for (int64_t i = 0; i < w->nslots; i++) {
+        if (w->slots[i].cell == cell) return &w->slots[i];
+    }
+    return NULL;
+}
+
+/* read_W — the frozen capture's readout (W2B §3: the deterministic
+   wave read mode). The cell must be a captured seam of this wave:
+   the checker certifies the mode; this lookup is the runtime backstop
+   (a read of an uncaptured cell through the wave read mode is a
+   compiler bug or an analysis hole, never a silent fallback). */
+int64_t sn_wave_read_w(void *wave, void *cell) {
+    SnWave *w = (SnWave *)wave;
+    if (!w || !wave_slot_of(w, cell)) {
+        fprintf(stderr,
+                "runtime error: read_W on a cell not captured by this wave "
+                "(the frozen capture is defined only over the wave's seam "
+                "cells) [E-R1]\n");
+        exit(1);
+    }
+    return sn_lcell_value(cell);
+}
+
+/* contrib — stage the payload pair (a,b) into the cell's buffer
+   𝒰_W(cell). STAGING ONLY: no merge happens here (the J1 exit-join
+   discipline — contrib→exit→J(W); the J0 immediate merge is not the
+   default and is checker-rejected in the body, E0812). Duplicate
+   payloads are legal and fold once (⊔-idempotence — the S5
+   at-least-once/retry dividend). */
+void sn_wave_contrib(void *wave, void *cell, int64_t a, int64_t b) {
+    SnWave *w = (SnWave *)wave;
+    SnWaveSlot *s = w ? wave_slot_of(w, cell) : NULL;
+    if (!s) {
+        fprintf(stderr,
+                "runtime error: contrib to a cell not captured by this wave "
+                "(contributions fold at J(W) only over the wave's seam cells) "
+                "[E-R1]\n");
+        exit(1);
+    }
+    if (s->n == s->cap) {
+        int64_t ncap = s->cap ? s->cap * 2 : 8;
+        int64_t *na = (int64_t *)realloc(s->pa, sizeof(int64_t) * (size_t)ncap);
+        int64_t *nb = (int64_t *)realloc(s->pb, sizeof(int64_t) * (size_t)ncap);
+        if (!na || !nb) {
+            fprintf(stderr, "out of memory\n");
+            exit(1);
+        }
+        s->pa = na;
+        s->pb = nb;
+        s->cap = ncap;
+    }
+    s->pa[s->n] = a;
+    s->pb[s->n] = b;
+    s->n++;
+}
+
+/* J(W) — the join (W2B §4.3's J2 batched canonical fold; the join
+   discipline W3). Per seam cell: the staged multiset folds into ONE
+   offer cell — the internal application order is the staging order
+   here, but the fold's RESULT is order-independent by the carrier's
+   checked laws (commutativity/associativity; Lemma 1 absorbs
+   duplicates) — and the offer joins the seam cell through ONE
+   sn_lcell_merge: a single atomic ⊔ event per cell per wave (NI(ii)),
+   running the SN_LATTICE_CHECK=1 law self-checks on exactly the
+   event the theorem quantifies over. The offer is a fresh ⊥ cell of
+   the same carrier; merging ⊥ is the identity, so read-only waves
+   (𝒰_W = ∅) are no-ops by construction. */
+void sn_wave_join(void *wave) {
+    SnWave *w = (SnWave *)wave;
+    if (!w) return;
+    for (int64_t i = 0; i < w->nslots; i++) {
+        SnWaveSlot *s = &w->slots[i];
+        if (!s->cell) continue;
+        SnLCell *offer = (SnLCell *)sn_lcell_new(s->cell->carrier);
+        for (int64_t j = 0; j < s->n; j++) {
+            sn_lcell_inflate(offer, s->pa[j], s->pb[j]);
+        }
+        sn_lcell_merge(s->cell, offer);
+        sn_release(offer);
+        free(s->pa);
+        free(s->pb);
+        s->pa = NULL;
+        s->pb = NULL;
+        s->n = 0;
+        s->cap = 0;
+    }
+    free(w->slots);
+    free(w);
+}
+
+/* --------------------------------------------------------------------- */
 /*  SnZFix — Salt ζ: the fixpoint-bracket engine (SWARM RABBIT HOLE,     */
 /*  Wave 9, Impl-N, Cohort Delta; W2C §3, the δ₀/∫ bracket).             */
 /*                                                                       */

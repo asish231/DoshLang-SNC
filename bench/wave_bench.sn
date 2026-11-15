@@ -1,0 +1,201 @@
+// SWARM RABBIT HOLE — Wave 13 (Impl-R, Cohort Delta): the wave
+// region's benchmark, in-language — the J(W) batched fold vs the S1
+// fallback merge path at the same payload shape (W2B §4, Thm WS
+// Part 2's two write paths into a seam cell; the typed surface §3).
+//
+// THE HONEST COMPARISON: K payloads into a Tier-L cell via
+//   (a) the wave: K contrib calls (buffer staging) + the J2 batched
+//       canonical fold at the block exit (the offer build + ONE
+//       atomic ⊔ per cell — NI(ii)'s event), vs
+//   (b) the fallback: K direct lcell_inflate calls (the S1 payload
+//       application path — the op the wave's discipline replaces).
+// The wave path does MORE work by construction (staging + the batched
+// fold's offer build) — the benchmark prices exactly that premium;
+// the cross-row CHECKSUMS MUST MATCH (both paths reach the identical
+// folded state — the determinism claim, self-checked in the bench).
+//
+// Shape (the lcell/gpool W2F discipline, verbatim): SNlang's only
+// clock is the ms-resolution time_now_ms, so every timed phase totals
+// >= 100x that (rounds x K ops; the per-row round counts below are
+// sized for the ~1 ns/elem O(1) carriers to clear 100 ms); the driver
+// (bench/run_bench.sh, WAVE_ONLY=1) runs one warmup then RUNS timed
+// runs and takes the median; every row prints its own deterministic
+// checksum, and the checksums must match across all runs.
+//
+// Rows (K = 100_000 payloads per round):
+//   timer      — 100_000 time_now_ms() call pairs: the clock row.
+//   wave_max   — rounds   x { wave { K x contrib } + read_J } on the
+//                MAX seam cell: staging + the batched fold (the HWM
+//                saturates after the first round — the steady state).
+//   s1_max     — rounds   x { K x lcell_inflate } on the S1 twin cell:
+//                the fallback payload path, same values, same shape.
+//   wave_gset  — rounds/2 x { wave { K x contrib } } on the GSET seam
+//                cell (steady state: after round 1 every element is
+//                present — the idempotent re-merge dividend, the S5
+//                retry path priced at its cheapest).
+//   s1_gset    — rounds/2 x { K x lcell_inflate } on the GSET twin:
+//                the fallback path at the same steady state.
+//   wave_readw — rounds x 2 x { wave { K x read_W } } (the frozen-κ
+//                readout: the slot lookup + the value read).
+//   read_s     — rounds x 2 x { K x lcell_value } (the fallback read:
+//                the value read alone — the mode's price, priced).
+//
+// The S1 rows use their OWN module cells (never captured by any wave
+// — the E-R1 merge-position rule: a fallback merge into a CLAIMED
+// seam cell is legal only program-order-before the wave; the S1 twin
+// cells are plain fallback cells, merges anywhere).
+
+use std.os
+
+// The seam cells (module scope, lcell_new-declared — the wave's
+// capture surface) and their S1 fallback twins.
+ptr wmax = lcell_new(0)     // MAX seam cell
+ptr wgset = lcell_new(1)    // GSET seam cell
+ptr s1max = lcell_new(0)    // MAX fallback twin (never captured)
+ptr s1gset = lcell_new(1)   // GSET fallback twin (never captured)
+
+fn report(str row, int ns_per_op, int phase_ms, int ops, int ck) {
+    print("BENCH row=" + row + " ns_per_op=" + cast(ns_per_op, str)
+        + " phase_ms=" + cast(phase_ms, str)
+        + " ops=" + cast(ops, str)
+        + " checksum=" + cast(ck, str))
+}
+
+fn main() {
+    int k = 100000
+    int rounds = 1000
+    list<str> a = args()
+    if (a.length() > 1) {
+        int v = cast(a[1], int)
+        if (v > 0) {
+            rounds = v
+        }
+    }
+    int rmax = rounds
+    if (rmax < 1) { rmax = 1 }
+    int rgset = rounds / 2
+    if (rgset < 1) { rgset = 1 }
+    int rread = rounds * 2
+    gc_set_threshold(2000000000)
+
+    // ---- timer overhead: 100_000 time_now_ms() call pairs
+    int t0 = time_now_ms()
+    int kt = 0
+    int acct = 0
+    while (kt < 100000) {
+        acct = acct + time_now_ms()
+        kt = kt + 1
+    }
+    int t1 = time_now_ms()
+    report("timer", (t1 - t0) * 1000000 / 100000, t1 - t0, 100000, acct)
+
+    // ---- wave_max: staging + the batched fold, MAX carrier.
+    //      Checksum: read_J after every join (the HWM saturates at
+    //      k-1 after round 1 — the steady state; the sum is the
+    //      determinism witness).
+    int ops = 0
+    t0 = time_now_ms()
+    int ck = 0
+    int r = 0
+    while (r < rmax) {
+        wave {
+            int j = 0
+            while (j < k) {
+                contrib(wmax, j, 0)
+                j = j + 1
+            }
+        }
+        ck = ck + read_J(wmax)
+        r = r + 1
+    }
+    t1 = time_now_ms()
+    ops = rmax * k
+    report("wave_max", (t1 - t0) * 1000000 / ops, t1 - t0, ops, ck)
+
+    // ---- s1_max: the fallback payload path, same values/shape.
+    t0 = time_now_ms()
+    ck = 0
+    r = 0
+    while (r < rmax) {
+        int j = 0
+        while (j < k) {
+            lcell_inflate(s1max, j, 0)
+            j = j + 1
+        }
+        ck = ck + lcell_value(s1max)
+        r = r + 1
+    }
+    t1 = time_now_ms()
+    report("s1_max", (t1 - t0) * 1000000 / ops, t1 - t0, ops, ck)
+
+    // ---- wave_gset: staging + the batched fold, GSET steady state.
+    t0 = time_now_ms()
+    ck = 0
+    r = 0
+    while (r < rgset) {
+        wave {
+            int j = 0
+            while (j < k) {
+                contrib(wgset, j, 0)
+                j = j + 1
+            }
+        }
+        ck = ck + lcell_len(wgset)
+        r = r + 1
+    }
+    t1 = time_now_ms()
+    ops = rgset * k
+    report("wave_gset", (t1 - t0) * 1000000 / ops, t1 - t0, ops, ck)
+
+    // ---- s1_gset: the fallback path at the same steady state.
+    t0 = time_now_ms()
+    ck = 0
+    r = 0
+    while (r < rgset) {
+        int j = 0
+        while (j < k) {
+            lcell_inflate(s1gset, j, 0)
+            j = j + 1
+        }
+        ck = ck + lcell_len(s1gset)
+        r = r + 1
+    }
+    t1 = time_now_ms()
+    report("s1_gset", (t1 - t0) * 1000000 / ops, t1 - t0, ops, ck)
+
+    // ---- wave_readw: the frozen-κ readout in-wave (K read_W per
+    //      round; the read-only wave — no contribs, the join is the
+    //      identity fold).
+    t0 = time_now_ms()
+    ck = 0
+    r = 0
+    while (r < rread) {
+        wave {
+            int j = 0
+            while (j < k) {
+                ck = ck + read_W(wmax)
+                j = j + 1
+            }
+        }
+        r = r + 1
+    }
+    t1 = time_now_ms()
+    ops = rread * k
+    report("wave_readw", (t1 - t0) * 1000000 / ops, t1 - t0, ops, ck)
+
+    // ---- read_s: the fallback read alone (the value read; the
+    //      read_W row's premium over this row is the mode's price).
+    t0 = time_now_ms()
+    ck = 0
+    r = 0
+    while (r < rread) {
+        int j = 0
+        while (j < k) {
+            ck = ck + lcell_value(s1max)
+            j = j + 1
+        }
+        r = r + 1
+    }
+    t1 = time_now_ms()
+    report("read_s", (t1 - t0) * 1000000 / ops, t1 - t0, ops, ck)
+}

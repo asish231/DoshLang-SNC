@@ -1,0 +1,46 @@
+// SWARM RABBIT HOLE — Wave 13 (Impl-R, Cohort Delta): the wave region —
+// Theorem WS made executable (W2B §4, the campaign's centerpiece; the
+// typed read-mode surface W2B §3). This file pins Thm WS Part 2 (join
+// confluence) end-to-end: a pure wave body (E0812-gated) stages
+// contributions to module-scope Tier-L seam cells via contrib(); at
+// J(W) — the wave block's exit — the staged payloads fold into the
+// cells as ONE canonical ⊔-merge per cell (the J2 batched fold:
+// contributions ARE atomic ⊔-merges on seam cells, Lemma NI(ii)),
+// and read_J after the wave observes the folded value
+// κ₀(c) ⊔ ⊔𝒰_W(c) — independent of staging order, grouping, and
+// duplication (Lemma 1; the S5 dividend) by the carrier's checked
+// lattice laws.
+//
+// The seam cells: module-scope `ptr` declared with an lcell_new
+// initializer (W2B §4.1: "seam cells = module-scope cells visible
+// under the mode rules"). Setup merges are program-order-BEFORE the
+// wave — R1's provable arm (W2B §4.3).
+
+ptr results = lcell_new(1)   // GSET seam cell (⊔ = union)
+ptr peak = lcell_new(0)      // MAX seam cell (⊔ = max)
+
+fn main() {
+    // R1-quiescent setup merges: program order before the wave.
+    lcell_inflate(results, 1, 0)
+    lcell_inflate(peak, 10, 0)
+
+    wave {
+        // read_W: the frozen capture κ's readout (W2B §3 — the
+        // deterministic wave read mode). For the MAX carrier the
+        // readout is the HWM. The staged payloads below are pure
+        // functions of this frozen value — Lemma WD's kernel.
+        int base = read_W(peak)
+        contrib(results, base - 8, 0)   // stage element 2
+        contrib(results, base - 7, 0)   // stage element 3
+        contrib(peak, base * 2, 0)      // offer 20 — pure in κ
+        contrib(peak, 7, 0)             // the losing offer — ⊔ = max
+    }
+    // J(W) happened here: the staged multiset folded canonically.
+
+    // After J(W), every read is fold-valued (read_J's temporal mode):
+    print(read_J(peak))       // 20 — 10 ⊔ 20 ⊔ 7
+    print(lcell_len(results)) // 3 — {1} ⊔ {2} ⊔ {3} (the set carrier's
+                              // readout convention: len/has, not value)
+    print(lcell_has(results, 2))   // true
+    print("PASS: wave_fold")
+}

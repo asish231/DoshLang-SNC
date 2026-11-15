@@ -425,6 +425,13 @@ declare i64 @sn_lcell_len(ptr)
 declare i64 @sn_lcell_value(ptr)
 declare i64 @sn_lcell_has(ptr, i64)
 declare i64 @sn_lcell_carrier(ptr)
+/* SWARM RABBIT HOLE — Wave 13 (Impl-R): the wave region context
+   (W2B §4 — Thm WS made executable; the J2 batched canonical fold). */
+declare ptr @sn_wave_new(i64)
+declare void @sn_wave_capture(ptr, i64, ptr)
+declare i64 @sn_wave_read_w(ptr, ptr)
+declare void @sn_wave_contrib(ptr, ptr, i64, i64)
+declare void @sn_wave_join(ptr)
 ; Salt ζ — the fixpoint-bracket engine (SWARM RABBIT HOLE, Wave 9, Impl-N;
 ; W2C §3.3–§3.5). No sn_zfix_count / sn_zfix_negate exist at runtime: the
 ; admission checker ALWAYS rejects the two named divergence classes with

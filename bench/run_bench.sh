@@ -384,6 +384,58 @@ if [ -n "${LINK_ONLY:-}" ]; then
     exit 0
 fi
 
+# ---------- wave rows (Wave 13, Impl-R) ----------
+# bench/wave_bench.sn — the wave region's J(W) batched fold vs the S1
+# fallback merge path at the same payload shape (SWARM RABBIT HOLE,
+# Wave 13; W2B §4 — Thm WS Part 2's two write paths into a seam cell).
+# Rows: K=100K payloads per round — wave_max (staging + the batched
+# fold on the MAX seam cell) vs s1_max (K direct lcell_inflates on
+# the fallback twin), wave_gset / s1_gset (the GSET steady state —
+# after round 1 every element is present, the idempotent re-merge
+# dividend), and wave_readw / read_s (the frozen-κ read_W vs the
+# fallback read). The CROSS-ROW CHECKSUMS MUST MATCH (both paths reach
+# the identical folded state — the determinism claim, self-checked).
+# Every phase >= 100x the ms clock (the W2F discipline).
+# WAVE_ONLY=1 ./run_bench.sh runs just these rows.
+wave_rows() {
+    echo "-- building wave bench (Wave 13, Impl-R)"
+    "$SNC" wave_bench.sn -o "$OUT/sn_wave_bench" || exit 1
+    local rounds="${WAVE_ROUNDS:-1000}"
+    local warm=$((rounds / 10))
+    if [ "$warm" -lt 1 ]; then warm=1; fi
+    local f r b spec
+    b=sn_wave_bench
+    f="$OUT/$b.txt"
+    : > "$f"
+    echo "-- warmup $b (rounds=$warm)" >&2
+    "$OUT/$b" "$warm" >/dev/null 2>&1
+    echo "-- timed $b x$RUNS (rounds=$rounds)" >&2
+    for r in $(seq "$RUNS"); do
+        "$OUT/$b" "$rounds" >> "$f" 2>/dev/null
+    done
+    echo "-- wave medians (rounds=$rounds, K=100K payloads/round, median of $RUNS):"
+    for spec in \
+        "timer ns_per_op" \
+        "wave_max ns_per_op" \
+        "s1_max ns_per_op" \
+        "wave_gset ns_per_op" \
+        "s1_gset ns_per_op" \
+        "wave_readw ns_per_op" \
+        "read_s ns_per_op"; do
+        set -- $spec
+        echo "  $1.$2 = $(median_row "$OUT/$b.txt" "$1" "$2")"
+    done
+    echo "-- wave checksums (must be identical across all runs, and the wave/S1 pairs must agree):"
+    grep -h "^BENCH row=" "$OUT/$b.txt" | grep -v "row=timer" | sort | uniq -c
+}
+
+if [ -n "${WAVE_ONLY:-}" ]; then
+    wave_rows
+    echo
+    echo "== done (WAVE_ONLY). raw runs in $OUT/sn_wave_bench.txt ; see RESULTS_WAVE.md =="
+    exit 0
+fi
+
 # ---------- run + collect ----------
 collect() {  # collect NAME -- cmd...
     local name="$1"; shift; shift
@@ -415,6 +467,9 @@ zfix_rows
 
 # link rows (Wave 11, Impl-P): see link_rows above
 link_rows
+
+# wave rows (Wave 13, Impl-R): see wave_rows above
+wave_rows
 
 # per-run peak RSS (one run each; RSS is stable)
 echo "-- peak RSS (KB)"

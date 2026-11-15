@@ -747,10 +747,63 @@ else
     FAILURES=$((FAILURES + 1))
 fi
 
+# 21. Wave regions — the Theorem WS runtime mechanics (SWARM RABBIT
+#     HOLE, Wave 13, Impl-R; W2B §3/§4 — the wave-seam composition
+#     theorem, the campaign's centerpiece). The SnWave context's
+#     mechanics: the capture/staging/join round trip on all three
+#     Tier-L carriers, the staging-atomicity buffer-swap proof (the
+#     live cell is bit-identical to its pre-wave state while the wave
+#     is open — staging writes the buffer, never the cell), the J(W)
+#     fold's order/duplication/grouping independence (Thm WS Part 2
+#     (i)/(ii)/(iii) — shuffled staging orders, doubled payloads,
+#     and the multiset split across two sequential waves all fold
+#     to the identical cell), multiset isolation across slots, the
+#     lattice laws under the fold (SN_LATTICE_CHECK=1 rides the
+#     join's merge path), and the [E-R1] runtime backstops (fork'd
+#     probes). Built twice: plain, then ASan (21b).
+echo "-----------------------------------------------------------------"
+echo "21. WAVE REGIONS, RUNTIME MECHANICS (test_wave.c)"
+echo "-----------------------------------------------------------------"
+OUT_WAVE="/tmp/snc_test_wave_c"
+rm -f "$OUT_WAVE"
+if clang -O1 -g -o "$OUT_WAVE" "$DIR/test_wave.c" "$ROOT/compiler/runtime.c" -lpthread 2>/dev/null; then
+    OUTPUT=$("$OUT_WAVE")
+    echo "$OUTPUT"
+    if echo "$OUTPUT" | grep -q "PASS:"; then
+        echo ">>> test_wave(.c): PASSED"
+    else
+        echo ">>> test_wave(.c): FAILED"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> test_wave(.c): BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+echo ""
+echo "-----------------------------------------------------------------"
+echo "21b. WAVE REGIONS, ASAN STRESS (test_wave.c)"
+echo "-----------------------------------------------------------------"
+OUT_WAVE_ASAN="/tmp/snc_test_wave_c_asan"
+rm -f "$OUT_WAVE_ASAN"
+if clang -O1 -g -fsanitize=address -o "$OUT_WAVE_ASAN" "$DIR/test_wave.c" "$ROOT/compiler/runtime.c" -lpthread 2>/dev/null; then
+    OUTPUT=$(ASAN_OPTIONS=detect_leaks=0 "$OUT_WAVE_ASAN" 2>&1)
+    echo "$OUTPUT"
+    if echo "$OUTPUT" | grep -q "PASS:"; then
+        echo ">>> test_wave(.c ASan): PASSED (no ASan reports over the slot table / staging buffers / the join's offer build+merge+release)"
+    else
+        echo ">>> test_wave(.c ASan): FAILED"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> test_wave(.c ASan): BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
 echo ""
 echo "================================================================="
 if [ $FAILURES -eq 0 ]; then
-    echo "  ALL SYSTEMS & SECURITY TESTS PASSED (31 checks)"
+    echo "  ALL SYSTEMS & SECURITY TESTS PASSED (33 checks)"
     exit 0
 else
     echo "  $FAILURES SYSTEMS TESTS FAILED"

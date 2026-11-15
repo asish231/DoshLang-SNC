@@ -1,0 +1,22 @@
+// SWARM RABBIT HOLE — Wave 13 (Impl-R): read_J's ordering discipline
+// (W2B §3: "read_J(c) (fallback, ordered after J(W): fold-valued,
+// schedule-independent)"). The fold-valued claim is TEMPORAL: it
+// holds only where J(W) provably happened. Before the wave the cell
+// holds κ₀ only — a read there is read_S (schedule-dependent class),
+// whatever it is named; the checker refuses the mislabeling and
+// points at the honest mode. MUST FAIL TO COMPILE.
+
+ptr c = lcell_new(0)
+
+fn main() {
+    lcell_inflate(c, 7, 0)
+
+    // read_J BEFORE the wave: the fold hasn't happened — the value
+    // is not yet fold-valued. The read mode is read_S here.
+    print(read_J(c))
+
+    wave {
+        contrib(c, 9, 0)
+    }
+    print("unreachable")
+}

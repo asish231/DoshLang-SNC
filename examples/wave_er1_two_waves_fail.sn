@@ -1,0 +1,26 @@
+// SWARM RABBIT HOLE — Wave 13 (Impl-R): Rule R1's two-waves case —
+// W2B §4.6 case (b) made a THEOREM, not a defect: "concurrent waves
+// sharing a seam cell: Parts 1–2 hold; Part 3 unavailable by
+// construction (neither capture can be R1-quiescent w.r.t. the
+// other)". Slice-1 waves are sequential, but the static quiescence
+// proof only exists within one function body's linear order: two
+// waves in DIFFERENT functions have no provable J(W₁)→capture(W₂)
+// edge, so neither capture is certified quiescent — the checked
+// refusal fires at both (symmetrically). Compose them sequentially
+// in ONE function instead (the accepted form — WS case (c)).
+// MUST FAIL TO COMPILE.
+
+ptr shared = lcell_new(0)
+
+fn other() {
+    wave {
+        contrib(shared, 1, 0)
+    }
+}
+
+fn main() {
+    wave {
+        contrib(shared, 2, 0)
+    }
+    print("unreachable")
+}

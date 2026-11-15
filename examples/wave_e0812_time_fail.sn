@@ -1,0 +1,20 @@
+// SWARM RABBIT HOLE — Wave 13 (Impl-R): the E0812 purity gate — the
+// kill switch (W2B §4.6 case (d): "the E0812 kill switch fires: (C2)
+// no longer compiler-enforced; WD's premise fails UNDETECTED; the
+// guarantee degrades to Part 2 unconditionally"). A wall-clock read
+// inside a wave body injects the schedule into the contribution
+// multiset 𝒰_W and destroys the wave-determinism kernel (Lemma WD:
+// "u pure in τ's deterministic local state — E0812 load-bearing
+// here — a wall-clock read would inject schedule into 𝒰_W and
+// destroy WS-1"). The gate is a compile-time error, never a silent
+// downgrade. MUST FAIL TO COMPILE.
+
+ptr c = lcell_new(0)
+
+fn main() {
+    wave {
+        int t = time_now_ms()   // the wall clock: schedule-dependent
+        contrib(c, t, 0)
+    }
+    print("unreachable")
+}

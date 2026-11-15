@@ -1,0 +1,34 @@
+// SWARM RABBIT HOLE — Wave 13 (Impl-R): the E0812 gate's full
+// rejection set in one file — env reads, channel receives, spawn,
+// nested waves, and the early-exit breach (every arm is a compile
+// error; the diagnostics accumulate). The wave IS the parallelism:
+// spawn inside the body injects a schedule the determinism kernel
+// cannot see; a nested wave would need a quiescent capture against
+// the enclosing wave (W2B §4.6 case (b) by construction); an early
+// return breaks the structural exit edge contrib→exit→J(W)
+// (termination is the runtime contract E0810·R — the join must be
+// reached). MUST FAIL TO COMPILE.
+
+ptr c = lcell_new(1)
+
+fn main() {
+    chan<int> ch
+    ch.send(1)
+
+    wave {
+        let home = os_getenv("HOME")   // env read: schedule-dependent
+        int v = ch.receive()           // chan recv: schedule-dependent
+        contrib(c, v, 0)
+
+        spawn { }                       // the wave IS the parallelism
+
+        wave {                          // nested wave: two waves, one
+            contrib(c, 1, 0)            // cell, no quiescence proof
+        }
+
+        if (v > 0) {
+            return                      // early exit: J(W) is structural
+        }
+    }
+    print("unreachable")
+}

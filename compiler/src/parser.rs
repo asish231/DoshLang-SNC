@@ -754,6 +754,20 @@ impl Parser {
                     body,
                 })
             }
+            // SWARM RABBIT HOLE — Wave 13 (Impl-R): the wave region —
+            // the Region/Nursery block shape (parser.rs:733); the body
+            // is one block, the seam cells are the module-scope
+            // lcell-declared globals the body names (the checker's
+            // capture walk derives the set — the spawn-capture
+            // analysis shape).
+            TokenKind::Wave => {
+                let span = self.bump().span;
+                let body = self.parse_block()?;
+                Ok(Stmt::Wave {
+                    span: span.merge(self.prev_span()),
+                    body,
+                })
+            }
             TokenKind::Frozen => {
                 let start = self.bump().span;
                 self.eat(TokenKind::LParen)?;

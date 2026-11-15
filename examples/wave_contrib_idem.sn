@@ -1,0 +1,21 @@
+// SWARM RABBIT HOLE — Wave 13 (Impl-R): the duplicate-delivery
+// dividend made observable at the seam (W2B §4.6 Part 2(iii):
+// "independent of contribution duplication/retry/crash-replay —
+// Lemma 1 — the S5 dividend at the seam"). The same payload staged
+// TWICE folds ONCE: ⊔-idempotence (x⊔x = x) executes at the J(W)
+// join, so at-least-once delivery costs nothing — exactly the
+// retry/replay property S5 prices (W2B §1 D6: inflations do NOT
+// absorb duplicates; ⊔-idempotence does).
+
+ptr bag = lcell_new(1)   // GSET seam cell
+
+fn main() {
+    wave {
+        contrib(bag, 9, 0)
+        contrib(bag, 9, 0)   // the duplicate — folded, not double-counted
+    }
+
+    print(lcell_len(bag))    // 1, NOT 2 — the fold is idempotent
+    print(lcell_has(bag, 9)) // true
+    print("PASS: wave_contrib_idem")
+}

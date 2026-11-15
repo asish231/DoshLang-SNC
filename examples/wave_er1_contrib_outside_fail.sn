@@ -1,0 +1,17 @@
+// SWARM RABBIT HOLE — Wave 13 (Impl-R): the wave-body operations
+// outside a wave body — the typed surface's scope rule (W2B §3).
+// contrib(c,u) stages a payload into the ENCLOSING wave's J(W); with
+// no enclosing wave there is nothing to join. read_W reads the
+// ENCLOSING wave's frozen capture; with no enclosing wave there is
+// no frozen κ. Outside waves the fallback tier's own ops apply
+// (lcell_inflate / lcell_merge — the S1 path; lcell_value — read_S:
+// defined + session-monotone, schedule-dependent — the mode is in
+// the type). MUST FAIL TO COMPILE.
+
+ptr c = lcell_new(1)
+
+fn main() {
+    contrib(c, 1, 0)     // no enclosing wave: nothing to join
+    int v = read_W(c)    // no enclosing wave: no frozen capture
+    print(v)
+}

@@ -356,6 +356,21 @@ pub enum Stmt {
         body: Vec<Stmt>,
         span: Span,
     },
+    /* SWARM RABBIT HOLE — Wave 13 (Impl-R, Cohort Delta): the wave
+       region — W2B §4.1's composed syntax (phases = fallback segments
+       + wave regions) and the executable form of Thm WS (§4.6). The
+       body is checked pure (E0812 — the kill switch; Lemma WD's
+       premise), captures the module-scope Tier-L seam cells it names
+       (R1 quiescence checked at the capture), stages payloads via
+       contrib, and the block exit is J(W) — the J2 batched canonical
+       fold of the staged multiset into the seam cells (one atomic ⊔
+       per cell; Lemma NI(ii)). Slice-1 execution model: the body
+       runs ONCE (single-tile), and the frozen κ is realized by the
+       static discipline, not a runtime copy. */
+    Wave {
+        body: Vec<Stmt>,
+        span: Span,
+    },
     NestedFn(FnItem),
 }
 

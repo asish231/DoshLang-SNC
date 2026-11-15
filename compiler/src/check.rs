@@ -216,6 +216,33 @@ pub struct CheckDb {
     /// declaration lowering then constructs the growable ON the lane
     /// (runtime sn_list_new_lane → sn_lane_alloc(π_j)).
     pub lane_assignment: HashMap<String, HashMap<String, u8>>,
+    /// SWARM RABBIT HOLE — Wave 13 (Impl-R, Cohort Delta): the wave
+    /// region's module-wide tables (W2B §3/§4 — Thm WS made
+    /// executable). Recorded at collect; consulted by the checker's
+    /// E0812/E-R1 arms and the ir.rs wave lowering.
+    /// (1) The seam cells: module-scope `ptr NAME = lcell_new(k)`
+    /// declarations → carrier k (W2B §4.1: "seam cells = module-scope
+    /// cells visible under the mode rules"). Constructed at main entry
+    /// like DIFF-4's global pools (ir.rs), so the module initializer
+    /// never runs as code.
+    pub lcell_globals: HashMap<String, i64>,
+    /// (2) Every wave block's claim on a seam cell, program-wide
+    /// (cell → (fn_summary_key, wave span)), from the collect-time
+    /// syntactic pre-walk — the order-independent table the R1
+    /// quiescence rules consult (a merge or capture can be checked
+    /// before the other side of its ordering claim is checked).
+    pub wave_claims: HashMap<String, Vec<(String, Span)>>,
+    /// (3) The checked capture set per wave block (wave span → the
+    /// sorted seam-cell names), recorded during checking — the ir.rs
+    /// lowering emits one sn_wave_capture per name at wave entry.
+    pub wave_captures: HashMap<(u32, u32, u32), Vec<String>>,
+    /// (4) The wave-purity fixpoint (fn_summary_key → pure-for-waves):
+    /// a function is pure-for-waves iff its body (transitively — the
+    /// call-graph fixpoint) touches none of the E0812 ban-list
+    /// operations. The gate is interprocedural or it is not a gate:
+    /// a wall-clock read one call away would inject the schedule
+    /// into 𝒰_W undetected (Lemma WD's premise, E0812's purpose).
+    pub wave_pure_fns: HashSet<String>,
 }
 
 impl CheckDb {
@@ -383,6 +410,30 @@ struct Checker<'a> {
     /// (the mode-conflict check: an `unfrozen (P)` window refuses to
     /// nest inside a `frozen (P)` block).
     frozen_names_stack: Vec<Vec<String>>,
+    // --- SWARM RABBIT HOLE — Wave 13 (Impl-R): the wave region's
+    // per-walk lexical state (W2B §3/§4; Thm WS's checked side
+    // conditions, E0812/E-R1). The module-wide tables are CheckDb's
+    // (lcell_globals/wave_claims/wave_captures/wave_pure_fns). ---
+    /// The lexically open wave bodies (0 = fallback code). read_W /
+    /// contrib are legal only at depth ≥ 1; the wave body's E0812
+    /// walk and the seam-mode rules fire at the block, not per-use.
+    wave_depth: u32,
+    /// The lexically open spawn-family bodies (spawn { } / go { } /
+    /// nursery { }). A wave inside a spawned task would fold J(W)
+    /// into module-scope seam cells from a non-joining thread —
+    /// concurrent with fallback reads — the torn-read class S2
+    /// exists to kill; waves are fallback-tier statements.
+    spawn_depth: u32,
+    /// The J(W) completion credits: one frame per scope (push/pop
+    /// aligned), each holding the seam cells whose capturing wave
+    /// block CLOSED inside that scope. A read_J is fold-valued
+    /// exactly where a credit is live (an enclosing frame holds it):
+    /// credits die with the conditional scope that earned them (an
+    /// if-branch wave does not prove the join on the fall-through
+    /// path; a loop body's credit dies at the loop exit — zero
+    /// iterations possible). This is R1's "after J(W)" arm made
+    /// lexical: provable, or refused.
+    joined_stack: Vec<Vec<String>>,
 }
 
 pub fn template_param_names(tp: &[crate::ast::TypeParam]) -> Vec<String> {
@@ -482,6 +533,10 @@ pub fn check_programs(programs: &[Program], diag: &mut Diagnostics) -> CheckDb {
         inout_call_edges: Vec::new(),
         scc_accum_sites: Vec::new(),
         lane_assignment: HashMap::new(),
+        lcell_globals: HashMap::new(),
+        wave_claims: HashMap::new(),
+        wave_captures: HashMap::new(),
+        wave_pure_fns: HashSet::new(),
     };
     collect(&mut db, programs, diag);
     check_contracts(&mut db, diag);
@@ -515,6 +570,9 @@ pub fn check_programs(programs: &[Program], diag: &mut Diagnostics) -> CheckDb {
             handle_home: HashMap::new(),
             unfrozen_stack: Vec::new(),
             frozen_names_stack: Vec::new(),
+            wave_depth: 0,
+            spawn_depth: 0,
+            joined_stack: vec![Vec::new()],
         };
         for item in &p.items {
             match item {
@@ -616,6 +674,9 @@ pub fn check_programs(programs: &[Program], diag: &mut Diagnostics) -> CheckDb {
             handle_home: HashMap::new(),
             unfrozen_stack: Vec::new(),
             frozen_names_stack: Vec::new(),
+            wave_depth: 0,
+            spawn_depth: 0,
+            joined_stack: vec![Vec::new()],
         };
         c.current_bp = Some(inst.name.clone());
         c.current_bp_hierarchy = hierarchy(&c.db.blueprints, &inst.name);
@@ -1813,7 +1874,7 @@ fn collect(db: &mut CheckDb, programs: &[Program], diag: &mut Diagnostics) {
                         db.funcs.insert(format!("{}::{}", b.name, m.name), sig);
                     }
                 }
-                Item::Stmt(Stmt::Decl { names, ty, mode, .. }) => {
+                Item::Stmt(Stmt::Decl { names, ty, mode, value, .. }) => {
                     if let (Some(n), Some(t)) = (names.first(), ty) {
                         db.globals.insert(n.clone(), resolve_type_ast(t, db));
                         // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O):
@@ -1837,12 +1898,584 @@ fn collect(db: &mut CheckDb, programs: &[Program], diag: &mut Diagnostics) {
                             };
                             db.global_pools.insert(n.clone(), gm);
                         }
+                        // SWARM RABBIT HOLE — Wave 13 (Impl-R): the
+                        // SEAM-CELL declaration — a module-scope
+                        // `ptr NAME = lcell_new(k)` (W2B §4.1: the
+                        // wave region's seam cells ARE the Tier-L
+                        // module-scope cells). The carrier literal k
+                        // is recorded here (the module initializer
+                        // never runs as code — ir.rs constructs the
+                        // cell at main entry, the DIFF-4 global-pool
+                        // pattern); a non-literal carrier is
+                        // rejected: the seam's carrier must be a
+                        // compile-time fact for the fold (J2) and
+                        // the R1 analysis to be well-defined.
+                        if matches!(t, crate::ast::TypeAst::Ptr) {
+                            if let Some(value) = &value {
+                                if let ExprKind::Call { callee, args, .. } = &value.kind {
+                                    if let ExprKind::Ident(cn) = &callee.kind {
+                                        if cn == "lcell_new" {
+                                            let carrier = match args.first() {
+                                                Some(Arg::Pos(e)) => match &e.kind {
+                                                    ExprKind::Int(k) => Some(*k),
+                                                    _ => None,
+                                                },
+                                                _ => None,
+                                            };
+                                            match carrier {
+                                                Some(k) => {
+                                                    db.lcell_globals.insert(n.clone(), k);
+                                                }
+                                                None => {
+                                                    diag.error(
+                                                        value.span,
+                                                        format!(
+                                                            "E-R1: seam cell '{n}' must declare a \
+                                                             literal carrier: lcell_new(0|max, \
+                                                             1|gset, 2|lww) — the J(W) fold and \
+                                                             the R1 capture analysis are \
+                                                             defined over a compile-time \
+                                                             carrier [E-R1]"
+                                                        ),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 _ => {}
             }
         }
     }
+    // SWARM RABBIT HOLE — Wave 13 (Impl-R): the wave tables' collect
+    // pre-pass, run AFTER every program's declarations are recorded
+    // (order-independent by construction — a merge checked before
+    // the wave claiming its cell must still see the claim):
+    // (a) the wave-claims pre-walk (every wave block's captured seam
+    //     cells, per function), then (b) the wave-purity fixpoint
+    //     (which functions are pure-for-waves).
+    wave_collect_claims(db, programs);
+    wave_purity_fixpoint(db, programs);
+}
+
+// ---------------------------------------------------------------------
+// SWARM RABBIT HOLE — Wave 13 (Impl-R, Cohort Delta): the wave
+// region's shared walkers and collect pre-passes (W2B §3/§4 — Thm WS
+// made executable). One ban list, one expression visitor, two
+// consumers (the wave-body E0812 gate and the fn-purity fixpoint) —
+// no drift between what the body gate checks and what the
+// interprocedural gate certifies.
+// ---------------------------------------------------------------------
+
+/// The E0812 ban list, CALL-NAME class: the schedule injectors (wall
+/// clock, env, argv, file/OS IO, the select/chan recv surface, the GC
+/// knobs — a collection mid-wave is schedule-adjacent and the tracked
+/// engine's mid-bracket story is not this slice's to promise) plus the
+/// FALLBACK SYNC OPS (lcell_inflate — the S1 payload application;
+/// lcell_merge — the J0 immediate merge; neither is the wave's join
+/// discipline W3, and in-wave payloads stage via contrib ONLY).
+fn wave_banned_call(n: &str) -> bool {
+    matches!(
+        n,
+        "time_now_ms"
+            | "os_getenv"
+            | "input"
+            | "os_args"
+            | "os_exec"
+            | "os_system"
+            | "select_read"
+            | "file_read"
+            | "file_read_ex"
+            | "file_write"
+            | "file_write_ex"
+            | "file_append"
+            | "file_delete"
+            | "file_copy"
+            | "file_move"
+            | "file_mkdir"
+            | "file_rmdir"
+            | "file_exists"
+            | "file_list"
+            | "gc_collect"
+            | "gc_set_threshold"
+            | "lcell_inflate"
+            | "lcell_merge"
+    )
+}
+
+/// The banned METHOD names (the chan class: receive/send/close; the
+/// Tier-L syncop wrappers: merge/inflate/retract — the std.lattice
+/// surface's mutators). Method calls on other receivers are handled
+/// by the callers' conservatism policy (see the walk).
+fn wave_banned_method(n: &str) -> bool {
+    matches!(n, "receive" | "send" | "close" | "merge" | "inflate" | "retract")
+}
+
+/// Visit every sub-expression of `e` (including `e` itself).
+fn wave_visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
+    f(e);
+    match &e.kind {
+        ExprKind::Binary { lhs, rhs, .. } | ExprKind::Index { base: lhs, index: rhs } => {
+            wave_visit_expr(lhs, f);
+            wave_visit_expr(rhs, f);
+        }
+        ExprKind::Unary { expr, .. }
+        | ExprKind::Cast { expr, .. }
+        | ExprKind::Await(expr)
+        | ExprKind::Try(expr)
+        | ExprKind::OptionalChain(expr)
+        | ExprKind::ForceUnwrap(expr) => wave_visit_expr(expr, f),
+        ExprKind::Call { callee, args, .. } => {
+            wave_visit_expr(callee, f);
+            for a in args {
+                match a {
+                    Arg::Pos(x) | Arg::Inout(x) | Arg::Named { value: x, .. } => {
+                        wave_visit_expr(x, f)
+                    }
+                }
+            }
+        }
+        ExprKind::SuperCall { args, .. } => {
+            for a in args {
+                match a {
+                    Arg::Pos(x) | Arg::Inout(x) | Arg::Named { value: x, .. } => {
+                        wave_visit_expr(x, f)
+                    }
+                }
+            }
+        }
+        ExprKind::Member { base, .. } => wave_visit_expr(base, f),
+        ExprKind::Interpolate { parts } => {
+            for p in parts {
+                if let InterpPart::Expr(x) = p {
+                    wave_visit_expr(x, f);
+                }
+            }
+        }
+        ExprKind::List(xs) | ExprKind::Tuple(xs) => {
+            for x in xs {
+                wave_visit_expr(x, f);
+            }
+        }
+        ExprKind::Map(pairs) => {
+            for (k, v) in pairs {
+                wave_visit_expr(k, f);
+                wave_visit_expr(v, f);
+            }
+        }
+        ExprKind::Lambda { body, .. } => {
+            for s in body {
+                wave_visit_stmt(s, f);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Visit every statement of `s` (including `s`), descending into all
+/// nested statements and their expressions.
+fn wave_visit_stmt(s: &Stmt, f: &mut dyn FnMut(&Expr)) {
+    fn walk(bs: &[Stmt], f: &mut dyn FnMut(&Expr)) {
+        for b in bs {
+            wave_visit_stmt(b, f);
+        }
+    }
+    match s {
+        Stmt::Expr(e) => wave_visit_expr(e, f),
+        Stmt::Decl { value, .. } => {
+            if let Some(v) = value {
+                wave_visit_expr(v, f);
+            }
+        }
+        Stmt::Assign { target, value, .. } => {
+            wave_visit_expr(target, f);
+            wave_visit_expr(value, f);
+        }
+        Stmt::If { cond, then_body, else_ifs, else_body, .. } => {
+            wave_visit_expr(cond, f);
+            walk(then_body, f);
+            for (c, b) in else_ifs {
+                wave_visit_expr(c, f);
+                walk(b, f);
+            }
+            if let Some(b) = else_body {
+                walk(b, f);
+            }
+        }
+        Stmt::While { cond, body, .. } => {
+            wave_visit_expr(cond, f);
+            walk(body, f);
+        }
+        Stmt::ForCount { init, cond, step, body, .. } => {
+            wave_visit_stmt(init, f);
+            wave_visit_expr(cond, f);
+            wave_visit_stmt(step, f);
+            walk(body, f);
+        }
+        Stmt::ForIn { iter, body, .. } => {
+            wave_visit_expr(iter, f);
+            walk(body, f);
+        }
+        Stmt::Match { expr, arms, default, .. } => {
+            wave_visit_expr(expr, f);
+            for (a, b) in arms {
+                wave_visit_expr(a, f);
+                walk(b, f);
+            }
+            if let Some(d) = default {
+                walk(d, f);
+            }
+        }
+        Stmt::Return { value, .. } => {
+            if let Some(v) = value {
+                wave_visit_expr(v, f);
+            }
+        }
+        Stmt::Guard { cond, else_body, .. } => {
+            wave_visit_expr(cond, f);
+            walk(else_body, f);
+        }
+        Stmt::ErrDefer { body, .. }
+        | Stmt::Region { body, .. }
+        | Stmt::NurseryBlock { body, .. }
+        | Stmt::Frozen { body, .. }
+        | Stmt::Unfrozen { body, .. }
+        | Stmt::SpawnBlock { body, .. }
+        | Stmt::LockBlock { body: body, .. }
+        | Stmt::GoroutineBlock { body, .. }
+        | Stmt::Defer { body, .. }
+        | Stmt::Wave { body, .. } => walk(body, f),
+        Stmt::SpawnExpr { expr, .. } => wave_visit_expr(expr, f),
+        Stmt::Asm { .. } | Stmt::Stop(_) | Stmt::Skip(_) | Stmt::New { .. } => {
+            // Asm carries no AST exprs; New's args are walked by the
+            // checker's own machinery — the wave gate bans Asm
+            // wholesale below (a template can read cycle counters).
+            if let Stmt::New { args, .. } = s {
+                for a in args {
+                    if let Arg::Pos(x) | Arg::Inout(x) | Arg::Named { value: x, .. } = a {
+                        wave_visit_expr(x, f);
+                    }
+                }
+            }
+        }
+        Stmt::NestedFn(nf) => {
+            for st in &nf.body {
+                wave_visit_stmt(st, f);
+            }
+        }
+    }
+}
+
+/// The capture set of a wave body: every module-scope Tier-L seam cell
+/// NAMED in the body (W2B §4.1) — the conservative over-approximation:
+/// an alias `ptr p = seam` names the cell too, so the registered set
+/// is a superset of the read_W/contrib uses (freezing more is safe —
+/// R1 constrains captures, and the constraint only tightens). Sorted
+/// for deterministic slot assignment in the ir.rs lowering.
+fn wave_seam_cells_of(db: &CheckDb, body: &[Stmt]) -> Vec<String> {
+    let mut cells = BTreeSet::new();
+    for s in body {
+        wave_visit_stmt(s, &mut |e| {
+            if let ExprKind::Ident(n) = &e.kind {
+                if db.lcell_globals.contains_key(n) {
+                    cells.insert(n.clone());
+                }
+            }
+        });
+    }
+    cells.into_iter().collect()
+}
+
+/// Does this function body contain an E0812-banned operation DIRECTLY
+/// (schedule call, banned method call, await, spawn-family statement,
+/// unfrozen window, asm)? The transitive half is the call-graph
+/// fixpoint in wave_purity_fixpoint. Also returns the called
+/// user-function names (the edges).
+fn wave_body_purity_scan(body: &[Stmt]) -> (bool, Vec<String>) {
+    let mut impure = false;
+    let mut edges = Vec::new();
+    for s in body {
+        wave_purity_scan_stmt(s, &mut impure, &mut edges);
+    }
+    (impure, edges)
+}
+
+fn wave_purity_scan_stmt(s: &Stmt, impure: &mut bool, edges: &mut Vec<String>) {
+    // Statement-class bans.
+    match s {
+        Stmt::SpawnBlock { .. }
+        | Stmt::GoroutineBlock { .. }
+        | Stmt::NurseryBlock { .. }
+        | Stmt::Unfrozen { .. }
+        | Stmt::Asm { .. } => *impure = true,
+        Stmt::Return { .. } | Stmt::Stop(_) => {} // legal in helpers
+        _ => {}
+    }
+    let body_of = |s: &Stmt| -> Option<Vec<Stmt>> {
+        match s {
+            Stmt::If { then_body, else_ifs, else_body, .. } => {
+                let mut all = then_body.clone();
+                for (_, b) in else_ifs {
+                    all.extend(b.clone());
+                }
+                if let Some(b) = else_body {
+                    all.extend(b.clone());
+                }
+                Some(all)
+            }
+            Stmt::While { body, .. }
+            | Stmt::ErrDefer { body, .. }
+            | Stmt::Region { body, .. }
+            | Stmt::Frozen { body, .. }
+            | Stmt::SpawnBlock { body, .. }
+            | Stmt::GoroutineBlock { body, .. }
+            | Stmt::LockBlock { body, .. }
+            | Stmt::Defer { body, .. }
+            | Stmt::Wave { body, .. } => Some(body.clone()),
+            _ => None,
+        }
+    };
+    if let Some(bs) = body_of(s) {
+        for b in &bs {
+            wave_purity_scan_stmt(b, impure, edges);
+        }
+    }
+    // Match arms / guard bodies / for bodies.
+    match s {
+        Stmt::Match { arms, default, .. } => {
+            for (_, b) in arms {
+                for x in b {
+                    wave_purity_scan_stmt(x, impure, edges);
+                }
+            }
+            if let Some(d) = default {
+                for x in d {
+                    wave_purity_scan_stmt(x, impure, edges);
+                }
+            }
+        }
+        Stmt::Guard { else_body, .. } => {
+            for x in else_body {
+                wave_purity_scan_stmt(x, impure, edges);
+            }
+        }
+        Stmt::ForCount { init, step, body, .. } => {
+            wave_purity_scan_stmt(init, impure, edges);
+            wave_purity_scan_stmt(step, impure, edges);
+            for x in body {
+                wave_purity_scan_stmt(x, impure, edges);
+            }
+        }
+        Stmt::ForIn { body, .. } => {
+            for x in body {
+                wave_purity_scan_stmt(x, impure, edges);
+            }
+        }
+        Stmt::NestedFn(nf) => {
+            for x in &nf.body {
+                wave_purity_scan_stmt(x, impure, edges);
+            }
+        }
+        _ => {}
+    }
+    // Expression-class bans: banned builtin calls, banned method
+    // names, awaits, extern calls, plain-fn call edges, and —
+    // conservatively — ANY other method call (the receiver's mutators
+    // are untracked through the call; the wave-purity fragment is
+    // plain functions).
+    wave_visit_stmt(s, &mut |e| match &e.kind {
+        ExprKind::Await(_) => *impure = true,
+        ExprKind::Call { callee, args, .. } => match &callee.kind {
+            ExprKind::Ident(n) => {
+                if wave_banned_call(n) {
+                    *impure = true;
+                } else {
+                    edges.push(n.clone());
+                }
+            }
+            ExprKind::Member { name, .. } => {
+                if wave_banned_method(name) || !args.is_empty() || true {
+                    // ANY method call is outside the wave-purity
+                    // fragment: the receiver's method set is untracked
+                    // through the call (receive/merge hide behind
+                    // innocent names on other receivers).
+                    *impure = true;
+                }
+            }
+            _ => {}
+        },
+        _ => {}
+    });
+}
+
+/// The collect-time pre-walk: every wave block's claim on its captured
+/// seam cells, keyed by the enclosing function's summary key
+/// (program-wide, so the checking-time R1 rules are order-independent
+/// — a merge checked before the wave claiming its cell must still see
+/// the claim).
+fn wave_collect_claims(db: &mut CheckDb, programs: &[Program]) {
+    let mut claims: HashMap<String, Vec<(String, Span)>> = HashMap::new();
+    for p in programs {
+        for item in &p.items {
+            let fns: Vec<(String, &FnItem)> = match item {
+                Item::Fn(f) => vec![(fn_summary_key(None, &f.name), f)],
+                Item::Blueprint(b) => b
+                    .methods
+                    .iter()
+                    .map(|m| (fn_summary_key(Some(&b.name), &m.name), m))
+                    .collect(),
+                _ => continue,
+            };
+            for (key, f) in fns {
+                for s in &f.body {
+                    wave_collect_claims_stmt(db, &key, s, &mut claims);
+                }
+            }
+        }
+    }
+    db.wave_claims = claims;
+}
+
+fn wave_collect_claims_stmt(
+    db: &CheckDb,
+    key: &str,
+    s: &Stmt,
+    claims: &mut HashMap<String, Vec<(String, Span)>>,
+) {
+    if let Stmt::Wave { body, span } = s {
+        for c in wave_seam_cells_of(db, body) {
+            claims.entry(c).or_default().push((key.to_string(), *span));
+        }
+    }
+    // Descend into every nested statement (the bodies of ifs/loops/
+    // matches/guards/spawn blocks may host wave blocks too).
+    let kids: Vec<Stmt> = match s {
+        Stmt::If { then_body, else_ifs, else_body, .. } => {
+            let mut all = then_body.clone();
+            for (_, b) in else_ifs {
+                all.extend(b.clone());
+            }
+            if let Some(b) = else_body {
+                all.extend(b.clone());
+            }
+            all
+        }
+        Stmt::While { body, .. }
+        | Stmt::ForIn { body, .. }
+        | Stmt::ErrDefer { body, .. }
+        | Stmt::Region { body, .. }
+        | Stmt::NurseryBlock { body, .. }
+        | Stmt::Frozen { body, .. }
+        | Stmt::Unfrozen { body, .. }
+        | Stmt::SpawnBlock { body, .. }
+        | Stmt::LockBlock { body, .. }
+        | Stmt::GoroutineBlock { body, .. }
+        | Stmt::Defer { body, .. }
+        | Stmt::Wave { body, .. } => body.clone(),
+        Stmt::ForCount { init, step, body, .. } => {
+            let mut all = vec![*init.clone(), *step.clone()];
+            all.extend(body.clone());
+            all
+        }
+        Stmt::Match { arms, default, .. } => {
+            let mut all = Vec::new();
+            for (_, b) in arms {
+                all.extend(b.clone());
+            }
+            if let Some(d) = default {
+                all.extend(d.clone());
+            }
+            all
+        }
+        Stmt::Guard { else_body, .. } => else_body.clone(),
+        Stmt::NestedFn(nf) => nf.body.clone(),
+        _ => Vec::new(),
+    };
+    for k in &kids {
+        wave_collect_claims_stmt(db, key, k, claims);
+    }
+}
+
+/// The wave-purity fixpoint: fn key → pure-for-waves. A function is
+/// pure-for-waves iff its body contains no banned operation DIRECTLY
+/// and every plain function it calls is pure-for-waves (least
+/// fixpoint — cycles of banned-op-free functions are pure; one banned
+/// op anywhere in a cycle poisons it, which is the conservative and
+/// correct direction for a kill switch). The wave body's E0812 gate
+/// consults this set at every plain-fn call: a wall-clock read one
+/// call away would otherwise inject the schedule into 𝒰_W undetected
+/// (Lemma WD's premise — E0812's whole purpose).
+fn wave_purity_fixpoint(db: &mut CheckDb, programs: &[Program]) {
+    // Direct scans + edges, keyed by fn summary key (plain fns,
+    // blueprint methods, nested fns walked within their hosts).
+    let mut direct: HashMap<String, bool> = HashMap::new(); // key → impure-directly
+    let mut edges: HashMap<String, Vec<String>> = HashMap::new();
+    let mut record = |key: String, body: &[Stmt]| {
+        let (imp, es) = wave_body_purity_scan(body);
+        direct.insert(key.clone(), imp);
+        edges.entry(key).or_default().extend(es);
+    };
+    for p in programs {
+        for item in &p.items {
+            match item {
+                Item::Fn(f) => {
+                    if f.type_params.is_empty() {
+                        record(fn_summary_key(None, &f.name), &f.body);
+                    } else {
+                        record(format!("{}<T>", f.name), &f.body);
+                    }
+                }
+                Item::Blueprint(b) => {
+                    for m in &b.methods {
+                        record(fn_summary_key(Some(&b.name), &m.name), &m.body);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    // Least fixpoint: pure(k) = !direct[k] ∧ ∀callee pure(callee).
+    // Unknown callees (builtins, externs, unresolved) don't create
+    // edges — the banned-call check already covered them by name, and
+    // extern fns are banned at the wave-body gate by their sig.
+    let mut pure: HashMap<String, bool> = direct
+        .keys()
+        .map(|k| (k.clone(), !direct[k]))
+        .collect();
+    loop {
+        let mut changed = false;
+        for (k, es) in edges.iter() {
+            if !*pure.get(k).unwrap_or(&false) {
+                continue;
+            }
+            for callee in es {
+                let callee_pure = match pure.get(callee) {
+                    Some(v) => *v,
+                    // A callee whose body the fixpoint never scanned
+                    // (a template instantiated later): conservative —
+                    // impure until its instance is scanned. Templates
+                    // are re-scanned at instantiation via check_fn's
+                    // walk of the instantiated body... the wave-body
+                    // gate re-checks the call site against the
+                    // instantiated body's own scan there.
+                    None => false,
+                };
+                if !callee_pure {
+                    pure.insert(k.clone(), false);
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    db.wave_pure_fns = pure.into_iter().filter(|(_, v)| *v).map(|(k, _)| k).collect();
 }
 
 pub fn resolve_type_ast(t: &TypeAst, db: &CheckDb) -> Type {
@@ -2043,12 +2676,26 @@ impl Checker<'_> {
     fn push(&mut self) {
         self.scopes.push(HashMap::new());
         self.local_scopes.push(Vec::new());
+        // Wave 13 (Impl-R): the J(W) credit frame — aligned with the
+        // scope machinery so conditional bodies' credits die with the
+        // scope (read_J's temporal discipline is lexical, and the
+        // lexical structure IS the scope tree).
+        self.joined_stack.push(Vec::new());
     }
     fn pop(&mut self) {
         if let Some(frame) = self.local_scopes.pop() {
             self.end_local_scope(&frame);
         }
         self.scopes.pop();
+        self.joined_stack.pop();
+    }
+
+    /// Wave 13 (Impl-R): is seam cell `c` J(W)-complete at this point?
+    /// True iff some live frame carries its credit (the capturing
+    /// wave block closed inside a scope that still encloses this
+    /// point) — R1's "after J(W)" arm, proved lexically.
+    fn joined_has(&self, c: &str) -> bool {
+        self.joined_stack.iter().any(|f| f.iter().any(|n| n == c))
     }
 
     // --- SWARM RABBIT HOLE — Wave 6 (Impl-E): region poset primitives
@@ -3145,14 +3792,22 @@ impl Checker<'_> {
             }
             Stmt::SpawnBlock { body, .. } => {
                 self.check_spawn_block(body);
+                // Wave 13 (Impl-R): the spawn-depth counter — a wave
+                // inside a spawned task would fold J(W) into module-
+                // scope seam cells from a non-joining thread (the
+                // torn-read class S2 exists to kill). See the Wave arm.
+                self.spawn_depth += 1;
                 for s in body {
                     self.check_stmt(s);
                 }
+                self.spawn_depth -= 1;
             }
             Stmt::GoroutineBlock { body, .. } => {
+                self.spawn_depth += 1;
                 for s in body {
                     self.check_stmt(s);
                 }
+                self.spawn_depth -= 1;
             }
             Stmt::SpawnExpr { expr, .. } => {
                 if let ExprKind::Call { callee: _, args, .. } = &expr.kind {
@@ -3254,14 +3909,25 @@ impl Checker<'_> {
                 // GC-managed, the category the lane store rule guards.
                 self.gc_managed.insert(name.clone());
             }
-            Stmt::Defer { body, .. }
-            | Stmt::ErrDefer { body, .. }
-            | Stmt::NurseryBlock { body, .. } => {
+            Stmt::Defer { body, .. } | Stmt::ErrDefer { body, .. } => {
                 self.push();
                 for s in body {
                     self.check_stmt(s);
                 }
                 self.pop();
+            }
+            // Wave 13 (Impl-R): the nursery is the spawn family's
+            // structured form — same wave prohibition as spawn/go
+            // (a wave's J(W) fold must never run on a non-joining
+            // thread; see the Wave arm).
+            Stmt::NurseryBlock { body, .. } => {
+                self.spawn_depth += 1;
+                self.push();
+                for s in body {
+                    self.check_stmt(s);
+                }
+                self.pop();
+                self.spawn_depth -= 1;
             }
             // SWARM RABBIT HOLE — Wave 6 (Impl-E, D0 gap #4 first slice):
             // `region {}` is a node of the region poset (W2A §1.1) —
@@ -3373,6 +4039,128 @@ impl Checker<'_> {
                 }
                 self.pop();
                 self.unfrozen_stack.pop();
+            }
+            // SWARM RABBIT HOLE — Wave 13 (Impl-R, Cohort Delta): the
+            // WAVE REGION — Thm WS made executable (W2B §4; the typed
+            // read-mode surface §3). The block is the composed
+            // syntax's wave phase; its checking realizes the
+            // theorem's hypotheses as compile-time side conditions:
+            //   C1  Rule R1 (quiescent capture) — W2B §4.3 — here;
+            //   C2  compiler-enforced wave determinism — the E0812
+            //       purity gate (the kill switch), here;
+            //   W2  the seam typing — read_W/contrib only in the
+            //       body (read_S and the fallback sync ops refused);
+            //   W3  the join discipline — J(W) is the block exit
+            //       (ir.rs lowers the J2 batched fold).
+            // C3/C4 (the fallback side) live at the merge sites (the
+            // E-R1 merge rule in check_call) and the read modes.
+            Stmt::Wave { body, span } => {
+                // (0) Structural prohibitions. A wave inside a spawn
+                // family would fold J(W) into module-scope seam cells
+                // from a non-joining thread — concurrent with
+                // fallback reads, the torn-read class S2 exists to
+                // kill; waves are fallback-tier statements. A nested
+                // wave is case (b) by construction: neither capture
+                // can be quiescent w.r.t. the other.
+                if self.spawn_depth > 0 {
+                    self.diag.error(
+                        *span,
+                        "E0812: a wave may not run inside a spawn/nursery body — \
+                         J(W) would fold into seam cells from a non-joining thread \
+                         (the torn-read class S2 exists to kill); waves are \
+                         fallback-tier statements [E0812]",
+                    );
+                }
+                if self.wave_depth > 0 {
+                    self.diag.error(
+                        *span,
+                        "E0812: a wave body may not nest a wave — the wave IS the \
+                         parallelism; nest phases by sequencing wave blocks \
+                         (J(Wᵢ) → capture(W_{i+1}), WS case (c)) [E0812]",
+                    );
+                }
+                // (1) The capture set: every module-scope Tier-L seam
+                // cell named in the body (the conservative
+                // over-approximation — an alias `ptr p = seam` names
+                // the cell too, so the capture is a superset of the
+                // read_W/contrib uses; freezing more is safe: R1
+                // constrains captures, and a capture that provably
+                // never races is the only thing the rule demands).
+                let captured = wave_seam_cells_of(self.db, body);
+                // (2) Rule R1, the two-waves arm (W2B §4.6 case (b) —
+                // a theorem, not a defect): for every PRIOR claim on a
+                // captured cell (claims are collected program-wide at
+                // collect, so this is order-independent), the claim
+                // must be the SAME function's earlier wave — provably
+                // joined, the sequential-composition case (c) — or it
+                // imposes nothing on this capture (a later wave in
+                // the same function runs after J(W) of this one).
+                // Anything else (cross-function, unordered) is the
+                // checked refusal: Part 3 is unavailable by
+                // construction, and the checker says so.
+                let cur_fn = self.current_fn_key.clone();
+                for c in &captured {
+                    if let Some(claims) = self.db.wave_claims.get(c) {
+                        for (fnk, wspan) in claims {
+                            if wspan == span {
+                                continue; // this block's own claim
+                            }
+                            let same_fn = Some(fnk.as_str()) == cur_fn.as_deref();
+                            if same_fn && wspan.start < span.start {
+                                // Same function, textually earlier:
+                                // J(W_prev) provably happened (the
+                                // sequential walk closed it) — case
+                                // (c)'s induction step, LEGAL.
+                                continue;
+                            }
+                            if same_fn && wspan.start > span.start {
+                                // Same function, textually later:
+                                // imposes nothing on THIS capture.
+                                continue;
+                            }
+                            self.diag.error(
+                                *span,
+                                format!(
+                                    "E-R1: two waves share seam cell '{c}' — \
+                                     neither capture can be R1-quiescent w.r.t. the \
+                                     other; compose them sequentially [E-R1]"
+                                ),
+                            );
+                            break;
+                        }
+                    }
+                }
+                // (3) Record the capture set for the ir.rs lowering
+                // (one sn_wave_capture per cell at wave entry).
+                self.db
+                    .wave_captures
+                    .insert((span.file, span.start, span.end), captured.clone());
+                // (4) The E0812 purity gate — the kill switch (W2B
+                // §4.6 case (d)): the body must be a pure function of
+                // the frozen capture κ (Lemma WD's premise; without it
+                // the determinism grade degrades UNDETECTED — so it
+                // is a compile error, never a warning).
+                self.wave_e0812_walk(body, &captured);
+                // (5) Check the body as an ordinary scope, with the
+                // wave depth open (read_W/contrib legal; the seam
+                // typing enforced at their check sites).
+                self.wave_depth += 1;
+                self.push();
+                for s in body {
+                    self.check_stmt(s);
+                }
+                self.pop();
+                self.wave_depth -= 1;
+                // (6) J(W) is structural: the block's completion is
+                // the join. Credit the captured cells in the
+                // ENCLOSING frame — the credit dies with the scope
+                // (read_J's temporal discipline is lexical; an
+                // if-branch wave does not prove the join on the
+                // fall-through path), and a later same-function wave
+                // may capture them again (case (c)).
+                if let Some(frame) = self.joined_stack.last_mut() {
+                    frame.extend(captured.iter().cloned());
+                }
             }
             Stmt::Guard { cond, else_body, .. } => {
                 let ct = self.check_expr(cond);
@@ -4627,7 +5415,111 @@ impl Checker<'_> {
                two cells is invisible here (the surface type is an untyped
                ptr) and is fail-fast policed at runtime [E-LKIND]. */
             "lcell_new" | "lcell_delta" | "lcell_apply" => Type::Ptr,
-            "lcell_inflate" | "lcell_merge" => Type::Void,
+            /* SWARM RABBIT HOLE — Wave 13 (Impl-R): the E-R1
+               MERGE-POSITION RULE — Rule R1's static arm (W2B §4.3:
+               "capture legal only if every fallback merge into c is
+               HB-before the capture or after J(W)"). The provable arm
+               is program-order-before: a fallback merge
+               (lcell_inflate — the S1 payload application; lcell_merge
+               — the join) into a SEAM cell is legal only when every
+               wave claiming that cell sits textually LATER in the
+               SAME function. The "after J(W)" arm is deliberately
+               NOT implemented: lexical order cannot prove it (a
+               textually-later merge can sit BETWEEN two J(W)s when
+               the capture is loop-shaped — the exact
+               conditional-determinism window R1 exists to close),
+               and a cross-function merge's order is unknowable.
+               Mixed use without proof ⇒ conditional determinism ⇒
+               the checked refusal, fired at the merge. In-wave
+               merges are the E0812 walk's jurisdiction (the J0
+               immediate-merge arm), so this rule is fallback-only. */
+            "lcell_inflate" | "lcell_merge" => {
+                if self.wave_depth == 0 {
+                    if let Some(Arg::Pos(e)) = args.first() {
+                        if let ExprKind::Ident(n) = &e.kind {
+                            if self.db.lcell_globals.contains_key(n) {
+                                let cur_fn = self.current_fn_key.clone();
+                                let mut violating = false;
+                                if let Some(claims) = self.db.wave_claims.get(n) {
+                                    for (fnk, wspan) in claims {
+                                        let same_fn_later =
+                                            Some(fnk.as_str()) == cur_fn.as_deref()
+                                                && wspan.start > span.start;
+                                        if !same_fn_later {
+                                            violating = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if violating {
+                                    self.diag.error(
+                                        span,
+                                        format!(
+                                            "E-R1: capture of '{n}' is not R1-quiescent: a \
+                                             fallback merge into '{n}' is not HB-before this \
+                                             wave — determinism would be conditional; make \
+                                             the merge program-order-before the wave, or use \
+                                             contrib-only [E-R1]"
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                Type::Void
+            }
+            /* SWARM RABBIT HOLE — Wave 13 (Impl-R): the wave seam's
+               TYPED READ-MODE SURFACE (W2B §3 — "the mode is in the
+               type"). read_W: the frozen capture's readout (wave
+               bodies only — the deterministic read mode). contrib:
+               stage the payload pair (a,b) — exactly an lcell_inflate
+               offer — into the enclosing wave's J(W) (wave bodies
+               only). read_J: the fold-valued readout, legal only
+               where J(W) provably happened (the joined-credit
+               discipline); lowered to the same sn_lcell_value the
+               fallback read uses — the MODE is the checked temporal
+               claim, the value is the fold. */
+            "read_W" => {
+                if self.wave_depth == 0 {
+                    self.diag.error(
+                        span,
+                        "E-R1: read_W reads the frozen capture of an enclosing wave; \
+                         there is no enclosing wave here — use lcell_value (read_S: \
+                         defined + session-monotone, schedule-dependent) [E-R1]",
+                    );
+                }
+                self.wave_seam_arg(args, "read_W");
+                Type::Int
+            }
+            "contrib" => {
+                if self.wave_depth == 0 {
+                    self.diag.error(
+                        span,
+                        "E-R1: contrib stages a payload into the enclosing wave's \
+                         join (J(W)); there is no enclosing wave here — use the \
+                         fallback ops (lcell_inflate / lcell_merge, the S1 path) \
+                         [E-R1]",
+                    );
+                }
+                self.wave_seam_arg(args, "contrib");
+                Type::Void
+            }
+            "read_J" => {
+                if let Some(name) = self.wave_seam_arg(args, "read_J") {
+                    if !self.joined_has(&name) {
+                        self.diag.error(
+                            span,
+                            format!(
+                                "E-R1: read_J requires J(W) to have happened — \
+                                 '{name}' has no wave joined at this point; the value \
+                                 is not yet fold-valued; use lcell_value (read_S) [E-R1]"
+                            ),
+                        );
+                    }
+                }
+                Type::Int
+            }
             "lcell_len" | "lcell_value" | "lcell_carrier" => Type::Int,
             "lcell_has" => Type::Bool,
             /* THE (L, exact) REJECTION — the Grothendieck argument as a
@@ -6293,6 +7185,335 @@ impl Checker<'_> {
     fn check_spawn_expr_root(&mut self, e: &Expr, locals: &HashSet<String>, in_lock: bool) {
         self.check_spawn_pool_rules(e, locals);
         self.check_spawn_expr(e, locals, in_lock);
+    }
+
+    // --- SWARM RABBIT HOLE — Wave 13 (Impl-R): the wave region's
+    // checker methods (W2B §3/§4; Thm WS's checked side conditions). ---
+
+    /// The seam-cell argument check for read_W/contrib/read_J: the
+    /// first argument must name a module-scope Tier-L seam cell (W2B
+    /// §4.1 — the R1 analysis and the J(W) fold are defined over the
+    /// module-scope seam; a function-local cell is wave-internal by
+    /// construction, NI(ii)). Returns the seam name when it is one.
+    fn wave_seam_arg(&mut self, args: &[Arg], op: &str) -> Option<String> {
+        let e = match args.first() {
+            Some(Arg::Pos(e)) => e,
+            _ => {
+                self.diag.error(
+                    Span::dummy(),
+                    format!("E-R1: {op} expects a seam cell as its first argument [E-R1]"),
+                );
+                return None;
+            }
+        };
+        let name = match &e.kind {
+            ExprKind::Ident(n) => n.clone(),
+            other => Self::expr_label(&Expr {
+                span: e.span,
+                kind: other.clone(),
+            }),
+        };
+        if self.db.lcell_globals.contains_key(&name) {
+            Some(name)
+        } else {
+            self.diag.error(
+                e.span,
+                format!(
+                    "E-R1: '{name}' is not a seam cell — a seam cell is a \
+                     module-scope 'ptr' declared with an lcell_new initializer; \
+                     waves capture seam cells only [E-R1]"
+                ),
+            );
+            None
+        }
+    }
+
+    /// The E0812 PURITY GATE — the kill switch (W2B §4.6 case (d)):
+    /// the wave body must be a pure function of the frozen capture κ
+    /// (Lemma WD's premise — "u pure in τ's deterministic local
+    /// state; a wall-clock read would inject schedule into 𝒰_W and
+    /// destroy WS-1"). Every arm below is a compile-time error, never
+    /// a warning: without the gate the determinism grade degrades
+    /// UNDETECTED, and the whole point of a kill switch is that it
+    /// fires. The banned-name list is wave_banned_call (shared with
+    /// the fn-purity fixpoint — no drift); the transitive half is the
+    /// wave_pure_fns fixpoint consulted at plain-fn calls.
+    fn wave_e0812_walk(&mut self, body: &[Stmt], captured: &[String]) {
+        for s in body {
+            self.wave_e0812_stmt(s, captured);
+        }
+    }
+
+    fn wave_e0812_stmt(&mut self, s: &Stmt, captured: &[String]) {
+        match s {
+            // The parallelism class: the wave IS the parallelism; a
+            // spawn/nursery/goroutine/lock inside the body injects a
+            // schedule the determinism kernel cannot see.
+            Stmt::SpawnBlock { span, .. }
+            | Stmt::GoroutineBlock { span, .. }
+            | Stmt::NurseryBlock { span, .. }
+            | Stmt::LockBlock { span, .. } => {
+                self.diag.error(
+                    *span,
+                    "E0812: wave body spawns — the wave IS the parallelism; a \
+                     spawn/nursery/lock inside the body injects a schedule the \
+                     determinism kernel cannot see [E0812]",
+                );
+            }
+            // The exit class: J(W) is structural (contrib→exit→J(W));
+            // an early return would strand the staged multiset, and a
+            // deferred fallback op runs at wave-internal timing the
+            // join discipline does not define. Termination itself is
+            // the runtime contract E0810·R — Rice, honestly relocated.
+            Stmt::Return { span, .. } | Stmt::Stop(span) => {
+                self.diag.error(
+                    *span,
+                    "E0812: a wave body may not return early — J(W) is structural \
+                     (the exit edge contrib→exit→J(W)); termination is the runtime \
+                     contract E0810·R, and the join must be reached [E0812]",
+                );
+            }
+            Stmt::Defer { span, .. } | Stmt::ErrDefer { span, .. } => {
+                self.diag.error(
+                    *span,
+                    "E0812: a wave body may not defer — deferred ops run at \
+                     wave-internal timing the join discipline W3 does not define; \
+                     the body's effects are contrib→exit→J(W), nothing else [E0812]",
+                );
+            }
+            // The fallback-window class: the unfrozen pool window is
+            // a fallback sync op (E0803's own machinery governs it);
+            // asm can read cycle counters — schedule-adjacent by
+            // construction.
+            Stmt::Unfrozen { span, .. } | Stmt::Asm { span, .. } => {
+                self.diag.error(
+                    *span,
+                    "E0812: wave body performs a fallback sync/extrinsic \
+                     operation (an unfrozen window / inline asm) — wave bodies \
+                     are pure functions of the frozen capture [E0812]",
+                );
+            }
+            // The state-escape class: a global write from the wave
+            // body is fallback state mutated by wave-internal flow —
+            // NI(ii) requires wave-internal state unreachable from
+            // fallback ("ports don't escape"); the seam's only write
+            // path is contrib at J(W).
+            Stmt::Assign { target, span, .. } => {
+                if let Some(root) = Self::root_var_of_expr(target) {
+                    if self.db.globals.contains_key(&root) {
+                        self.diag.error(
+                            *span,
+                            format!(
+                                "E0812: wave body assigns to global '{root}' — \
+                                 wave-internal state must not escape (Lemma NI(ii): \
+                                 'ports don't escape'); the seam's only write path is \
+                                 contrib at J(W) [E0812]"
+                            ),
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+        // The expression class: schedule injectors (verbatim), the
+        // fallback sync ops (the J0/S1 forms), the read_S mode rule
+        // on captured seam cells, method calls (outside the
+        // wave-purity fragment — the receiver's mutators are
+        // untracked through the call), awaits, and impure helper
+        // calls (the interprocedural fixpoint — E0812's whole
+        // purpose is that a wall-clock read one call away does not
+        // slip through).
+        wave_visit_stmt(s, &mut |e| {
+            match &e.kind {
+                ExprKind::Await(_) => {
+                    self.diag.error(
+                        e.span,
+                        "E0812: wave body awaits — async IO is schedule-dependent \
+                         state; wave bodies are pure functions of the frozen \
+                         capture (Lemma WD's premise); this is the kill switch: \
+                         the determinism grade degrades without it [E0812]",
+                    );
+                }
+                ExprKind::Call { callee, .. } => match &callee.kind {
+                    ExprKind::Ident(n) => {
+                        if wave_banned_call(n) {
+                            if n == "lcell_inflate" || n == "lcell_merge" {
+                                self.diag.error(
+                                    e.span,
+                                    format!(
+                                        "E0812: wave body performs the fallback \
+                                         sync op '{n}' — in-wave payloads stage via \
+                                         contrib and fold at J(W) (the J0 immediate \
+                                         merge is not the default); the join discipline \
+                                         W3 is what makes the fold canonical [E0812]"
+                                    ),
+                                );
+                            } else {
+                                self.diag.error(
+                                    e.span,
+                                    format!(
+                                        "E0812: wave body reads schedule-dependent \
+                                         state '{n}' — wave bodies must be pure \
+                                         functions of the frozen capture (Lemma WD's \
+                                         premise); this is the kill switch: the \
+                                         determinism grade degrades without it [E0812]"
+                                    ),
+                                );
+                            }
+                        } else if matches!(n.as_str(), "read_W" | "contrib" | "read_J") {
+                            // The wave's own surface — checked at the
+                            // call arms (ident_call).
+                        } else if self.db.funcs.contains_key(n) {
+                            // A user/extern function: externs are
+                            // unknown purity (refused); plain fns must
+                            // carry the purity fixpoint's certificate.
+                            let sig = &self.db.funcs[n];
+                            let pure = !sig.is_extern && self.db.wave_pure_fns.contains(n);
+                            if !pure {
+                                self.diag.error(
+                                    e.span,
+                                    format!(
+                                        "E0812: wave body calls '{n}' which reads \
+                                         schedule-dependent state or performs \
+                                         fallback sync ops — the purity gate is \
+                                         interprocedural (the call-graph fixpoint); \
+                                         inline the pure fragment or make the \
+                                         function pure [E0812]"
+                                    ),
+                                );
+                            }
+                        } else if self.db.fn_templates.contains_key(n) {
+                            // A generic fn: the fixpoint certified the
+                            // template body under its "{name}<T>" key.
+                            if !self
+                                .db
+                                .wave_pure_fns
+                                .contains(&format!("{n}<T>"))
+                            {
+                                self.diag.error(
+                                    e.span,
+                                    format!(
+                                        "E0812: wave body calls '{n}' which reads \
+                                         schedule-dependent state or performs \
+                                         fallback sync ops — the purity gate is \
+                                         interprocedural (the call-graph fixpoint); \
+                                         inline the pure fragment or make the \
+                                         function pure [E0812]"
+                                    ),
+                                );
+                            }
+                        }
+                        // The read_S mode rule: lcell_value/len/has on
+                        // a CAPTURED seam cell in-wave (the fallback
+                        // read mode on the wave's own seam).
+                        if matches!(n.as_str(), "lcell_value" | "lcell_len" | "lcell_has") {
+                            if let ExprKind::Call { args, .. } = &e.kind {
+                                if let Some(Arg::Pos(a0)) = args.first() {
+                                    if let ExprKind::Ident(an) = &a0.kind {
+                                        if captured.contains(an) {
+                                            self.diag.error(
+                                                a0.span,
+                                                format!(
+                                                    "E0812: wave body reads seam cell \
+                                                     '{an}' in fallback mode (read_S) — the \
+                                                     in-wave read mode is read_W (the \
+                                                     frozen capture); the S-mode read is \
+                                                     schedule-dependent the moment the \
+                                                     discipline relaxes (J0/concurrent \
+                                                     waves) [E0812]"
+                                                ),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    ExprKind::Member { name, .. } => {
+                        if wave_banned_method(name) {
+                            // The chan class (receive/send/close) and
+                            // the Tier-L syncop wrapper methods: the
+                            // verbatim schedule/sync diagnostic, the
+                            // same text the intrinsic arms use.
+                            self.diag.error(
+                                e.span,
+                                format!(
+                                    "E0812: wave body reads schedule-dependent \
+                                     state '{name}' — wave bodies must be pure \
+                                     functions of the frozen capture (Lemma WD's \
+                                     premise); this is the kill switch: the \
+                                     determinism grade degrades without it [E0812]"
+                                ),
+                            );
+                        } else {
+                            self.diag.error(
+                                e.span,
+                                format!(
+                                    "E0812: wave body calls method '{name}' — method \
+                                     calls are outside the wave-purity fragment (the \
+                                     receiver's mutators are untracked through the call; \
+                                     chan receives and the Tier-L syncop wrappers hide \
+                                     behind innocent names); inline the pure fragment \
+                                     [E0812]"
+                                ),
+                            );
+                        }
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        });
+        // Recurse into nested statements.
+        let kids: Vec<Stmt> = match s {
+            Stmt::If { then_body, else_ifs, else_body, .. } => {
+                let mut all = then_body.clone();
+                for (_, b) in else_ifs {
+                    all.extend(b.clone());
+                }
+                if let Some(b) = else_body {
+                    all.extend(b.clone());
+                }
+                all
+            }
+            Stmt::While { body, .. }
+            | Stmt::ForIn { body, .. }
+            | Stmt::ErrDefer { body, .. }
+            | Stmt::Region { body, .. }
+            | Stmt::NurseryBlock { body, .. }
+            | Stmt::Frozen { body, .. }
+            | Stmt::Unfrozen { body, .. }
+            | Stmt::SpawnBlock { body, .. }
+            | Stmt::LockBlock { body, .. }
+            | Stmt::GoroutineBlock { body, .. }
+            | Stmt::Defer { body, .. }
+            | Stmt::Wave { body, .. } => body.clone(),
+            _ => Vec::new(),
+        };
+        // (Match arms handled explicitly — the pattern above binds
+        // only the arm vectors' bodies.)
+        let mut all_kids = kids;
+        match s {
+            Stmt::Match { arms, default, .. } => {
+                for (_, b) in arms {
+                    all_kids.extend(b.clone());
+                }
+                if let Some(d) = default {
+                    all_kids.extend(d.clone());
+                }
+            }
+            Stmt::Guard { else_body, .. } => all_kids.extend(else_body.clone()),
+            Stmt::ForCount { init, step, body, .. } => {
+                all_kids.push(*init.clone());
+                all_kids.push(*step.clone());
+                all_kids.extend(body.clone());
+            }
+            Stmt::NestedFn(nf) => all_kids.extend(nf.body.clone()),
+            _ => {}
+        }
+        for k in &all_kids {
+            self.wave_e0812_stmt(k, captured);
+        }
     }
 
     fn check_spawn_expr(&mut self, e: &Expr, locals: &HashSet<String>, in_lock: bool) {

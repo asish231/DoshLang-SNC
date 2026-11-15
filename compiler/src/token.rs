@@ -137,6 +137,14 @@ pub enum TokenKind {
        the u16 range bounds |δ| ≤ 32767. */
     LinkKw,
     Nursery,
+    /* SWARM RABBIT HOLE — Wave 13 (Impl-R, Cohort Delta): the wave
+       region keyword — `wave { ... }` (W2B §4.1's wave regions; Thm
+       WS, the wave-seam composition theorem, made executable). The
+       body is a pure observation bracket over module-scope Tier-L
+       seam cells: read_W (the frozen capture κ), contrib (payloads
+       staged into the J(W) join), and the block exit is the J2
+       batched canonical fold. */
+    Wave,
 }
 
 #[derive(Clone, Debug)]

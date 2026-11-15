@@ -1,0 +1,26 @@
+// SWARM RABBIT HOLE — Wave 13 (Impl-R): the in-wave mode rules —
+// the read_S and sync-op rejections (W2B §3's typed read-mode
+// surface: "the mode is in the type"). Inside a wave body a captured
+// seam cell is read ONLY via read_W (the frozen capture); the
+// fallback read (read_S — lcell_value/lcell_len/lcell_has on the
+// cell) is the schedule-dependent mode the wave tier exists to
+// replace, and the fallback sync ops (lcell_merge — the J0
+// immediate merge; lcell_inflate — the S1 payload application) bypass
+// the canonical J(W) fold (the join discipline W3 is what makes the
+// fold canonical — W2B §4.3: J0 "safe for every WS part but not the
+// default"). MUST FAIL TO COMPILE.
+
+ptr c = lcell_new(1)
+
+fn main() {
+    lcell_inflate(c, 1, 0)
+
+    wave {
+        int v = lcell_value(c)   // read_S in-wave — the mode violation
+        contrib(c, v, 0)
+
+        ptr other = lcell_new(1)
+        lcell_merge(c, other)    // the J0 immediate merge — not the default
+    }
+    print("unreachable")
+}

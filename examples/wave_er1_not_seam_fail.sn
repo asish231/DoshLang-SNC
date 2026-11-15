@@ -1,0 +1,22 @@
+// SWARM RABBIT HOLE — Wave 13 (Impl-R): the seam-cell qualification
+// rule (W2B §4.1: "seam cells = module-scope cells visible under the
+// mode rules"). read_W/contrib operate on SEAM CELLS — module-scope
+// Tier-L cells declared with an lcell_new initializer — because the
+// R1/E0812 static analysis and the J(W) fold are defined over the
+// module-scope seam, not over function-local state (wave-internal
+// state must not escape the wave; NI(ii)). A function-local cell is
+// wave-internal by construction: it is not a seam, and pretending
+// otherwise is a checked refusal, not an unknown-name error.
+// MUST FAIL TO COMPILE.
+
+ptr seam = lcell_new(1)
+
+fn main() {
+    wave {
+        ptr local = lcell_new(1)   // function-local: not a seam cell
+        contrib(local, 1, 0)       // E-R1: not a seam cell
+        int v = read_W(local)      // the same refusal
+        contrib(seam, v, 0)
+    }
+    print("unreachable")
+}

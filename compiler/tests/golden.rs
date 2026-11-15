@@ -1720,3 +1720,237 @@ fn link_to_bytes_cross_slice_fail_verbatim() {
 fn link_to_bytes_whole_list_ok() {
     assert_out("examples/link_to_bytes_ok.sn", "true\n4242\n");
 }
+
+// ---------------------------------------------------------------------
+// SWARM RABBIT HOLE — Wave 13 (Impl-R, Cohort Delta): the wave region
+// — Theorem WS made executable (W2B §4, the composed confluence
+// theorem; the typed read-mode surface W2B §3). The wave body is a
+// pure function of the frozen capture κ (Lemma WD — the E0812 purity
+// gate is the kill switch), contributions stage as payloads and fold
+// canonically at the J(W) join (Lemma NI(ii): contributions ARE
+// atomic ⊔-merges on seam cells; Thm WS Part 2 — the J2 batched fold),
+// and read_J after the join observes the folded value. R1 (quiescent
+// capture) is the checked side condition that upgrades Part 2's
+// confluence to Part 3's composed determinism.
+// ---------------------------------------------------------------------
+
+/// Thm WS Part 2 end-to-end: a pure wave body stages contributions
+/// to GSET and MAX seam cells; at J(W) the staged multiset folds
+/// canonically (one atomic ⊔ per cell); read_J observes
+/// κ₀(c) ⊔ ⊔𝒰_W(c). The MAX carrier's losing offer is a no-op (⊔ =
+/// max), the GSET support grows by exactly the staged elements.
+#[test]
+fn wave_fold_read_j() {
+    assert_out(
+        "examples/wave_fold.sn",
+        "20\n3\ntrue\nPASS: wave_fold\n",
+    );
+}
+
+/// The read-only capture: 𝒰_W(c) = ∅ ⇒ J(W) is the identity on the
+/// cell (the fold of the empty multiset is ⊥), and read_J after the
+/// wave equals the frozen κ readout. Wave observation leaves the
+/// seam untouched.
+#[test]
+fn wave_readonly_capture() {
+    assert_out(
+        "examples/wave_readonly.sn",
+        "5\n5\n5\nPASS: wave_readonly\n",
+    );
+}
+
+/// The S5 dividend at the seam (Part 2(iii)): a duplicate
+/// contribution folds once — ⊔-idempotence executes at the join, so
+/// at-least-once delivery costs nothing (W2B §1 D6's division of
+/// labor: inflations do not absorb duplicates, ⊔-idempotence does).
+#[test]
+fn wave_contrib_duplicate_folds_once() {
+    assert_out(
+        "examples/wave_contrib_idem.sn",
+        "1\ntrue\nPASS: wave_contrib_idem\n",
+    );
+}
+
+/// The two read modes and the sequential-composition case (§4.6 case
+/// (c)): read_W inside the body is the FROZEN κ (contribs stage, they
+/// never merge mid-body — the J1 exit join, not the J0 immediate
+/// merge); read_J after the block is the folded value; the second
+/// wave's capture is quiescent exactly because J(W₁) provably
+/// completed (the static rule's accepted form), and its frozen κ is
+/// wave 1's fold — the induction step of Part 3.
+#[test]
+fn wave_read_w_frozen_vs_read_j_folded() {
+    assert_out(
+        "examples/wave_read_w_vs_j.sn",
+        "100\n100\n200\n200\n200\nPASS: wave_read_w_vs_j\n",
+    );
+}
+
+/// E0812 — the kill switch, verbatim (§4.6 case (d)): a wall-clock
+/// read in a wave body injects the schedule into 𝒰_W and destroys
+/// the wave-determinism kernel (Lemma WD's load-bearing premise).
+/// The gate is a compile-time error, never a silent downgrade.
+#[test]
+fn wave_e0812_time_rejected_verbatim() {
+    let err = compile_err("examples/wave_e0812_time_fail.sn");
+    assert!(
+        err.contains(
+            "E0812: wave body reads schedule-dependent state 'time_now_ms' — \
+             wave bodies must be pure functions of the frozen capture \
+             (Lemma WD's premise); this is the kill switch: the determinism \
+             grade degrades without it [E0812]"
+        ),
+        "expected the verbatim E0812 kill-switch diagnostic, got: {err}"
+    );
+}
+
+/// E0812's remaining rejection set, accumulated in one file: the env
+/// read, the channel receive (the recv injects the delivery schedule
+/// into the body), spawn inside the body (the wave IS the
+/// parallelism), the nested wave (two waves on one cell with no
+/// quiescence proof — case (b) by construction), and the early
+/// return (the exit edge contrib→exit→J(W) is structural; termination
+/// is the E0810·R runtime contract).
+#[test]
+fn wave_e0812_env_chan_spawn_nested_early_rejected() {
+    let err = compile_err("examples/wave_e0812_env_chan_fail.sn");
+    assert!(
+        err.contains("E0812: wave body reads schedule-dependent state 'os_getenv'"),
+        "expected the env-read E0812 arm, got: {err}"
+    );
+    assert!(
+        err.contains("E0812: wave body reads schedule-dependent state 'receive'"),
+        "expected the chan-recv E0812 arm, got: {err}"
+    );
+    assert!(
+        err.contains("E0812: wave body spawns — the wave IS the parallelism"),
+        "expected the spawn E0812 arm, got: {err}"
+    );
+    assert!(
+        err.contains("E0812: a wave body may not nest a wave"),
+        "expected the nested-wave E0812 arm, got: {err}"
+    );
+    assert!(
+        err.contains("E0812: a wave body may not return early"),
+        "expected the early-return E0812 arm, got: {err}"
+    );
+}
+
+/// The in-wave mode rules (W2B §3 — the mode is in the type): the
+/// fallback read (read_S — lcell_value on the captured cell) and the
+/// fallback sync ops (lcell_merge — the J0 immediate merge;
+/// lcell_inflate — the S1 application) are refused inside a wave
+/// body: the seam's in-wave surface is read_W/contrib only.
+#[test]
+fn wave_e0812_read_s_and_syncops_rejected() {
+    let err = compile_err("examples/wave_e0812_reads_fail.sn");
+    assert!(
+        err.contains(
+            "E0812: wave body reads seam cell 'c' in fallback mode (read_S)"
+        ),
+        "expected the read_S mode E0812 arm, got: {err}"
+    );
+    assert!(
+        err.contains(
+            "E0812: wave body performs the fallback sync op 'lcell_merge'"
+        ),
+        "expected the J0 sync-op E0812 arm, got: {err}"
+    );
+}
+
+/// Rule R1 — the non-quiescent capture, verbatim (§4.3): a fallback
+/// merge into a seam cell that is neither program-order-before the
+/// wave nor provably after J(W) (lexical order cannot prove the
+/// after-arm when the capture is loop-shaped — the merge can sit
+/// between two J(W)s) is a checked compile error: mixed use without
+/// proof ⇒ conditional determinism, and the checker refuses it.
+#[test]
+fn wave_er1_merge_after_wave_rejected_verbatim() {
+    let err = compile_err("examples/wave_er1_merge_after_fail.sn");
+    assert!(
+        err.contains(
+            "E-R1: capture of 'c' is not R1-quiescent: a fallback merge \
+             into 'c' is not HB-before this wave — determinism would be \
+             conditional; make the merge program-order-before the wave, \
+             or use contrib-only [E-R1]"
+        ),
+        "expected the verbatim E-R1 non-quiescent-capture diagnostic, got: {err}"
+    );
+}
+
+/// Rule R1's two-waves arm, verbatim (§4.6 case (b) — a theorem, not
+/// a defect): waves in different functions share the seam cell with
+/// no provable J(W₁)→capture(W₂) edge, so neither capture can be
+/// certified quiescent w.r.t. the other and the checker refuses
+/// both, symmetrically. Sequential composition inside ONE function
+/// is the accepted form (case (c)).
+#[test]
+fn wave_er1_two_waves_share_cell_rejected_verbatim() {
+    let err = compile_err("examples/wave_er1_two_waves_fail.sn");
+    assert!(
+        err.contains(
+            "E-R1: two waves share seam cell 'shared' — neither capture \
+             can be R1-quiescent w.r.t. the other; compose them \
+             sequentially [E-R1]"
+        ),
+        "expected the verbatim E-R1 two-waves diagnostic, got: {err}"
+    );
+}
+
+/// The wave-body operations outside a wave (W2B §3's scope rule):
+/// contrib stages into the ENCLOSING wave's J(W) and read_W reads the
+/// ENCLOSING wave's frozen κ — with no enclosing wave, both are
+/// checked refusals pointing at the fallback tier's own ops (the S1
+/// path; read_S).
+#[test]
+fn wave_er1_contrib_read_w_outside_rejected() {
+    let err = compile_err("examples/wave_er1_contrib_outside_fail.sn");
+    assert!(
+        err.contains(
+            "E-R1: contrib stages a payload into the enclosing wave's join (J(W))"
+        ),
+        "expected the contrib-outside E-R1 arm, got: {err}"
+    );
+    assert!(
+        err.contains(
+            "E-R1: read_W reads the frozen capture of an enclosing wave"
+        ),
+        "expected the read_W-outside E-R1 arm, got: {err}"
+    );
+}
+
+/// read_J's ordering discipline (W2B §3: "ordered after J(W)"): the
+/// fold-valued claim is temporal — before the wave the cell holds κ₀
+/// and the honest read mode is read_S; mislabeling it read_J is a
+/// checked refusal.
+#[test]
+fn wave_er1_read_j_before_join_rejected() {
+    let err = compile_err("examples/wave_er1_read_j_fail.sn");
+    assert!(
+        err.contains(
+            "E-R1: read_J requires J(W) to have happened — 'c' has no wave \
+             joined at this point"
+        ),
+        "expected the read_J-before-J(W) E-R1 arm, got: {err}"
+    );
+}
+
+/// The seam-cell qualification rule (W2B §4.1): seam cells are
+/// module-scope Tier-L cells (the R1/E0811 analysis and the J(W) fold
+/// are defined over the module-scope seam); a function-local cell is
+/// wave-internal by construction and read_W/contrib on it is a named
+/// checked refusal, not an unknown-name error.
+#[test]
+fn wave_er1_not_a_seam_cell_rejected() {
+    let err = compile_err("examples/wave_er1_not_seam_fail.sn");
+    assert!(
+        err.matches("E-R1: 'local' is not a seam cell").count() >= 2,
+        "expected the not-a-seam E-R1 arm on both read_W and contrib, got: {err}"
+    );
+    assert!(
+        err.contains(
+            "a seam cell is a module-scope 'ptr' declared with an lcell_new initializer"
+        ),
+        "expected the seam-cell qualification rule in the diagnostic, got: {err}"
+    );
+}

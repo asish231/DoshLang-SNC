@@ -1,0 +1,35 @@
+// SWARM RABBIT HOLE — Wave 13 (Impl-R): read_W vs read_J — the two
+// wave read modes, and the sequential-composition case (W2B §4.6
+// case (c): "WS composes by induction on the phase index —
+// J(Wᵢ) → capture(W_{i+1})").
+//
+// (1) read_W inside the body observes the FROZEN κ: staged
+//     contributions do NOT merge mid-body (the J1 exit-join
+//     discipline — contrib→exit→J(W), never the J0 immediate merge),
+//     so both read_W observations in wave 1 see the entry value.
+// (2) read_J after the block observes the folded exit value.
+// (3) A SECOND wave on the same cell is legal exactly because the
+//     first J(W) is provably complete at its capture (the static
+//     quiescence rule): its frozen κ is wave 1's folded value —
+//     composed determinism, Part 3's induction step.
+
+ptr cell = lcell_new(0)   // MAX seam cell (⊔ = max)
+
+fn main() {
+    lcell_inflate(cell, 100, 0)   // κ₀ setup (R1: program-order-before)
+
+    wave {
+        print(read_W(cell))   // 100 — the frozen capture
+        contrib(cell, 200, 0)
+        print(read_W(cell))   // 100 STILL — contribs stage; J(W) folds
+    }
+    print(read_J(cell))       // 200 — κ₀ ⊔ 200
+
+    // Case (c): J(W1) → capture(W2). The second wave's κ is the fold.
+    wave {
+        print(read_W(cell))   // 200 — the second frozen capture
+        contrib(cell, 50, 0)  // a losing offer against 200
+    }
+    print(read_J(cell))       // 200
+    print("PASS: wave_read_w_vs_j")
+}

@@ -1,0 +1,22 @@
+// SWARM RABBIT HOLE — Wave 13 (Impl-R): the read-only capture. A wave
+// whose body only READS the frozen κ (read_W) and stages nothing
+// leaves the seam cell unchanged: the fold of the empty contribution
+// multiset is the identity (⊥ of the payload join), so J(W) is a
+// no-op on the cell — Lemma WD's kernel with 𝒰_W(c) = ∅. Thm WS
+// Part 2's degenerate case, pinned end-to-end.
+
+ptr probe = lcell_new(0)   // MAX seam cell (the single-value readout)
+
+fn main() {
+    lcell_inflate(probe, 5, 0)   // program-order-before the wave (R1)
+
+    wave {
+        // The frozen κ readout: the HWM at wave entry.
+        print(read_W(probe))      // 5
+        // No contribs: the wave observes, the seam stays.
+    }
+
+    print(lcell_value(probe))  // 5 — unchanged (read_S, outside the wave)
+    print(read_J(probe))       // 5 — κ₀ ⊔ ⊔∅ = κ₀
+    print("PASS: wave_readonly")
+}

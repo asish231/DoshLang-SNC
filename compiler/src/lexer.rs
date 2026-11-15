@@ -463,6 +463,7 @@ fn keyword(text: &str) -> TokenKind {
         "resource" => TokenKind::Resource,
         "region" => TokenKind::Region,
         "nursery" => TokenKind::Nursery,
+        "wave" => TokenKind::Wave,
         "pool" => TokenKind::PoolKw,
         "handle" => TokenKind::HandleKw,
         // SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the self-relative
