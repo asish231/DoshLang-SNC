@@ -38,7 +38,7 @@ Windows (x64). Each archive ships `snc`, `stdlib/`, sample `packages/`,
 `runtime.c`, and a hello world:
 
 ```sh
-./snc --version   # snc 0.3.0
+./snc --version   # snc 0.3.1
 ./snc hello_world.sn -o hello && ./hello
 ```
 

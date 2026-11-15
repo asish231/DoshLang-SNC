@@ -98,7 +98,7 @@ fn handle_audit_logs(Request req) -> Response {
 
 fn handle_status(Request req) -> Response {
     let ok, lat, mode, ver = db_health_check()
-    return Response.ok("\{\"status\":\"healthy\",\"uptime\":\"active\",\"version\":\"0.3.0\",\"runtime\":\"SNlang Native LLVM\",\"schema_version\":" + cast(ver, str) + ",\"architecture\":\"Modular Reactor + Mutex-Locked GC + WAL SQLite\"\}")
+    return Response.ok("\{\"status\":\"healthy\",\"uptime\":\"active\",\"version\":\"0.3.1\",\"runtime\":\"SNlang Native LLVM\",\"schema_version\":" + cast(ver, str) + ",\"architecture\":\"Modular Reactor + Mutex-Locked GC + WAL SQLite\"\}")
 }
 
 fn handle_features(Request req) -> Response {

@@ -135,6 +135,6 @@ fn attach_security_headers(Response res) -> Response {
     res.headers["X-Frame-Options"] = "SAMEORIGIN"
     res.headers["X-XSS-Protection"] = "1; mode=block"
     res.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-    res.headers["Server"] = "SNlang-Reactor/0.3.0"
+    res.headers["Server"] = "SNlang-Reactor/0.3.1"
     return res
 }
