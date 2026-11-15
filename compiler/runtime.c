@@ -24,6 +24,7 @@
 #include <process.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <intrin.h>
 #ifndef F_OK
 #define F_OK 0
 #endif
@@ -2858,7 +2859,6 @@ static int sn_sfc_bmi2_ready(void) {
     if (g_sfc_dispatch >= 0) return g_sfc_dispatch;
     int bmi2 = 0;
 #if defined(_WIN32) && (defined(__x86_64__) || defined(_M_X64))
-    #include <intrin.h>
     int cpuInfo[4] = {0};
     __cpuidex(cpuInfo, 7, 0);
     bmi2 = (cpuInfo[1] & (1 << 8)) ? 1 : 0;
