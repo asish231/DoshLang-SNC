@@ -23,9 +23,101 @@ str? nick = none
 str shown = nick otherwise "anon"
 ```
 
-## Control & Pattern Matching
+## Lexical & Formatting Rules
 
-`if` / `else if` / `else`, `while`, counted `for`, `for in`, `match`, `stop`, `skip`, `defer`.
+SNlang is designed with a **free-form, whitespace-tolerant** grammar:
+- **No Semicolons**: Statements do not terminate with semicolons `;`. Delimitation is governed by structural tokens, closing braces `}`, keywords, or comma separators.
+- **Mandatory Curly Braces `{}`**: All blocks (`if`, `while`, `for`, `nursery`, `wave`, `blueprint`) require curly braces `{}`. Single-line unbraced bodies (like C's `if (x) foo();`) are prohibited.
+- **Whitespace Insensitivity**: Indentation is non-significant (unlike Python). Whitespace (spaces, tabs, newlines) is freely used for formatting or omitted around operators and punctuation.
+- **Token Boundaries**: Whitespace is required only between adjacent alphanumeric identifiers or keywords (e.g. `int x`, not `intx`; `for x in list`, not `forxinlist`). Around punctuation and operators, whitespace is 100% optional (`a+b` is identical to `a + b`).
+- **Compound Operators**: Multi-character operators (`+=`, `-=`, `*=`, `/=`, `==`, `!=`, `<=`, `>=`) must not have interior spaces (`+=`, not `+ =`).
+
+## Control Flow & Loop Mechanics
+
+SNlang provides three core iteration constructs: **Counted Loops**, **Iterator Loops**, and **While Loops**.
+
+### 1. Counted `for` Loop (Uses Commas, Not Semicolons)
+
+> [!IMPORTANT]
+> Unlike C, Java, or C++ which use semicolons `for (init; cond; step)`, **SNlang's counted loop uses commas `,`**: `for (init, cond, step) { ... }`.
+
+Counted loops support both standard and zero-space compact formatting:
+
+```sn
+// Standard spaced formatting:
+for (int i = 0, i < 10, i += 1) {
+    print(i)
+}
+
+// Zero-space compact formatting (100% valid):
+for(int i=0,i<10,i+=1){
+    print(i)
+}
+```
+
+### 2. Iterator `for-in` Loop
+
+Traverse arrays, slices, and collections:
+
+```sn
+list<str> fruits = ["Apple", "Mango", "Banana"]
+
+for (fruit in fruits) {
+    print(fruit)
+}
+
+// Parentheses are optional for collection iterators:
+for fruit in fruits {
+    print(fruit)
+}
+```
+
+### 3. While Loop
+
+Conditional iteration:
+
+```sn
+int count = 10
+while (count > 0) {
+    print("Countdown: {count}")
+    count -= 1
+}
+
+// Compact variant:
+while(count>0){count-=1}
+```
+
+### 4. Loop Control: `stop` and `skip`
+
+SNlang uses `stop` (break) to immediately exit a loop and `skip` (continue) to jump to the next iteration:
+
+```sn
+for (int i = 0, i < 10, i += 1) {
+    if (i == 3) {
+        skip    // Skip iteration 3
+    }
+    if (i == 7) {
+        stop    // Terminate loop at 7
+    }
+    print(i)
+}
+```
+
+### 5. Conditionals: `if`, `else if`, `else`
+
+Condition expressions require parentheses; blocks require curly braces:
+
+```sn
+if (x > 100) {
+    print("Large")
+} else if (x > 10) {
+    print("Medium")
+} else {
+    print("Small")
+}
+```
+
+## Pattern Matching & Enums
 
 ### Algebraic Enums & Pattern Matching
 
