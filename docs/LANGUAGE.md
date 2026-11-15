@@ -482,4 +482,37 @@ fn main() {
 }
 ```
 
-See `examples/std_test.sn`. Full language reference: [SNLANG_SPEC.md](../SNLANG_SPEC.md).
+See `examples/std_test.sn`.
+
+## Advanced Systems & Non-von Neumann Features
+
+SNlang provides five advanced systems pillars for high-performance, deterministic, and bare-metal systems programming. For a complete guide with working examples and formal rules, see **[RABBIT_HOLE_FEATURES.md](RABBIT_HOLE_FEATURES.md)** and the **[Bare-Metal Architecture Suite](RFC_BAREMETAL_KERNEL_MASTER_SPEC.md)**.
+
+1. **Pinned Lanes & Region Blocks (`region { ... }`)**:
+   - Single-cycle bump allocation inside thread-local lanes.
+   - $\mathcal{O}(1)$ wholesale rollback on block exit; zero GC pauses and zero memory leaks.
+   - Checked region poset preventing inner pointers from escaping into outer scopes (`E-LANE-ESCAPE`).
+
+2. **Space-Filling Geometry Collections (`morton list` & `hilbert map`)**:
+   - Cache-oblivious 2D/3D Morton $Z$-curve layouts (`morton list<int, dims=[16, 16]>`) via hardware BMI2 (`PDEP`/`PEXT`) for stencil sweeps and matrices.
+   - Hilbert spatial maps (`hilbert map<int, int>`) with segment-advance bounding-box queries (`hilbert_box_first`/`next`).
+
+3. **Mathematically Confluent Concurrency (`lcell` & `wave { ... }`)**:
+   - Join-semilattices (Max HWM, Grow-Only Set, Last-Write-Wins) guaranteeing data-race freedom by construction (Theorem WS).
+   - Deterministic wave regions: `read_W(cell)` reads frozen capture $\kappa$, `contrib(cell, val)` stages offers, and `read_J(cell)` observes the atomically folded join on exit. Purity enforced via compiler rule `[E0812]`.
+
+4. **Salt $\varepsilon$ Formal Numeric Contracts (`requires`, `ensures`, `verified fn`)**:
+   - Static verification of integer intervals and difference bounds ($x - y \le c$) using Difference Bound Matrices (DBM) in $\mathcal{O}(|V|^3)$ time.
+   - Unprovable non-linear operations safely degrade to typed runtime assertions (`[E-0702]`) in standard functions or trigger compile error `[E0701]` in `verified fn`.
+
+5. **Differential Dataflow & Deterministic Tape (`zset`, `zfix`, `tape`)**:
+   - $\mathbb{Z}$-sets (`zset`) with exact retractions ($\oplus, \ominus$) for incremental $\mathcal{O}(|\Delta|)$ computation.
+   - Fixpoint brackets (`zfix`) evaluating recursive cyclic graphs with semi-naïve round evaluation and guaranteed termination.
+   - Append-only chronological execution ledgers (`tape`) with delta and checkpoint replay.
+
+6. **Bare-Metal & Freestanding Mode (`--freestanding`)**:
+   - Pluggable kernel memory provider ABI (`sn_set_memory_provider`) and panic handler (`sn_set_panic_handler`).
+   - Volatile MMIO device access (`mmio<T>`) with escape prohibition (`E-MMIO-ESCAPE`).
+   - Static interrupt safety (`irq fn`) with compile-time prohibition of allocation (`E-IRQ-ALLOC`) and blocking synchronization (`E-IRQ-BLOCK`).
+
+Full language reference: [SNLANG_SPEC.md](../SNLANG_SPEC.md).

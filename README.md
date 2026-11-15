@@ -66,7 +66,7 @@ fn main() {
 ./snc examples/std_test.sn -o t && ./t
 ```
 
-More: [docs/LANGUAGE.md](docs/LANGUAGE.md) · full reference [SNLANG_SPEC.md](SNLANG_SPEC.md)
+More: [docs/LANGUAGE.md](docs/LANGUAGE.md) · [docs/RABBIT_HOLE_FEATURES.md](docs/RABBIT_HOLE_FEATURES.md) (Advanced Systems Guide) · [Bare-Metal Kernel Architecture](docs/RFC_BAREMETAL_KERNEL_MASTER_SPEC.md) · full reference [SNLANG_SPEC.md](SNLANG_SPEC.md)
 
 ## Language tour (implemented)
 
