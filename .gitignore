@@ -28,9 +28,12 @@ packages/dist/
 # Editor extension build product (regenerable; optional)
 *.vsix
 
-# Scratch
+# Scratch & internal research
 /tmp/
 SELF_HOSTING_GAP_ANALYSIS.md
+SWARM_RABBIT_HOLE_MASTER_PROMPT.md
+WORKFLOW_APPROCH.md
+workflow_approch.md
 ./approch
 approch/
 approch/**
