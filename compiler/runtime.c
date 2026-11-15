@@ -2857,7 +2857,12 @@ static int g_sfc_dispatch = -1; /* -1 unresolved, 0 software, 1 BMI2 */
 static int sn_sfc_bmi2_ready(void) {
     if (g_sfc_dispatch >= 0) return g_sfc_dispatch;
     int bmi2 = 0;
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(_WIN32) && (defined(__x86_64__) || defined(_M_X64))
+    #include <intrin.h>
+    int cpuInfo[4] = {0};
+    __cpuidex(cpuInfo, 7, 0);
+    bmi2 = (cpuInfo[1] & (1 << 8)) ? 1 : 0;
+#elif (defined(__GNUC__) || defined(__clang__)) && (defined(__x86_64__) || defined(_M_X64))
     __builtin_cpu_init();
     bmi2 = __builtin_cpu_supports("bmi2") ? 1 : 0;
 #endif
