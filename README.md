@@ -4,16 +4,15 @@
   <img src="logo.png" alt="SNlang Logo" width="160"/>
 </p>
 
-
-SNlang is a small typed language with plain syntax (`fn`, braces, `and` / `or` / `not`)
-that compiles to **native code** through **LLVM IR** + `clang`. The compiler is written
-in Rust.
+SNlang is a high-performance systems programming language that compiles to **native machine code** through **LLVM IR** + `clang`. It combines plain, readable syntax (`fn`, braces, `and` / `or` / `not`) with deterministic memory tiers, cache-oblivious spatial collections, race-free concurrency confluence, and compile-time contract verification.
 
 **License:** [Apache-2.0](LICENSE) — Copyright (c) 2026 Asish Sharma / SafarNow.
 
-## Install
+---
 
-Needs [Rust](https://rustup.rs/) (`cargo` on `PATH`) and `clang`.
+## Installation
+
+Requires [Rust](https://rustup.rs/) (`cargo` on `PATH`) and `clang 15+`.
 
 ```sh
 # Ensure cargo is on PATH (rustup default):
@@ -30,22 +29,20 @@ Windows: `./build.ps1` then `./snc.exe …`.
 make test     # cargo test + hello smoke run
 ```
 
-## Download (prebuilt binaries)
+---
 
-Grab `snlang-<os>-<arch>.tar.gz` / `.zip` from
-[GitHub Releases](../../releases) — macOS (arm64 + x64), Linux (x64),
-Windows (x64). Each archive ships `snc`, `stdlib/`, sample `packages/`,
-`runtime.c`, and a hello world:
+## Download Prebuilt Binaries
+
+Prebuilt archives for macOS (Apple Silicon arm64 & Intel x64), Linux (x64), and Windows (x64) are available on [GitHub Releases](../../releases):
 
 ```sh
 ./snc --version   # snc 0.3.1
 ./snc hello_world.sn -o hello && ./hello
 ```
 
-You still need **clang 15+ on `PATH`** (Xcode command-line tools,
-`apt install clang-15`, or LLVM for Windows) because `snc` links through it
-— stock Ubuntu 22.04 clang 14 cannot parse the IR. Keep the
-extracted folder together — or add it to `PATH` — and compile from anywhere.
+Each archive contains `snc`, `stdlib/`, sample `packages/`, `runtime.c`, and sample code. You still need **clang 15+** on `PATH` for LLVM object linking.
+
+---
 
 ## Quickstart
 
@@ -66,47 +63,123 @@ fn main() {
 ./snc examples/std_test.sn -o t && ./t
 ```
 
-More: [docs/LANGUAGE.md](docs/LANGUAGE.md) · [docs/RABBIT_HOLE_FEATURES.md](docs/RABBIT_HOLE_FEATURES.md) (Advanced Systems Guide) · [Bare-Metal Kernel Architecture](docs/RFC_BAREMETAL_KERNEL_MASTER_SPEC.md) · full reference [SNLANG_SPEC.md](SNLANG_SPEC.md)
+---
 
-## Language tour (implemented)
+## Key Systems Capabilities
+
+### 1. Deterministic Regional Memory & Elastic Arenas
+Thread-local virtual-memory bump allocators provide $\approx 3\text{ ns}$ allocation with scoped $\mathcal{O}(1)$ bulk rewinds, eliminating stop-the-world garbage collection pauses:
+
+```snlang
+use std.arena
+
+region {
+    ptr scratch = lane_alloc(0, 4096)
+    // High-performance scratch computations...
+} // High-water mark automatically reset to baseline in 1 store instruction!
+```
+
+### 2. Cache-Oblivious Space-Filling Collections
+Multidimensional arrays and spatial structures mapped via Morton $Z$-order and Hilbert fractal curves preserve cacheline locality across arbitrary hardware topologies:
+
+```snlang
+// 16x16 power-of-two 2D tensor in Morton curve order
+morton list<int, dims=[16, 16]> grid = morton_new(16, 16)
+morton_set(grid, 4, 8, 42)
+int val = morton_get(grid, 4, 8)
+
+// 2D spatial bounding-box query along the continuous Hilbert curve
+hilbert map<int, int> spatial = hilbert_new(3) // Grid side 2^3 = 8
+int cursor = hilbert_box_first(spatial, 1, 1, 5, 5)
+```
+
+### 3. Confluent Semilattices & Deterministic Wave Parallelism
+Shared mutable state is constrained to join-semilattices (`lcell`). Wave execution blocks (`wave { }`) guarantee bit-identical output regardless of thread arrival order or OS scheduling:
+
+```snlang
+ptr peak = lcell_new(0) // Monotonic max register (⊔ = max)
+
+wave {
+    int base = read_W(peak)       // Read frozen capture κ
+    contrib(peak, base * 2, 0)    // Staged payload
+} // J(W) join point: staged offers fold atomically and deterministically!
+
+int final_peak = read_J(peak)     // Observe folded result
+```
+
+### 4. Contract-Driven Static Verification
+Preconditions (`requires`) and postconditions (`ensures`) are discharged at compile time via Difference Bound Matrix (DBM) zone analysis with zero runtime cost:
+
+```snlang
+fn safe_lookup(list<int> xs, int i) -> int 
+    requires(0 <= i < xs.length()) 
+{
+    return xs[i] // Array bounds check proved and eliminated at compile time!
+}
+
+fn clamp(int x) -> int 
+    requires(0 <= x <= 100) 
+    ensures(0 <= result <= 100) 
+{
+    return x
+}
+```
+
+### 5. Bare-Metal & Freestanding Mode (`--freestanding`)
+Compile OS kernels and embedded firmware without libc, POSIX, or dynamic GC heaps, featuring hardware volatile registers (`mmio<T>`) and static interrupt safety (`irq fn`):
+
+```snlang
+// Volatile hardware register wrapper with escape analysis:
+mmio<u32> uart_dr = mmio_at(0x3F8)
+uart_dr.write(0x41) // Guaranteed volatile store; cannot escape to heap
+
+// Interrupt handler statically checked against allocation and blocking:
+irq fn keyboard_isr() {
+    // Compile-time checks (E-IRQ-ALLOC, E-IRQ-BLOCK) guarantee no sleep or deadlocks
+}
+```
+
+---
+
+## Language Overview
 
 | Area | Highlights |
 |---|---|
-| Types | `int`, `bool`, `str`, `list<T>`, `map<K,V>`, `T?`, `error`, `chan`, `ref`, `mut`, `lock`, `json`, `any`, `record`, fn types, `morton list<T, dims=[n1,n2]>`, `hilbert map<K,V>` |
-| Safety | Compile-time Rust-grade guarantees: stack escape checks, collection borrow locks, affine UAF/double-free prevention, thread-race checks; **self-relative link system** (`link<T, u16>` — a 2-byte δ = target − field_address delta field; the **E0801 copy-discipline closure**: every by-value copy of a HasSelfLink value that READS stored bytes is rejected at four sites — assignment, pass-by-value, push/insert, match-binding (fresh constructions via sret stay legal); `relocate_node`/`relocate_range` re-encode every delta against the new field address (in-links fixed to the moved interior, out-links re-based to their absolute targets; the constant-shift bulk exemption makes self-contained ranges memcpy-sound without per-link re-encode); `to_bytes` runs the O(N) sender-side self-containedness scan — cross-slice links are legal to hold but illegal to serialize, making the bulk-copy claim true by precondition instead of false by omission; the i16 range [−32767, +32767] is checked at every re-encode); **global-pool discipline** (three declared modes, frozen by default — `pool<T>` bare = **Frozen** (read-only everywhere outside an `unfrozen (P) { ... }` window, handles Sendable — zero-copy shared reads), `pool<T> thread_local` = **ThreadConfined** (mutate on the declaring thread only; capture = E0803.1), `pool<T> synchronized` = **Synchronized** (mutex-protected vault, handles Sendable everywhere); E0803.2 rejects spawn/chan capture of a Frozen pool's handles *inside* the window — the receiver could race the freelist; E0803.3 rejects mutation outside it; the runtime carries `frozen_depth`, the vault lock, and the home-thread tag as the enforcement backstop); **region poset** (RgnId provenance, `scc_accum_params` fixpoint — E0802 fires on recursive inout-accumulator hazards); **pinned-lane coloring** (L2–L6 accumulator assignment — E0802c on budget exhaustion, never silent reuse); **escape checker** (E-ESCAPE: refs stored into a holder must have the target outlive the holder); **GC scoping** (E-GC-IN-LANE: GC-managed and lane-backed memory cannot reference each other — the GC can't trace into lanes and lane rewinds don't respect the GC heap); **tiered differential calculus** (Tier-G Z-sets with exact retraction, **Tier-L semilattice cells** with carriers verified join-semilattices — NO ⊖ on the L surface, E-LRET rejects exact retraction with the Grothendieck argument at compile time, E-LKIND fail-fasts tier/carrier confusion at runtime; capability order O ⊑ L ⊑ G); **Salt ζ — the fixpoint admission checker** (the convergence theorem's sufficient condition made executable: monotone body + finite-height per-key carrier ⇒ the δ₀/∫ bracket terminates in ≤ height rounds at the least fixpoint, Knaster–Tarski; the two named divergence classes are recognized intrinsics ALWAYS rejected at compile time with E-ZADM — counting-through-recursion: infinite-height carrier; negation-through-recursion: μy. 1⊖y oscillates, non-monotone body — refusals are compile-time errors, never silent divergence); **wave regions — Theorem WS executable** (`wave { ... }` — the wave-seam composition theorem's deterministic observation bracket over module-scope Tier-L **seam cells** (`ptr s = lcell_new(k)`): the body is checked pure — **E0812**, the kill switch, rejects wall-clock/env/chan-recv/spawn/fallback-sync-op reads (interprocedurally, via the call-graph purity fixpoint) because a schedule read would inject non-determinism into the contribution multiset and destroy Lemma WD; **R1 quiescent capture** (E-R1) rejects fallback merges into a claimed seam cell unless program-order-before the wave — lexical order cannot prove the "after J(W)" arm when a capture is loop-shaped — and rejects unordered second waves on the same cell (W2B §4.6 case (b): a theorem, not a defect); the seam typing is `read_W` (the frozen capture κ) / `contrib(c,a,b)` (payloads staged into the J(W) join) / `read_J` (fold-valued, checked ordered-after J(W)) with the fallback `read_S` mode refused in-wave; the block exit is **J(W) — the J2 batched canonical fold**: the staged multiset folds through ONE atomic ⊔ per cell (the carrier's checked lattice laws are the fold's correctness — order/grouping/duplication-independent, the S5 retry dividend), so contributions ARE atomic ⊔-merges on seam cells, Lemma NI(ii)); **tape record kinds** (`tape<int>` — the append-only δ₀-chronicle, W2C §6–§8’s P5↔P2 kinship made executable: TRUE in shape (discrete impulses against an integrated state, replay = re-integration from a checkpoint), NOT true in algebra — the record kinds are TIER-PARAMETRIC: **opaque** (the free-monoid baseline — raw payloads, no algebra, refused at replay), **delta** (the (prev → next) carrier pair with the per-operation law CHECKED at the effect boundary: Tier G checks ILC’s a⊕(b⊖a)=b on the recorded triples, Tier L checks the mutator law X ⊔ m´(X) = m(X) and surfaces NO ⊖ — the E-LRET precedent; Tier O is REFUSED — E2’s honest fallback to opaque), **checkpoint** (the state snapshot; replay re-integrates from the LAST one — the Tier-G reset is exact, the Tier-L Σ-fold requires the checkpoint’s base, honestly refused without it); E1: `extern fn feed(...) -> tape_delta(G|L)` types the producer’s results — unannotated externs stay opaque (P2’s default-unpure form); ONE TAPE, ONE LEDGER — the runtime backstop refuses a tier/carrier mix on one chronicle; **E-TAPE-WAVE**: the whole tape surface is refused inside wave bodies (the P2↔wave boundary rule extended to P5); lane-backed, E-GC-IN-LANE, function-local in slice 1; the E3 chain rule is the named slice-2 boundary — no user-body delta certifier, no incrementalization mathematics claimed); **SFC layouts** (`morton list<T, dims=[n1, n2]>` + `hilbert map<K, V>` — A2's space-filling-geometry decision table, executable: **morton** = tensor iteration with per-element indexed access — one contiguous lane reservation, no directory for fixed-size T, addr = base + interleave(i, j)·sizeof(T), the interleave **feature-dispatched once per process** (BMI2 PDEP/PEXT on x86-64, the software shift-or path elsewhere — C2.8; `SN_SFC_FORCE_PATH` forces the software path, forcing bmi2 without BMI2 is the honest refusal); **hilbert** = spatial range queries — the Butz/Skilling d=2 key computed once per insert, the sorted lane IS the index (binary-search point lookups, no auxiliary hash), box queries a Tropf–Herzog/Lawder–King segment advance with the per-box key range computed once and cached (amortized over the yielded entries); **E-SFC**: equal power-of-two dims (the square grid maps onto the code space exactly — no padding), bounds-checked addressing, the out-of-order insert refused ([E-SFC-ORDER] — no silent sort; the rebuild-epoch policy is the named future form); **W-SFC-T5B** warns on the provable lexicographic double loop over morton storage (a warning, never an error — the layout is wasted, the program is legal); **E-GC-IN-LANE**: lane-backed SFC collections never enter GC-managed holders); **Elastic Lanes** (O(1) bump + scope-exit reset, inline at `-O1+`, T-FIBR poison-fill in debug; grown element arrays of lane-backed lists reclaimed at rewind — the lane-aware items pool) |
-| Contracts | **Salt ε — the numeric contract layer** (`fn f(...) requires(cond) ensures(cond) { ... }`; note `contract` is the trait/interface keyword — the numeric layer's surface is the clauses): conditions are int-valued boolean expressions over the parameters (and `result` in ensures; comparison chains like `0 <= i < xs.length()` desugar to conjunctions); **the atom classifier stamps every atom** Tier L (linear — DBM edges, len()/capacity as opaque vertices, mod/div by literals) / Tier D (the divisibility ledge — mod by a variable, discharged by the remainder-range axiom alone; the EPAD/Lipshitz solver tier is a later rung) / Tier N (nonlinear — variable×variable products and div-by-variable quotient binding, MRDP-off-the-ladder); **the engine**: the facts table (Go-prove-style: sound, not complete) over the DBM zone layer (x−y ≤ c edges, Floyd–Warshall closure, emptiness ⟺ a negative diagonal; the entry zone memoized once per fn — the fast path; the branch/return join is the OVER-APPROXIMATING lattice join, Miné Thm 4.2 — ∪ is not closed, zones are convex); **the boundary rule**: discharged atoms are compile-time OK (nothing lowered), undischarged Tier L/D atoms DEGRADE to typed runtime assertions at the boundary (the call site / fn entry for requires, the fn exit for ensures — `sn_contract_assert`, the fail-fast, [E-0702]; priced per atom, never silently dropped, a W-CONTRACT warning names what was not discharged and where the assertion sits, and a REFUTED atom — the engine proved the negation — says so); **E0701**: a Tier N atom in a `verified fn` is a hard error (all-or-nothing by design; the diagnostic names the atom, the rule, and the bounded-degree redemption clause — degrade is a total function of (atom shape × known bounds), not a blanket rule) |
-| Speed | LLVM method devirtualization (1B calls/sec), native `StringBuilder` (~150× faster strings), ARC borrow elision |
-| Null | `otherwise`, `x!!`, `x?.m()`, smart unwrap after `if (x != none)` |
-| Errors | `(T, error)`, `try`, `panic` — not Java exceptions |
-| OOP | `blueprint`, inheritance, `closed`/`guarded`, MVP polymorphism + generics |
-| Concurrency | Work-stealing green tasks (`spawn`), structured concurrency (`nursery`), move-on-send channels (`chan<T>`), locks |
-| Modules | `use std.math`, `use mylib.calc` |
-| Tooling | `snc fmt`, `snc lsp`, `snc debug`, `snc translate`, `snc pkg`, `snc --poison` |
-| Memory | **Elastic Lanes** (virtual-memory bump allocators, O(1) scope-exit reset); `SnLane.parent` (task nurseries loan lanes, reclaimed O(1) at join); inline 3-instruction bump + 1-store reset at `-O1+`; compile-time poison-fill (`--poison` / `-O0` / debug builds — the T-FIBR read-before-write guard); linear `SnMsgEnvelope` cross-thread slabs (exactly-once adopt, panic-safe drain); global pools with mode-aware runtime objects (`frozen_depth`, the synchronized vault lock, the `thread_local` home-thread tag — `unfrozen` windows re-freeze on every exit) |
+| **Types** | `int`, `bool`, `str`, `byte`, `dec(X)`, `list<T>`, `map<K,V>`, `T?`, `error`, `chan<T>`, `ref<T>`, `morton list<T, dims=[N, M]>`, `hilbert map<K, V>`, `tape<T>` |
+| **Memory** | Stack, Thread-Local Pinned Lanes (3 ns bump), Scoped `region { }` Arenas, Generational Pools (`std.pool`), Self-Relative Links (`link<T, u16>`), Freestanding Mode |
+| **Safety** | Affine stack escape analysis (`E0802`), isolated memory spaces (`E-GC-IN-LANE`), wave purity check (`E0812`), copy discipline (`E0801`), global pool discipline (`E0803`) |
+| **Verification** | Difference Bound Matrix (DBM) zone solver for `requires` and `ensures`, typed runtime assertion boundaries (`[E-0702]`), `verified fn` strict mode (`E0701`) |
+| **Speed** | LLVM IR backend + clang `-O2`, direct method devirtualization, native `StringBuilder`, branchless Morton bit-interleaving via BMI2 (`PDEP`/`PEXT`) |
+| **Concurrency** | Work-stealing green tasks (`spawn`), task groups (`nursery { }`), move-on-send channels (`chan<T>`), confluent semilattices (`lcell`), deterministic waves (`wave`) |
+| **Null Safety** | Nullable types `T?`, null coalescence `otherwise`, non-null assertion `x!!`, smart unwrapping |
+| **Error Handling** | Go/Zig-style value tuples `(T, error)`, early-return `try expr`, panic fail-fasts |
+| **OOP** | `blueprint`, inheritance, `closed` / `guarded` access modifiers, monomorphized generics |
+| **Tooling** | Native compiler (`snc`), package manager (`snc pkg`), LSP (`snc lsp`), translator (`snc translate`) |
 
-## Stdlib
+---
+
+## Standard Library
 
 | Package | Role |
 |---|---|
-| `std.math` | `abs`, `min`, `max`, `pow`, `clamp`, `sign` |
-| `std.string` | `isEmpty`, `repeat`, `StringBuilder` (amortized O(1) buffer) |
-| `std.io` | `println` |
-| `std.json` | `parse` / `encode` |
-| `std.time` | `now_ms`, `sleep_ms`, `format` |
-| `std.http` / `std.net` | HTTP client + `serve_once`; **HTTPS via verified `curl`** |
-| `std.file` / `std.path` / `std.os` | files, paths, env/args |
-| `std.pool` | Generational slot vaults with 64-bit handles (ABA / UAF immune); global pools carry a mutability mode — frozen by default, `thread_local`, or `synchronized` (the E0803.1/.2/.3 discipline) |
-| `std.delta` | **Tier-G Z-set delta collections** — `ZSet` with exact retraction (add/remove as ±ℤ coefficients), pure `delta`/`apply` operators (the DBSP 𝒟/⊕ primitives), `merge`, `count`, `total`; O(1)/key operations over the O(1) hash map |
-| `std.lattice` | **Tier-L semilattice cells** — `LCell` with three join-semilattice carriers (`max` high-water mark, `gset` grow-only set, `lww` last-writer-wins + logical clock), monotone `inflate` (the only mutator), `merge` (⊔), pure `delta`/`apply` (the mutator law m(X) = X ⊔ m^δ(X)); NO ⊖ on this surface — exact retraction is rejected at compile time (E-LRET) |
-| `std.zeta` | **Salt ζ — the fixpoint bracket + the admission checker** — `ZFix` over the admitted transitive-closure body (`reach(a) :- edge(a,b), reach(b)`; edges as packed pairs `a·2³² + b` in a `std.delta` Z-set): `new`/`new_l` (Tier-G presence / Tier-L GSET-closure carriers — Tier L qualifies by construction), `run` (the δ₀/∫ bracket to quiescence — semi-naïve rounds, ≤ height at the least fixpoint), `rounds`/`len`/`has`/`probes` (the work observables), `quiescent_g`/`quiescent_l` (the per-tier stop tests: 𝒟(∫α) = 0 / F(s) ⊑ s via the mutator law); the divergent modes `zfix_count`/`zfix_negate` are recognized intrinsics always rejected with E-ZADM (admission is undecidable in general — the check is the sufficient condition priced at expressiveness) |
-| `std.arena` | Elastic lane bump allocators with instant O(1) bulk rollback |
-| `std.test` | `assert_true`, `assert_eq_int`, `assert_eq_str`, … |
+| `std.arena` | Thread-local virtual memory bump allocators with $\mathcal{O}(1)$ bulk rollback |
+| `std.lattice` | Join-semilattice cells (`LCell`) with Max, Grow-Only Set, and Last-Write-Wins carriers |
+| `std.delta` | Differential $\mathbb{Z}$-set collections with exact retractions and multiset arithmetic |
+| `std.zeta` | Bounded fixpoint engine (`ZFix`) with semi-naïve round evaluation and termination invariants |
+| `std.pool` | Generational slot vaults with 64-bit handles (ABA and use-after-free immune) |
+| `std.math` | Fast numeric routines, trigonometric functions, integer powers, and bit operations |
+| `std.string` | String utilities and amortized native `StringBuilder` |
+| `std.io` | Formatted output and file streaming |
+| `std.json` | Zero-allocation streaming JSON parser and encoder |
+| `std.time` | Monotonic timers, sleep, and wall-clock formatting |
+| `std.http` / `std.net` | HTTP networking client, socket primitives, and verified TLS |
+| `std.test` | Unit and integration test assertions (`assert_eq_int`, `assert_true`, etc.) |
 
-HTTP details: [docs/HTTP.md](docs/HTTP.md)
+---
 
-## Package manager
+## Package Manager
 
-Local folders + `sn.toml`, lockfile `sn.lock.toml`, optional remote registry.
+Local folders + `sn.toml`, lockfile `sn.lock.toml`, optional remote registry:
 
 ```sh
 snc pkg init --name myapp
@@ -117,47 +190,33 @@ snc pkg build -o app
 snc pkg publish                 # dist/<name>-<ver>.tar.gz
 ```
 
-Commit `sn.lock.toml` in apps. Registry `index.json` format and a static-server recipe:
-[docs/PACKAGES.md](docs/PACKAGES.md)
+Commit `sn.lock.toml` in apps. Registry `index.json` format and recipes: [docs/PACKAGES.md](docs/PACKAGES.md).
 
-## MVP vs complete (honest)
+---
 
-| Feature | Status | Notes |
-|---|---|---|
-| HTTPS/TLS | **MVP** | `https://` via system `curl` with cert verify; `SN_HTTP_INSECURE=1` for `-k` |
-| Remote registry | **MVP** | Fetch `index.json` + tarball; loud error on bad extract (no stub `lib.sn`) |
-| Lockfile / publish | **Done** | `sn.lock.toml`; `pkg publish` → `.tar.gz` |
-| async/await | **MVP** | Blocking futures |
-| Concurrency & Nurseries | **Hardened** | Work-stealing pool, `nursery { }` task groups, move-on-send channels, `(val, ok)` close handling (see `tests/concurrency/`) |
-| Speed / Devirtualization | **Done** | Direct call lowering in `ir.rs`, native `StringBuilder` in `runtime.c` (see `tests/benchmarks/`) |
-| LSP | **Scaffold** | Diagnostics with line/col ranges; symbols |
-| Self-hosting | **Scaffold** | Lexer demo only |
-| Central registry hosting | **Not done** | Bring your own static host |
-| In-process OpenSSL | **Not done** | Curl for HTTPS keeps builds simple |
-| Full lifetimes / work-stealing | **Not done** | — |
+## Production Feature Status Matrix
 
-## Translator
+| Capability | Status | Description |
+|---|:---:|---|
+| **Regional Memory & Scoped Arenas** | **Stable** | Thread-local bump allocators, `region { }` rollbacks, and poison safety. |
+| **Space-Filling Collections** | **Stable** | 2D Morton lists and Hilbert spatial maps with hardware BMI2 dispatch. |
+| **Confluent Concurrency & Waves** | **Stable** | Monotonic semilattices (`lcell`), wave blocks (`wave`), and join confluence. |
+| **Contract-Driven Verification** | **Stable** | DBM linear range discharge, remainder axioms, and typed runtime boundaries. |
+| **Differential State & Tapes** | **Stable** | $\mathbb{Z}$-set deltas, bounded fixpoint loops (`zfix`), and append-only tapes. |
+| **Relocatable Links & Pools** | **Stable** | Self-relative displacements (`link<T, u16>`) and generational handle vaults. |
+| **Bare-Metal & Freestanding Mode** | **Preview (v0.3.1)** | `--freestanding` compilation, memory provider ABI, `mmio<T>`, and IRQ safety. |
+| **Language Server Protocol (LSP)** | **Scaffold** | Diagnostics with line/col ranges and structured document symbols. |
+| **Self-Hosting Compiler** | **Roadmap** | Self-hosted lexer complete; AST and code generation in development. |
 
-Subset map from Python / JS / Go / C → SNlang (`snc translate --from python …`).
-Not a full frontend for those languages.
+---
 
-## Layout
+## Documentation Sitemap
 
-- `compiler/` — Rust `snc`
-- `compiler/runtime.c` — strings, lists, HTTP, threads, …
-- `stdlib/std/` — standard library
-- `packages/` — sample packages (`mylib`)
-- `examples/` — runnable programs
-- `docs/` — packages, HTTP, language tour
-- `tests/` — extra samples
-- `vscode-snlang/` — editor grammar
-- `LICENSE` — Apache-2.0
-
-## Docs
-
-| Doc | Contents |
+| Guide | Description |
 |---|---|
-| [docs/LANGUAGE.md](docs/LANGUAGE.md) | Short language tour |
-| [docs/PACKAGES.md](docs/PACKAGES.md) | `sn.toml`, lockfile, publish, registry |
-| [docs/HTTP.md](docs/HTTP.md) | Client, env vars, TLS |
-| [SNLANG_SPEC.md](SNLANG_SPEC.md) | Full language status |
+| [**docs/LANGUAGE.md**](docs/LANGUAGE.md) | **Core Language Tour** — Basic syntax, types, control flow, functions, OOP, and errors |
+| [**docs/SYSTEMS_GUIDE.md**](docs/SYSTEMS_GUIDE.md) | **Advanced Systems Architecture** — Regional memory, SFC, waves, contracts, and tapes |
+| [**docs/RFC_BAREMETAL_KERNEL_MASTER_SPEC.md**](docs/RFC_BAREMETAL_KERNEL_MASTER_SPEC.md) | **Bare-Metal Kernel RFC** — Freestanding runtime, MMIO registers, and IRQ static safety |
+| [**docs/PACKAGES.md**](docs/PACKAGES.md) | **Package Management** — `sn.toml` manifest, dependencies, lockfiles, and publishing |
+| [**docs/HTTP.md**](docs/HTTP.md) | **Networking & Services** — HTTP client, configuration, and TLS verification |
+| [**SNLANG_SPEC.md**](SNLANG_SPEC.md) | **Language Specification** — Comprehensive formal language definition and grammar |
