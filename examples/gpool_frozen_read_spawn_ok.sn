@@ -1,0 +1,27 @@
+// SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): frozen-read
+// correctness end-to-end — insert via the window, then read from a
+// SPAWNED TASK. The window restores single-thread, structured,
+// capture-blocked mutation; at its exit the pool re-freezes and any
+// number of threads may hold handles (no legal write path exists, so
+// no thread can corrupt or race the freelist).
+//
+// This file is a RUN golden case (tests/golden.rs).
+
+pool<int> gdata = pool_new<int>(64)
+
+fn main() {
+    int h1 = 0
+    int h2 = 0
+    unfrozen (gdata) {
+        h1 = gdata.insert(7)
+        h2 = gdata.insert(11)
+    }
+    chan<int> ch
+    spawn {
+        int a = gdata.get(h1)
+        int b = gdata.get(h2)
+        ch.send(a + b)
+    }
+    print(ch.receive())        // 18
+    print(gdata.len())         // 2
+}

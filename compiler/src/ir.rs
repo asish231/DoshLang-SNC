@@ -400,6 +400,20 @@ pub fn lower(programs: &[Program], db: &CheckDb, files: &[SourceFile]) -> IrModu
         }
         globals.push(build_vtable(db, name));
     }
+    // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the global pools'
+    // runtime slots. Module-level statements were check-only before
+    // this wave; the global-pool discipline makes the declared pool a
+    // real runtime object: `@sn_g_{name}` holds the pool pointer,
+    // constructed by main's entry (sn_pool_new_mode with the declared
+    // mode). Sorted for deterministic emission; the naming follows the
+    // lvalue_addr convention (@sn_g_{nm}).
+    {
+        let mut names: Vec<&String> = db.global_pools.keys().collect();
+        names.sort();
+        for name in names {
+            globals.push(format!("@sn_g_{name} = internal global ptr null"));
+        }
+    }
     IrModule {
         strings,
         functions,
@@ -592,6 +606,45 @@ fn lower_fn(
         }
         cx.locals.insert(p.name.clone(), (an, t));
     }
+    // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): main's entry is
+    // where module-level GLOBAL POOLS are constructed. Module-level
+    // statements were check-only before this wave (no initializer ever
+    // ran); the global-pool discipline makes the pool a real runtime
+    // object: each `@sn_g_{name}` slot (emitted into IrModule.globals
+    // by the module loop) is filled here with sn_pool_new_mode — the
+    // mode the declaration carried (frozen/thread_local/synchronized).
+    // Ordering: before any body statement so a top-of-main `unfrozen`
+    // window sees a constructed pool.
+    if bp.is_none() && f.name == "main" {
+        let mut names: Vec<(&String, &crate::check::GlobalPoolMode)> =
+            db.global_pools.iter().map(|(n, m)| (n, m)).collect();
+        names.sort_by(|a, b| a.0.cmp(b.0));
+        for (name, mode) in names {
+            let t = db.globals.get(name).cloned().unwrap_or(Type::Pool(Box::new(Type::Int)));
+            let elem = match &t {
+                Type::Pool(e) => e.clone(),
+                _ => Box::new(Type::Int),
+            };
+            let kind = if elem.is_ptr() || matches!(*elem, Type::Optional(_)) { 1i64 } else { 0i64 };
+            let size = elem.abi_size();
+            let mode_int = match mode {
+                crate::check::GlobalPoolMode::Frozen => 0,
+                crate::check::GlobalPoolMode::ThreadConfined => 1,
+                crate::check::GlobalPoolMode::Synchronized => 2,
+            };
+            let r = cx.t();
+            cx.line(&format!(
+                "{r} = call ptr @sn_pool_new_mode(i64 {kind}, i64 {size}, i64 {mode_int})"
+            ));
+            // DIFF-4 (Impl-O): a global pool is an immortal module-scoped
+            // object — register it as a permanent GC root (the pools are
+            // gc_track'd, but the only reference is this LLVM global,
+            // invisible to the precise-root pushes; without registration
+            // an unlucky gc_collect sweeps the pool mid-program).
+            cx.line(&format!("call void @sn_gc_register_global(ptr {r})"));
+            cx.line(&format!("store ptr {r}, ptr @sn_g_{name}"));
+        }
+    }
     for s in &f.body {
         cx.stmt(s);
     }
@@ -646,6 +699,7 @@ impl Cx<'_> {
             | Stmt::Region { span, .. }
             | Stmt::NurseryBlock { span, .. }
             | Stmt::Frozen { span, .. }
+            | Stmt::Unfrozen { span, .. }
             | Stmt::Asm { span, .. } => span,
             Stmt::NestedFn(_) => return None,
         };
@@ -679,6 +733,7 @@ impl Cx<'_> {
             | Stmt::Region { span, .. }
             | Stmt::NurseryBlock { span, .. }
             | Stmt::Frozen { span, .. }
+            | Stmt::Unfrozen { span, .. }
             | Stmt::Asm { span, .. } => span,
             Stmt::NestedFn(_) => return,
         };
@@ -886,7 +941,7 @@ impl Cx<'_> {
                 self.expr(e);
             }
             Stmt::Decl {
-                names, value, ty, ..
+                names, value, ty, mode, ..
             } => {
                 if names.len() == 1 {
                     let name = &names[0];
@@ -923,6 +978,37 @@ impl Cx<'_> {
                                 self.concrete_types.insert(name.clone(), concrete);
                             }
                         }
+                        // SWARM RABBIT HOLE — Wave 10 / DIFF-4
+                        // (Impl-O): a LOCAL pool carrying a mode
+                        // annotation (`pool<T> thread_local` /
+                        // `synchronized`; the checker guarantees the
+                        // initializer is `pool_new`) constructs with
+                        // sn_pool_new_mode so the runtime object
+                        // carries the mode (home-thread tag / vault
+                        // lock). Bare pool_new keeps the frozen
+                        // default (sn_pool_new).
+                        let annotated_pool_init = matches!(t, Type::Pool(_))
+                            && *mode != crate::ast::PoolMode::Frozen
+                            && matches!(&v.kind, ExprKind::Call { callee, .. }
+                                if matches!(&callee.kind, ExprKind::Ident(f) if f == "pool_new"));
+                        if annotated_pool_init {
+                            let elem = match &t {
+                                Type::Pool(e) => e.clone(),
+                                _ => Box::new(Type::Int),
+                            };
+                            let kind = if elem.is_ptr() || matches!(*elem, Type::Optional(_)) { 1i64 } else { 0i64 };
+                            let size = elem.abi_size();
+                            let mode_int = match mode {
+                                crate::ast::PoolMode::ThreadConfined => 1,
+                                crate::ast::PoolMode::Synchronized => 2,
+                                crate::ast::PoolMode::Frozen => 0,
+                            };
+                            let r = self.t();
+                            self.line(&format!(
+                                "{r} = call ptr @sn_pool_new_mode(i64 {kind}, i64 {size}, i64 {mode_int})"
+                            ));
+                            self.line(&format!("store ptr {r}, ptr {an}"));
+                        } else {
                         // SWARM RABBIT HOLE — Wave 8 (Impl-I), DIFF-1
                         // Rule 1b / W2A §1.3: the pinned-lane feed. When
                         // the checker pre-colored this local onto a
@@ -949,6 +1035,7 @@ impl Cx<'_> {
                             let (vr, _) = self.coerce(vr, &vt, &t);
                             self.line(&format!("store {} {vr}, ptr {an}", llty(&t)));
                         }
+                        } // (the DIFF-4 annotated-pool init's else arm)
                     } else if matches!(t, Type::Record(_)) {
                         // stack record default-init to zero
                     } else if t == Type::Lock {
@@ -1631,6 +1718,35 @@ impl Cx<'_> {
                     self.line("call void @sn_lane_unfreeze(i64 0)");
                 }
             }
+            // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the
+            // `unfrozen (P) { ... }` window's lowering — Stmt::Frozen's
+            // shape (ir.rs:1618) with the POOL's runtime freeze
+            // discipline instead of the lane's: enter =
+            // sn_pool_unfreeze(P) (the additive frozen_depth++ on
+            // SnPool; debug-mode enforcement of the window), body,
+            // exit = sn_pool_freeze(P). `self.terminated` handles the
+            // early-return unwind (the Frozen lowering's guarantee);
+            // panic unwinds re-freeze in the runtime's fatal path — a
+            // panicked program never resumes, so the only escape the
+            // window must close is the structured one. The pool
+            // pointer is LOADED from its slot (the alloca for a local
+            // pool, @sn_g_{n} for a global one — lvalue_addr resolves
+            // both, and each is a ptr-to-slot).
+            Stmt::Unfrozen { pool, body, .. } => {
+                let (pa, _) = self.lvalue_addr(&Expr {
+                    kind: ExprKind::Ident(pool.clone()),
+                    span: Span::dummy(),
+                });
+                let pv = self.t();
+                self.line(&format!("{pv} = load ptr, ptr {pa}"));
+                self.line(&format!("call void @sn_pool_unfreeze(ptr {pv})"));
+                for s in body {
+                    self.stmt(s);
+                }
+                if !self.terminated {
+                    self.line(&format!("call void @sn_pool_freeze(ptr {pv})"));
+                }
+            }
             Stmt::Guard { cond, else_body, .. } => {
                 let (c, _) = self.expr(cond);
                 let c1 = self.as_i1(c);
@@ -1909,6 +2025,19 @@ impl Cx<'_> {
                     })
                 } else if self.db.blueprints.contains_key(n) {
                     (n.clone(), Type::Blueprint(n.clone()))
+                } else if let (Some(t), true) = (
+                    self.db.globals.get(n).cloned(),
+                    self.db.global_pools.contains_key(n),
+                ) {
+                    // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O):
+                    // the global pool object's read — the @sn_g_{n} slot
+                    // (constructed at main's entry) holds the pool
+                    // pointer; every use loads it. Module-level reads
+                    // of anything else remain check-only (the pre-wave
+                    // behavior).
+                    let v = self.t();
+                    self.line(&format!("{v} = load ptr, ptr @sn_g_{n}"));
+                    (v, t)
                 } else {
                     (n.clone(), Type::Named(n.clone()))
                 }
@@ -5657,6 +5786,11 @@ fn walk_stmt(s: &Stmt, out: &mut Vec<String>) {
         | Stmt::Region { body, .. }
         | Stmt::NurseryBlock { body, .. }
         | Stmt::Frozen { body, .. }
+        // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the window
+        // body's idents are captured (the pool itself is a global —
+        // not in `locals`, so spawn_block never boxes it; the body's
+        // locals are).
+        | Stmt::Unfrozen { body, .. }
         | Stmt::SpawnBlock { body, .. } => collect_idents(body, out),
         Stmt::Guard { cond, else_body, .. } => {
             walk_expr(cond, out);

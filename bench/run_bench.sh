@@ -276,6 +276,59 @@ if [ -n "${ZFIX_ONLY:-}" ]; then
     exit 0
 fi
 
+# ---------- gpool rows (Wave 10, Impl-O) ----------
+# bench/gpool_bench.sn — the global-pool discipline's per-op price
+# (SWARM RABBIT HOLE, DIFF-4; kills G1 §1 A6c). Rows: the frozen read
+# (the zero-lock shared read), the unfrozen-window mutation (the
+# freeze/unfreeze pair amortized over N ops), the synchronized set
+# (the vault mutex around the checked write), the synchronized
+# insert+remove (the locked freelist mutation — the op the modes
+# exist to serialize), and the thread_local insert+remove (the
+# home-thread tag, no lock). N=1M ops/round, every phase >= 100x the
+# ms clock (the W2F discipline); every row prints a deterministic
+# checksum. The honest claim: the frozen default is the zero-cost
+# path; synchronization prices what it buys. Results:
+# bench/RESULTS_GPOOL.md.
+# GP_ONLY=1 ./run_bench.sh runs just these rows.
+gpool_rows() {
+    echo "-- building gpool bench (Wave 10, Impl-O)"
+    "$SNC" gpool_bench.sn -o "$OUT/sn_gpool_bench" || exit 1
+    local rounds="${GP_ROUNDS:-10}"
+    local warm=$((rounds / 10))
+    if [ "$warm" -lt 1 ]; then warm=1; fi
+    local f r b spec
+    b=sn_gpool_bench
+    f="$OUT/$b.txt"
+    : > "$f"
+    echo "-- warmup $b (rounds=$warm)" >&2
+    "$OUT/$b" "$warm" >/dev/null 2>&1
+    echo "-- timed $b x$RUNS (rounds=$rounds)" >&2
+    for r in $(seq "$RUNS"); do
+        "$OUT/$b" "$rounds" >> "$f" 2>/dev/null
+    done
+    echo "-- gpool medians (rounds=$rounds, N=1M ops/round, median of $RUNS):"
+    for spec in \
+        "timer ns_per_op" \
+        "frozen_read ns_per_op" \
+        "frozen_set ns_per_op" \
+        "sync_set ns_per_op" \
+        "sync_insert ns_per_op" \
+        "tl_insert ns_per_op"; do
+        set -- $spec
+        echo "  $1.$2 = $(median_row "$OUT/sn_gpool_bench.txt" "$1" "$2")"
+    done
+    echo "-- gpool checksums (must be identical across all runs):"
+    grep -h "^values_ok=" "$OUT/sn_gpool_bench.txt" | sort | uniq -c
+    grep -h "^BENCH row=frozen_read" "$OUT/sn_gpool_bench.txt" | sort | uniq -c
+}
+
+if [ -n "${GP_ONLY:-}" ]; then
+    gpool_rows
+    echo
+    echo "== done (GP_ONLY). raw runs in $OUT/sn_gpool_bench.txt ; see RESULTS_GPOOL.md =="
+    exit 0
+fi
+
 # ---------- run + collect ----------
 collect() {  # collect NAME -- cmd...
     local name="$1"; shift; shift

@@ -467,6 +467,49 @@ struct SnZFix {
     int64_t done;     /* 1 once a round's delta was empty */
 };
 
+/* SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the global-pool
+ * discipline (kills G1 §1 A6c — the global-pool freelist race).
+ * A pool allocated at global/static scope carries a MODE:
+ *
+ *   GP_FROZEN      — the default. Read-only from every thread: the
+ *                    checker rejects insert/set/remove outside an
+ *                    `unfrozen (P) { ... }` window (E0803.3) and
+ *                    rejects spawn/chan capture of P's handles inside
+ *                    the window (E0803.2). Handles are Sendable
+ *                    outside the window: no legal write path exists,
+ *                    so no thread can corrupt or race the freelist.
+ *   GP_THREADLOCAL — mutations legal on the declaring thread only
+ *                    (E0803.1 on capture; the home_thread tag below
+ *                    is the runtime backstop — a ThreadConfined
+ *                    pool's mutator refuses any other thread).
+ *   GP_SYNC        — the vault: every insert/set/remove funnels
+ *                    through mu below; handles Sendable everywhere.
+ *                    No two threads can ever interleave insert/remove
+ *                    on one pool — the data-race-freedom condition.
+ *
+ * frozen_depth mirrors SnLane's frozen depth for debug-mode
+ * enforcement of the window discipline (enter = unfreeze, exit =
+ * re-freeze; the structured escapes are lowered to re-freeze, and a
+ * panicked program never resumes).
+ *
+ * Soundness (the DIFF-4 argument, runtime side): a Frozen pool has no
+ * legal write path, so any number of threads holding handles cannot
+ * corrupt or race the freelist; ThreadConfined handles never leave the
+ * owning thread (capture rejected by the checker; the tag refuses any
+ * cross-thread op); Synchronized pools serialize every freelist
+ * mutation behind mu — no two threads can ever interleave
+ * insert/remove on one pool; the `unfrozen` window restores
+ * single-thread, structured, capture-blocked mutation. The CHECKER is
+ * the gate (E0803.1/.2/.3); this runtime state is the enforcement
+ * backstop, mirroring SnLane's frozen_depth (E-LKIND's two-layer
+ * precedent: the checker catches what it can see; the runtime
+ * fail-fasts on the rest).
+ *
+ * Layout note: rc/kind stay first (the generic object header every
+ * sn_release/sweep path reads); the mode bits are additive and only
+ * consulted by the freeze/lock paths below. */
+enum { GP_FROZEN = 0, GP_THREADLOCAL = 1, GP_SYNC = 2 };
+
 typedef struct SnPool {
     int64_t rc;
     int64_t kind;
@@ -479,6 +522,17 @@ typedef struct SnPool {
     uint8_t *slots;
     uint32_t *generations;
     uint32_t *free_next;
+    /* DIFF-4 (Impl-O): the mode (GP_*), the window depth (debug
+     * enforcement of E0803.2's mutable-window), the vault mutex
+     * (GP_SYNC), and the ThreadConfined home thread. */
+    int64_t mode;
+    int64_t frozen_depth;
+    void *home_thread;
+#ifdef _WIN32
+    CRITICAL_SECTION mu;
+#else
+    pthread_mutex_t mu;
+#endif
 } SnPool;
 
 /* --------------------------------------------------------------------- */
@@ -518,6 +572,15 @@ static int64_t g_active_threads = 1;
 
 static GcObj *g_gc_roots[256];
 static int64_t g_gc_nroots;
+
+/* SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): register an immortal
+ * global object (a global pool) as a permanent GC root. The pools are
+ * gc_track'd by construction (sn_pool_new), but module-scope pools are
+ * only referenced from LLVM globals (@sn_g_{name}) — invisible to the
+ * precise-root pushes, so an unlucky collection would sweep them.
+ * Global pools are module-scoped: they live for the program's
+ * duration, which is exactly what a permanent root means. */
+void sn_gc_register_global(void *p);
 
 typedef struct GcStackRange {
     void *lo; /* stack base (lowest address) */
@@ -617,6 +680,14 @@ static int gc_stack_bounds(void **lo, void **hi) {
     *hi = (char *)addr + sz;
 #endif
     return 1;
+}
+
+void sn_gc_register_global(void *p) {
+    gc_lock();
+    if (g_gc_nroots < 256) {
+        g_gc_roots[g_gc_nroots++] = (GcObj *)p;
+    }
+    gc_unlock();
 }
 
 void sn_gc_register_thread(void *lo, void *hi) {
@@ -7631,7 +7702,94 @@ void *sn_pool_new(int64_t elem_kind, int64_t elem_size) {
     pl->slots = (uint8_t *)calloc(16, (size_t)elem_size);
     pl->generations = (uint32_t *)calloc(16, sizeof(uint32_t));
     pl->free_next = (uint32_t *)calloc(16, sizeof(uint32_t));
+    /* SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the default
+     * surface is the frozen global pool (GP_FROZEN) — a plain
+     * `pool_new` from the declaring thread, unboxed. */
+    pl->mode = GP_FROZEN;
+    pl->frozen_depth = 0;
+    pl->home_thread = sn_thread_self();
+#ifndef _WIN32
+    pthread_mutex_init(&pl->mu, NULL);
+#else
+    InitializeCriticalSection(&pl->mu);
+#endif
     return pl;
+}
+
+/* SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the mode-aware
+ * construction — `pool<T> thread_local` / `pool<T> synchronized`
+ * initializers lower here. GP_FROZEN keeps sn_pool_new (the default).
+ * The GP_SYNC pool's lock is initialized once here and lives for the
+ * pool's lifetime; the GP_THREADLOCAL pool stamps its declaring
+ * thread (the E0803.1 backstop). */
+void *sn_pool_new_mode(int64_t elem_kind, int64_t elem_size, int64_t mode) {
+    void *p = sn_pool_new(elem_kind, elem_size);
+    SnPool *pl = (SnPool *)p;
+    pl->mode = mode;
+    return p;
+}
+
+/* DIFF-4 (Impl-O): the `unfrozen (P) { ... }` window's runtime
+ * discipline — SnLane's freeze/unfreeze twin on the pool. The
+ * CHECKER is the gate (E0803.2/.3); frozen_depth is the debug-mode
+ * enforcement of the window shape (nestable, LIFO, per-pool). */
+void sn_pool_unfreeze(void *p) {
+    if (!p) return;
+    SnPool *pl = (SnPool *)p;
+    pl->frozen_depth += 1;
+}
+
+void sn_pool_freeze(void *p) {
+    if (!p) return;
+    SnPool *pl = (SnPool *)p;
+    if (pl->frozen_depth > 0) pl->frozen_depth -= 1;
+}
+
+/* DIFF-4 (Impl-O): the Synchronized vault's per-op lock pair and the
+ * home-thread guard. The lock follows the runtime's existing
+ * convention (the Lock object's pthread_mutex, runtime.c's
+ * "thread_*" pattern); the home-thread guard is the E0803.1 backstop
+ * — the checker rejects capture statically, and a ThreadConfined
+ * pool mutated from any other thread fail-fasts loudly (the E-LKIND
+ * two-layer precedent: checker first, runtime backstop for what the
+ * checker cannot see). */
+static void sn_pool_lock(SnPool *pl) {
+#ifdef _WIN32
+    EnterCriticalSection(&pl->mu);
+#else
+    pthread_mutex_lock(&pl->mu);
+#endif
+}
+
+static void sn_pool_unlock(SnPool *pl) {
+#ifdef _WIN32
+    LeaveCriticalSection(&pl->mu);
+#else
+    pthread_mutex_unlock(&pl->mu);
+#endif
+}
+
+/* sn_pool_maybe_lock/unlock: the per-op funnel — a GP_SYNC pool takes
+ * its lock around every insert/set/remove; every other mode is a
+ * no-op (Frozen pools cannot reach a mutation outside the window by
+ * the checker; ThreadConfined pools carry the home-thread guard). */
+static void sn_pool_maybe_lock(SnPool *pl) {
+    if (pl->mode == GP_SYNC) sn_pool_lock(pl);
+}
+
+static void sn_pool_maybe_unlock(SnPool *pl) {
+    if (pl->mode == GP_SYNC) sn_pool_unlock(pl);
+}
+
+static void sn_pool_thread_guard(SnPool *pl, const char *op) {
+    if (pl->mode == GP_THREADLOCAL && pl->home_thread != sn_thread_self()) {
+        fprintf(stderr,
+                "runtime error [E0803.1]: pool is 'thread_local' — %s from a "
+                "non-declaring thread (handles carry a home-thread tag and never "
+                "leave the declaring thread) [E0803]\n",
+                op);
+        exit(1);
+    }
 }
 
 static void sn_pool_grow(SnPool *pl) {
@@ -7666,10 +7824,18 @@ static uint32_t sn_pool_alloc_slot(SnPool *pl, uint32_t *out_gen) {
 int64_t sn_pool_insert_i64(void *p, int64_t val) {
     if (!p) return 0;
     SnPool *pl = (SnPool *)p;
+    /* SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the mutator
+     * funnel — GP_SYNC pools serialize the freelist mutation behind
+     * the vault lock (no two threads can interleave insert/remove);
+     * GP_THREADLOCAL pools refuse any non-declaring thread (the
+     * E0803.1 backstop). */
+    sn_pool_maybe_lock(pl);
+    sn_pool_thread_guard(pl, "insert");
     uint32_t gen = 0;
     uint32_t idx = sn_pool_alloc_slot(pl, &gen);
     if (pl->elem_kind == 1) sn_retain((void *)(intptr_t)val);
     *(int64_t *)(pl->slots + (size_t)idx * (size_t)pl->elem_size) = val;
+    sn_pool_maybe_unlock(pl);
     uint64_t h = ((uint64_t)gen << 32) | (uint64_t)idx;
     return (int64_t)h;
 }
@@ -7677,12 +7843,15 @@ int64_t sn_pool_insert_i64(void *p, int64_t val) {
 int64_t sn_pool_insert_rec(void *p, void *src, int64_t sz) {
     if (!p) return 0;
     SnPool *pl = (SnPool *)p;
+    sn_pool_maybe_lock(pl);
+    sn_pool_thread_guard(pl, "insert");
     uint32_t gen = 0;
     uint32_t idx = sn_pool_alloc_slot(pl, &gen);
     size_t copy_sz = (size_t)(sz <= pl->elem_size ? sz : pl->elem_size);
     if (src && copy_sz > 0) {
         memcpy(pl->slots + (size_t)idx * (size_t)pl->elem_size, src, copy_sz);
     }
+    sn_pool_maybe_unlock(pl);
     uint64_t h = ((uint64_t)gen << 32) | (uint64_t)idx;
     return (int64_t)h;
 }
@@ -7721,6 +7890,14 @@ int64_t sn_pool_get_i64(void *p, int64_t handle) {
 
 void sn_pool_set_i64(void *p, int64_t handle, int64_t val) {
     SnPool *pl = (SnPool *)p;
+    /* DIFF-4 (Impl-O): the mutator funnel — see sn_pool_insert_i64.
+     * The lock spans the whole op: the checked_ptr read of the
+     * generation array and the slot store are one atomic unit for
+     * GP_SYNC pools (a concurrent remove could otherwise recycle the
+     * slot between the check and the store — the A6c race in
+     * miniature). */
+    sn_pool_maybe_lock(pl);
+    sn_pool_thread_guard(pl, "set");
     uint8_t *slot = sn_pool_checked_ptr(pl, handle, "pool.set");
     if (pl->elem_kind == 1) {
         int64_t old = *(int64_t *)slot;
@@ -7728,6 +7905,7 @@ void sn_pool_set_i64(void *p, int64_t handle, int64_t val) {
         sn_retain((void *)(intptr_t)val);
     }
     *(int64_t *)slot = val;
+    sn_pool_maybe_unlock(pl);
 }
 
 void *sn_pool_get_ptr(void *p, int64_t handle) {
@@ -7737,6 +7915,12 @@ void *sn_pool_get_ptr(void *p, int64_t handle) {
 
 void sn_pool_remove(void *p, int64_t handle) {
     SnPool *pl = (SnPool *)p;
+    /* DIFF-4 (Impl-O): the mutator funnel — see sn_pool_insert_i64.
+     * remove is the freelist mutation itself (free_head push), so
+     * GP_SYNC serialization is the data-race-freedom condition
+     * here: no two threads can ever interleave insert/remove. */
+    sn_pool_maybe_lock(pl);
+    sn_pool_thread_guard(pl, "remove");
     uint8_t *slot = sn_pool_checked_ptr(pl, handle, "pool.remove");
     uint32_t idx = (uint32_t)((uint64_t)handle & 0xFFFFFFFFu);
     if (pl->elem_kind == 1) {
@@ -7749,6 +7933,7 @@ void sn_pool_remove(void *p, int64_t handle) {
     pl->free_next[idx] = pl->free_head;
     pl->free_head = idx;
     if (pl->active_count > 0) pl->active_count--;
+    sn_pool_maybe_unlock(pl);
 }
 
 int64_t sn_pool_len(void *p) {

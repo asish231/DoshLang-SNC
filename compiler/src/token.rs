@@ -122,6 +122,10 @@ pub enum TokenKind {
     Errdefer,
     Verified,
     Frozen,
+    /* SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the global-pool
+       discipline's mutation-window keyword — the Stmt::Frozen lowering
+       shape's syntactic mirror for pools (kills G1 §1 A6c). */
+    Unfrozen,
     Resource,
     Region,
     PoolKw,

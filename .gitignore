@@ -68,3 +68,5 @@ bench/results/sn_lane_bench_poison
 bench/results/sn_lcell_bench
 # Wave-9 zfix bench (Impl-N): same policy — binaries out, raw .txt evidence in.
 bench/results/sn_zfix_bench
+# Wave-10 gpool bench (Impl-O): same policy — binaries out, raw .txt evidence in.
+bench/results/sn_gpool_bench

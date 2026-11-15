@@ -100,6 +100,43 @@ pub enum Variance {
     Contravariant,
 }
 
+/// SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the declared mode of
+/// a `pool<T>` binding (kills G1 §1 A6c — the global-pool freelist
+/// race). The mutability class the tree lacked: nothing distinguished
+/// a global pool from a local one, so a global-pool handle passed
+/// freely into spawn/chan → two threads on one freelist → freelist
+/// corruption → memory unsafety. Three modes, FROZEN by default:
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PoolMode {
+    /// DEFAULT (no annotation). Read-only from every thread:
+    /// insert/set/remove rejected everywhere outside an
+    /// `unfrozen (P) { ... }` block (E0803.3). Handles into a frozen
+    /// pool are Sendable — zero-copy shared reads (no legal write
+    /// path exists, so no thread can race or corrupt the freelist).
+    Frozen,
+    /// `pool<T> thread_local`. Mutations allowed, on the declaring
+    /// thread only. Handles carry a home-thread tag; any spawn/chan
+    /// capture or cross-thread use = E0803.1.
+    ThreadConfined,
+    /// `pool<T> synchronized`. Mutex-protected vault: every
+    /// insert/set/remove funnels through a runtime call taking the
+    /// pool's lock (sn_pool_lock/sn_pool_unlock around the op); handles
+    /// Sendable everywhere. No two threads can ever interleave
+    /// insert/remove on one pool — the data-race-freedom condition
+    /// for the vault.
+    Synchronized,
+}
+
+impl std::fmt::Display for PoolMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            PoolMode::Frozen => "frozen",
+            PoolMode::ThreadConfined => "thread_local",
+            PoolMode::Synchronized => "synchronized",
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct BlueprintItem {
     pub name: String,
@@ -190,6 +227,11 @@ pub enum Stmt {
         ty: Option<TypeAst>,
         names: Vec<String>,
         value: Option<Expr>,
+        /// DIFF-4 (Impl-O): the pool mutability class — `pool<T>` bare
+        /// = Frozen, `pool<T> thread_local` = ThreadConfined,
+        /// `pool<T> synchronized` = Synchronized. Default for every
+        /// non-pool binding.
+        mode: PoolMode,
         span: Span,
     },
     Assign {
@@ -253,6 +295,19 @@ pub enum Stmt {
     },
     Frozen {
         names: Vec<String>,
+        body: Vec<Stmt>,
+        span: Span,
+    },
+    /* SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the global-pool
+       discipline's mutation window (kills G1 §1 A6c). `unfrozen (P)
+       { ... }` — the structured single-thread mutation window on a
+       FROZEN global pool: enter = unfreeze, exit/unwind = re-freeze
+       (the errdefer-guaranteed re-freeze, Stmt::Frozen's lowering
+       shape). Inside: insert/set/remove legal on the declaring
+       thread; capture of P's handles by spawn/chan ILLEGAL (E0803.2).
+       Outside: mutations rejected (E0803.3). */
+    Unfrozen {
+        pool: String,
         body: Vec<Stmt>,
         span: Span,
     },

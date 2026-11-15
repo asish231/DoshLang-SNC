@@ -1300,3 +1300,226 @@ fn zfix_stdlib_surface() {
         "9\n10\ntrue\nfalse\n9\nPASS: zfix_stdlib\n",
     );
 }
+
+// =====================================================================
+// SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the global-pool
+// discipline (kills G1 §1 A6c). Three declared modes, frozen by
+// default; the `unfrozen (P) { ... }` window; E0803.1/.2/.3 at the
+// spawn/chan capture seam and the mutation seam.
+// =====================================================================
+
+/// E0803.3 — frozen by default: insert/set/remove on a bare (frozen)
+/// global pool outside an `unfrozen` window are rejected, all three
+/// ops, with the verbatim diagnostic.
+#[test]
+fn gpool_frozen_default_rejected_e0803_3() {
+    let err = compile_err("examples/gpool_frozen_default_fail.sn");
+    assert!(err.contains("[E0803]"), "expected E0803, got: {err}");
+    assert!(
+        err.contains("E0803.3: cannot mutate global pool 'gfrozen' (insert)"),
+        "expected the verbatim E0803.3 insert headline, got: {err}"
+    );
+    assert!(
+        err.contains("cannot mutate global pool 'gfrozen' (set)"),
+        "expected the verbatim E0803.3 set headline, got: {err}"
+    );
+    assert!(
+        err.contains("cannot mutate global pool 'gfrozen' (remove)"),
+        "expected the verbatim E0803.3 remove headline, got: {err}"
+    );
+    assert!(
+        err.contains("global pools are frozen by default"),
+        "expected the frozen-by-default statement, got: {err}"
+    );
+    assert!(
+        err.contains("Wrap the mutation in 'unfrozen (gfrozen) { ... }'"),
+        "expected the window discharge, got: {err}"
+    );
+    assert!(
+        err.contains("or declare the pool 'thread_local' (single-thread) or 'synchronized' (locked)"),
+        "expected the two mode discharges, got: {err}"
+    );
+}
+
+/// The `unfrozen (P) { ... }` window: mutation inside is legal on the
+/// declaring thread; at window exit the pool re-freezes and reads
+/// observe the mutated state. Runs end-to-end.
+#[test]
+fn gpool_unfrozen_window_ok() {
+    assert_out("examples/gpool_unfrozen_ok.sn", "99\n1\n");
+}
+
+/// The Sendable frozen read: a frozen global pool's handle captured by
+/// an unscoped spawn OUTSIDE any window is legal (no legal write path
+// exists — the freelist cannot be raced) and reads correctly.
+#[test]
+fn gpool_frozen_spawn_ok() {
+    assert_out("examples/gpool_frozen_spawn_ok.sn", "21\ntrue\n");
+}
+
+/// E0803.2 — the A6c kill: capturing a frozen pool's handle (or the
+/// pool object) in an unscoped spawn INSIDE an `unfrozen` window is
+/// rejected with the verbatim diagnostic — the receiving thread could
+/// race the freelist with the mutator.
+#[test]
+fn gpool_unfrozen_spawn_rejected_e0803_2() {
+    let err = compile_err("examples/gpool_unfrozen_spawn_fail.sn");
+    assert!(err.contains("[E0803]"), "expected E0803, got: {err}");
+    assert!(
+        err.contains("E0803.2: cannot capture/send handle 'h' from pool 'gz' in unscoped spawn/chan"),
+        "expected the verbatim E0803.2 handle headline, got: {err}"
+    );
+    assert!(
+        err.contains("'gz' is unfrozen in this scope (mutable window)"),
+        "expected the mutable-window verdict, got: {err}"
+    );
+    assert!(
+        err.contains("the receiving thread could race its freelist"),
+        "expected the freelist-race argument, got: {err}"
+    );
+    assert!(
+        err.contains("Move the capture outside the 'unfrozen (gz)' block, or declare 'gz' 'synchronized'"),
+        "expected both discharges, got: {err}"
+    );
+    assert!(
+        err.contains("cannot access pool 'gz' in unscoped spawn/chan"),
+        "expected the pool-object flavor of E0803.2, got: {err}"
+    );
+}
+
+/// E0803.1 — `thread_local` pools: handles (and the pool object) are
+/// confined to the declaring thread; any spawn/chan capture is
+/// rejected.
+#[test]
+fn gpool_thread_local_spawn_rejected_e0803_1() {
+    let err = compile_err("examples/gpool_thread_local_spawn_fail.sn");
+    assert!(err.contains("[E0803]"), "expected E0803, got: {err}");
+    assert!(
+        err.contains("E0803.1: cannot capture/send handle 'h' from pool 'gtl' in unscoped spawn/chan"),
+        "expected the E0803.1 handle headline, got: {err}"
+    );
+    assert!(
+        err.contains("'gtl' is 'thread_local'"),
+        "expected the thread_local verdict, got: {err}"
+    );
+    assert!(
+        err.contains("cannot access pool 'gtl' in unscoped spawn/chan"),
+        "expected the pool-object flavor of E0803.1, got: {err}"
+    );
+    assert!(
+        err.contains("Declare 'gtl' 'synchronized' for cross-thread access"),
+        "expected the synchronized discharge, got: {err}"
+    );
+}
+
+/// The Synchronized mode: mutated from the main thread (legal — every
+/// op locked) and its handle spawned (legal — Sendable everywhere).
+/// Runs end-to-end.
+#[test]
+fn gpool_synchronized_ok() {
+    assert_out("examples/gpool_synchronized_ok.sn", "42\n1\n");
+}
+
+/// Frozen-read correctness end-to-end: insert via the window, then
+/// read both handles from a spawned task — generations stable, values
+/// exact, across the thread boundary.
+#[test]
+fn gpool_frozen_read_spawn_ok() {
+    assert_out("examples/gpool_frozen_read_spawn_ok.sn", "18\n2\n");
+}
+
+/// E0803.2's chan flavor: sending a frozen pool's handle over a
+/// channel while the pool is unfrozen at the send site — the same
+/// freelist race on the channel seam.
+#[test]
+fn gpool_chan_send_rejected_e0803_2() {
+    let err = compile_err("examples/gpool_chan_send_fail.sn");
+    assert!(err.contains("[E0803]"), "expected E0803, got: {err}");
+    assert!(
+        err.contains("E0803.2: cannot capture/send handle 'h' from pool 'gq' in unscoped spawn/chan"),
+        "expected the verbatim E0803.2 chan headline, got: {err}"
+    );
+    assert!(
+        err.contains("'gq' is unfrozen in this scope (mutable window)"),
+        "expected the mutable-window verdict, got: {err}"
+    );
+}
+
+/// The spawn-body discipline: a LOCAL pool object is not Sendable
+/// (the owning frame can die while the task runs; two threads on one
+/// freelist is exactly A6c), and a frozen global pool mutated from a
+/// spawned task races the window's freelist — only 'synchronized'
+/// pools accept cross-thread mutation.
+#[test]
+fn gpool_spawn_body_rejected_e0803() {
+    let err = compile_err("examples/gpool_spawn_body_fail.sn");
+    assert!(err.contains("[E0803]"), "expected E0803, got: {err}");
+    assert!(
+        err.contains("cannot access local pool 'lp' in unscoped spawn/chan"),
+        "expected the local-pool Sendable rejection, got: {err}"
+    );
+    assert!(
+        err.contains("a local pool's storage and freelist are not Sendable"),
+        "expected the local-pool rationale, got: {err}"
+    );
+    assert!(
+        err.contains("cannot mutate pool 'gw' (insert) inside a spawned task"),
+        "expected the spawn-body mutation rejection, got: {err}"
+    );
+    assert!(
+        err.contains("only 'synchronized' pools accept cross-thread mutation"),
+        "expected the synchronized-only rule, got: {err}"
+    );
+}
+
+/// The int-COPY provenance: handles are held in `int` variables on
+/// this surface, so `int hcopy = h` must keep the minting pool's tag
+/// — the copy is captured inside the window and E0803.2 fires on the
+/// copy exactly as on the original (without the copy tracking, the
+/// A6c hole reopens through a copy).
+#[test]
+fn gpool_handle_copy_rejected_e0803_2() {
+    let err = compile_err("examples/gpool_handle_copy_fail.sn");
+    assert!(err.contains("[E0803]"), "expected E0803, got: {err}");
+    assert!(
+        err.contains("E0803.2: cannot capture/send handle 'hcopy' from pool 'gz' in unscoped spawn/chan"),
+        "expected the E0803.2 headline on the COPY binding, got: {err}"
+    );
+    assert!(
+        err.contains("'gz' is unfrozen in this scope (mutable window)"),
+        "expected the mutable-window verdict, got: {err}"
+    );
+}
+
+/// The ALIAS closure — the second seam of A6c. `pool<int> q = gfr`
+/// (or a parameter alias `take(gfr)`) would rebind a global pool
+/// under a local name whose mutation the checker cannot mode-check:
+/// the mode table is keyed by the declared name, and a local binding
+/// accepts unguarded mutation. Pool objects are not copyable values —
+/// all three alias forms are rejected (declaration, assignment,
+/// parameter).
+#[test]
+fn gpool_alias_rejected_e0803() {
+    let err = compile_err("examples/gpool_alias_fail.sn");
+    assert!(err.contains("[E0803]"), "expected E0803, got: {err}");
+    assert!(
+        err.contains("cannot alias pool 'gall' into 'q': pool objects are not copyable values"),
+        "expected the alias rejection, got: {err}"
+    );
+    assert!(
+        err.contains("the declared mode cannot follow an alias"),
+        "expected the mode-cannot-follow rationale, got: {err}"
+    );
+    assert!(
+        err.contains("a local binding accepts unguarded mutation"),
+        "expected the unguarded-mutation rationale, got: {err}"
+    );
+    assert!(
+        err.contains("cannot pass pool 'gall' by value to 'take'"),
+        "expected the parameter-alias rejection, got: {err}"
+    );
+    assert!(
+        err.contains("Pass the pool's handles (ints)"),
+        "expected the handles-only discharge, got: {err}"
+    );
+}

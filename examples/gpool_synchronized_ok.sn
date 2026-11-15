@@ -1,0 +1,24 @@
+// SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the Synchronized
+// mode — `pool<T> synchronized`. A mutex-protected vault: every
+// insert/set/remove funnels through a runtime call taking the pool's
+// lock (the runtime's existing Lock convention), so mutation is
+// legal from any thread and handles are Sendable EVERYWHERE (every
+// op is locked — no two threads can ever interleave insert/remove
+// on one pool, the data-race-freedom condition for the vault).
+//
+// This file is a RUN golden case: main-thread mutation + a handle
+// read from a spawned task, both asserted (tests/golden.rs).
+
+pool<int> synchronized gv = pool_new<int>(8)
+
+fn main() {
+    int h = gv.insert(3)        // legal: locked op, any thread
+    gv.set(h, 42)               // legal: locked op
+    chan<int> ch
+    spawn {
+        int r = gv.get(h)       // legal: synchronized handles Sendable
+        ch.send(r)
+    }
+    print(ch.receive())         // 42
+    print(gv.len())             // 1
+}

@@ -377,6 +377,17 @@ declare void @sn_pool_set_i64(ptr, i64, i64)
 declare ptr @sn_pool_get_ptr(ptr, i64)
 declare void @sn_pool_remove(ptr, i64)
 declare i64 @sn_pool_len(ptr)
+; SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the global-pool
+; discipline's runtime surface (kills G1 §1 A6c). The mode-aware
+; construction (`pool<T> thread_local` / `synchronized` decls) and
+; the `unfrozen (P) { ... }` window's freeze discipline (SnLane's
+; frozen_depth twin on SnPool).
+declare ptr @sn_pool_new_mode(i64, i64, i64)
+declare void @sn_pool_unfreeze(ptr)
+declare void @sn_pool_freeze(ptr)
+; DIFF-4 (Impl-O): a global pool's permanent-GC-root registration
+; (the pool is gc_track'd; the module-scope object is immortal).
+declare void @sn_gc_register_global(ptr)
 ; Tier-G Z-set engine (SWARM RABBIT HOLE, P5 slice 1; W2C §1.1)
 declare ptr @sn_zset_new(i64)
 declare void @sn_zset_add(ptr, i64, i64)

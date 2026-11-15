@@ -1,0 +1,24 @@
+// SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the Sendable frozen
+// read — a frozen global pool's handle captured by an UNSCOPED spawn
+// OUTSIDE any unfrozen window. A frozen pool has no legal write path,
+// so the receiving thread can never race or corrupt the freelist:
+// handles are Sendable, zero-copy shared reads (stable generations).
+//
+// This file is a RUN golden case: the spawned task reads the pool
+// from another thread and the result is asserted (tests/golden.rs).
+
+pool<int> gfr = pool_new<int>(8)
+
+fn main() {
+    int h = 0
+    unfrozen (gfr) {
+        h = gfr.insert(21)
+    }
+    chan<int> ch
+    spawn {
+        int r = gfr.get(h)     // frozen handle capture — Sendable
+        ch.send(r)
+    }
+    print(ch.receive())        // 21
+    print(gfr.is_valid(h))      // true — generations stable
+}

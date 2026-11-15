@@ -1,0 +1,20 @@
+// SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the global-pool
+// discipline's DEFAULT — frozen by default. Kills G1 §1 A6c: before
+// DIFF-4 nothing distinguished a global pool from a local one, so a
+// global-pool handle passed freely into spawn/chan — two threads on
+// one freelist, freelist corruption, memory unsafety.
+//
+// A bare `pool<T> gp = pool_new<T>(...)` at module scope is FROZEN:
+// read-only from every thread. insert/set/remove outside an
+// `unfrozen (gp) { ... }` window are rejected — E0803.3, all three
+// mutation ops, verbatim.
+//
+// This file is a compile-FAIL golden case (tests/golden.rs).
+
+pool<int> gfrozen = pool_new<int>(8)
+
+fn main() {
+    int h = gfrozen.insert(1)   // E0803.3 (insert)
+    gfrozen.set(h, 2)           // E0803.3 (set)
+    gfrozen.remove(h)           // E0803.3 (remove)
+}

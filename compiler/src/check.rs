@@ -44,6 +44,45 @@ pub struct LaneAssignment {
     pub class: LaneClass,
 }
 
+/// SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the mutability class
+/// of a global pool (kills G1 §1 A6c — the global-pool freelist race).
+/// Before DIFF-4 nothing distinguished a global pool from a local one:
+/// `Type::Handle` passed freely through `check_spawn_expr` (which
+/// matched only Ref/Mut/Ptr/Blueprint), so a global-pool handle
+/// crossed into an unscoped spawn → two threads mutating one freelist
+/// → freelist corruption → memory unsafety. Three declared modes,
+/// frozen by default:
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GlobalPoolMode {
+    /// DEFAULT (no annotation). Read-only from every thread:
+    /// insert/set/remove rejected everywhere outside an
+    /// `unfrozen (P) { ... }` block (E0803.3). Handles into a frozen
+    /// pool are Sendable — zero-copy shared reads: a frozen pool has
+    /// no legal write path, so no thread can corrupt or race the
+    /// freelist (stable generations).
+    Frozen,
+    /// `pool<T> thread_local`. Mutations allowed, on the declaring
+    /// thread only. Handles carry a home-thread tag; any spawn/chan
+    /// capture or cross-thread use = E0803.1.
+    ThreadConfined,
+    /// `pool<T> synchronized`. Mutex-protected vault: every
+    /// insert/set/remove funnels through a runtime call taking the
+    /// pool's lock; handles Sendable everywhere. No two threads can
+    /// ever interleave insert/remove on one pool — the
+    /// data-race-freedom condition for the vault.
+    Synchronized,
+}
+
+/// DIFF-4 (Impl-O): the lookup result of `pool_mode_of` — a global
+/// pool's declared mode, a local pool (single-thread by construction),
+/// or not a pool at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PoolModeCheck {
+    Global(GlobalPoolMode),
+    Local,
+    NotAPool,
+}
+
 /// SWARM RABBIT HOLE — Wave 6 (Impl-E), W2A §1.3 (v3) / DIFF-1: the
 /// interprocedural inout summary. The three v2 fields (STRATA §2.2.3)
 /// are carried for spec conformance but are not computed by the checker
@@ -131,6 +170,14 @@ pub struct CheckDb {
     pub contracts: HashMap<String, ContractInfo>,
     pub expr_ty: HashMap<(u32, u32, u32), Type>,
     pub globals: HashMap<String, Type>,
+    /// SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the declared mode
+    /// of every GLOBAL pool (kills G1 §1 A6c — the global-pool freelist
+    /// race). Recorded at collect time from the declaration's parsed
+    /// annotation: `pool<T>` bare = Frozen, `pool<T> thread_local` =
+    /// ThreadConfined, `pool<T> synchronized` = Synchronized. Local
+    /// pools are absent (single-thread by construction — they cannot
+    /// even be named from another thread once capture is checked).
+    pub global_pools: HashMap<String, GlobalPoolMode>,
     pub method_slots: HashMap<String, usize>,
     pub vtable_methods: Vec<String>,
     /// Libraries referenced by `extern` blocks, passed to the linker.
@@ -243,6 +290,28 @@ struct Checker<'a> {
     current_fn_key: Option<String>,
     /// This function's own inout params: (name, sig-space index).
     current_inout_params: Vec<(String, usize)>,
+    // --- SWARM RABBIT HOLE — Wave 10 (Impl-O): DIFF-4, the global-pool
+    // discipline's checker state (kills G1 §1 A6c). The mode table is
+    // CheckDb.global_pools (module-wide, recorded at collect); the
+    // three fields below are per-walk lexical state, parallel to
+    // list_epochs/borrow_epoch. ---
+    /// DIFF-4: handle binding -> the pool that minted it (the
+    /// provenance side table the tree lacked: the pool method calls
+    /// produce handles, so the home pool is recorded at the binding
+    /// site — `int h = gp.insert(v)` and its transitive copies
+    /// `h2 = h1`). Untracked handles (parameters, fabricated ints)
+    /// carry no mode check — the runtime generation check remains
+    /// the use-after-free guard.
+    handle_home: HashMap<String, String>,
+    /// DIFF-4: the lexically open `unfrozen (P)` windows, innermost
+    /// last — the mutable-window depth per pool (the capture-site
+    /// half of E0803.2: a handle into P is Sendable exactly when P
+    /// is not on this stack).
+    unfrozen_stack: Vec<String>,
+    /// DIFF-4: the lexically open `frozen (...)` blocks' name lists
+    /// (the mode-conflict check: an `unfrozen (P)` window refuses to
+    /// nest inside a `frozen (P)` block).
+    frozen_names_stack: Vec<Vec<String>>,
 }
 
 pub fn template_param_names(tp: &[crate::ast::TypeParam]) -> Vec<String> {
@@ -327,6 +396,7 @@ pub fn check_programs(programs: &[Program], diag: &mut Diagnostics) -> CheckDb {
         contracts: HashMap::new(),
         expr_ty: HashMap::new(),
         globals: HashMap::new(),
+        global_pools: HashMap::new(),
         method_slots: HashMap::new(),
         vtable_methods: Vec::new(),
         extern_libs: Vec::new(),
@@ -371,6 +441,9 @@ pub fn check_programs(programs: &[Program], diag: &mut Diagnostics) -> CheckDb {
             gc_managed: HashSet::new(),
             current_fn_key: None,
             current_inout_params: Vec::new(),
+            handle_home: HashMap::new(),
+            unfrozen_stack: Vec::new(),
+            frozen_names_stack: Vec::new(),
         };
         for item in &p.items {
             match item {
@@ -469,6 +542,9 @@ pub fn check_programs(programs: &[Program], diag: &mut Diagnostics) -> CheckDb {
             gc_managed: HashSet::new(),
             current_fn_key: None,
             current_inout_params: Vec::new(),
+            handle_home: HashMap::new(),
+            unfrozen_stack: Vec::new(),
+            frozen_names_stack: Vec::new(),
         };
         c.current_bp = Some(inst.name.clone());
         c.current_bp_hierarchy = hierarchy(&c.db.blueprints, &inst.name);
@@ -1108,6 +1184,11 @@ pub fn substitute_stmt(s: &mut Stmt, params: &[String], args: &[TypeAst]) {
         | Stmt::Frozen { body, .. } => {
             substitute_stmts(body, params, args);
         }
+        // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the
+        // substitute walk recurses into the Unfrozen window body.
+        Stmt::Unfrozen { body, .. } => {
+            substitute_stmts(body, params, args);
+        }
         Stmt::Guard { cond, else_body, .. } => {
             substitute_expr(cond, params, args);
             substitute_stmts(else_body, params, args);
@@ -1414,6 +1495,11 @@ fn walk_stmt_for_mono(s: &Stmt, db: &mut CheckDb, diag: &mut Diagnostics) {
         | Stmt::Frozen { body, .. } => {
             walk_stmts_for_mono(body, db, diag);
         }
+        // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the
+        // mono walk recurses into the Unfrozen window body.
+        Stmt::Unfrozen { body, .. } => {
+            walk_stmts_for_mono(body, db, diag);
+        }
         Stmt::Guard { else_body, .. } => {
             walk_stmts_for_mono(else_body, db, diag);
         }
@@ -1656,9 +1742,30 @@ fn collect(db: &mut CheckDb, programs: &[Program], diag: &mut Diagnostics) {
                         db.funcs.insert(format!("{}::{}", b.name, m.name), sig);
                     }
                 }
-                Item::Stmt(Stmt::Decl { names, ty, .. }) => {
+                Item::Stmt(Stmt::Decl { names, ty, mode, .. }) => {
                     if let (Some(n), Some(t)) = (names.first(), ty) {
                         db.globals.insert(n.clone(), resolve_type_ast(t, db));
+                        // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O):
+                        // the global-declaration arm records the pool's
+                        // mode (the annotation parsed WITH the
+                        // declaration: `pool<T>` bare = Frozen,
+                        // `pool<T> thread_local` = ThreadConfined,
+                        // `pool<T> synchronized` = Synchronized). This
+                        // is the table E0803.1/.2/.3 consult at the
+                        // spawn/chan capture seam and the mutation seam
+                        // (kills G1 §1 A6c).
+                        if matches!(t, crate::ast::TypeAst::Pool(_)) {
+                            let gm = match *mode {
+                                crate::ast::PoolMode::Frozen => GlobalPoolMode::Frozen,
+                                crate::ast::PoolMode::ThreadConfined => {
+                                    GlobalPoolMode::ThreadConfined
+                                }
+                                crate::ast::PoolMode::Synchronized => {
+                                    GlobalPoolMode::Synchronized
+                                }
+                            };
+                            db.global_pools.insert(n.clone(), gm);
+                        }
                     }
                 }
                 _ => {}
@@ -2083,6 +2190,7 @@ impl Checker<'_> {
                 ty,
                 names,
                 value,
+                mode: _,
                 span,
             } => {
                 if names.len() == 1 {
@@ -2130,6 +2238,62 @@ impl Checker<'_> {
                     }
                     let decl_ty_clone = decl_ty.clone();
                     self.declare(name, decl_ty, *is_const, *span);
+                    // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the
+                    // handle-home provenance side table (kills G1 §1 A6c).
+                    // The pool method calls produce handles, so the
+                    // binding site records which pool minted the handle
+                    // — `int h = gp.insert(v)`, the intrinsic twin
+                    // `pool_insert(gp, v)`, and transitive copies
+                    // `h2 = h1` (INCLUDING int-typed copies: handles are
+                    // held in int vars on this surface, so the declared
+                    // type does not identify them — the copy of a
+                    // handle into pool P is a handle into pool P, and
+                    // E0803.2 must fire on the copy exactly as on the
+                    // original). E0803.1/.2 consult this table at the
+                    // spawn/chan capture seam; untracked handles
+                    // (parameters, fabricated ints, arithmetic results
+                    // — handle_pool_of returns None for anything but
+                    // the minting call or an already-tracked ident)
+                    // carry no mode check — the runtime generation
+                    // check remains the use-after-free guard.
+                    if let Some(pool) = value.as_ref().and_then(|v| self.handle_pool_of(v)) {
+                        self.handle_home.insert(name.clone(), pool);
+                    }
+                    // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the
+                    // alias hole's closure — a `pool<T>` binding whose
+                    // value is another pool binding (`pool<int> q = p`)
+                    // would rebind the pool object under a LOCAL name:
+                    // locals accept unguarded mutation (single-thread by
+                    // construction is the LIE once the local aliases a
+                    // global), and the mode cannot follow the alias.
+                    // Pool objects are therefore not copyable values —
+                    // only the Synchronized mode's safety follows the
+                    // runtime object, and even that would desync the
+                    // checker's mode table. Reject the copy outright.
+                    if matches!(decl_ty_clone, Type::Pool(_)) {
+                        if let Some(v) = value {
+                            if let Some(src) = Self::root_var_of_expr(v) {
+                                let src_is_pool = self
+                                    .lookup(&src)
+                                    .map(|(t, _)| matches!(t, Type::Pool(_)))
+                                    .unwrap_or(false);
+                                if src_is_pool {
+                                    self.diag.error(
+                                        *span,
+                                        format!(
+                                            "cannot alias pool '{src}' into '{name}': pool \
+                                             objects are not copyable values — the declared \
+                                             mode (frozen/thread_local/synchronized) cannot \
+                                             follow an alias, and a local binding accepts \
+                                             unguarded mutation (the freelist race E0803 \
+                                             exists to prevent). Use '{src}' by name, or send \
+                                             its handles. [E0803]"
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                    }
                     // SWARM RABBIT HOLE — Wave 8 (Impl-L): D0 gap #6 /
                     // W2A §1.4 — list/map literals are the GC-managed
                     // holders (sn_list_new/sn_map_new → gc_track): the
@@ -2317,9 +2481,54 @@ impl Checker<'_> {
                 }
                 let tt = self.check_expr(target);
                 let vt = self.check_expr(value);
+                // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the
+                // handle-home table's assignment half — `h2 = h1` and
+                // `h2 = gp.insert(v)` keep the provenance (a copy of a
+                // handle into pool P is a handle into pool P; E0803.2
+                // fires on the copy exactly as on the original). The
+                // key is handle_pool_of (provenance), not the declared
+                // type: handles are held in int vars on this surface.
+                // A re-assignment of a non-handle value CLEARS a stale
+                // entry (x = 1 after x = h: x is no longer that
+                // handle — keeping the entry would misattribute a
+                // later capture).
+                if let ExprKind::Ident(n) = &target.kind {
+                    match self.handle_pool_of(value) {
+                        Some(pool) => {
+                            self.handle_home.insert(n.clone(), pool);
+                        }
+                        None => {
+                            self.handle_home.remove(n);
+                        }
+                    }
+                }
                 if let ExprKind::Ident(n) = &target.kind {
                     if self.lookup(n).map(|(_, c)| c).unwrap_or(false) {
                         self.diag.error(*span, format!("cannot assign to const '{n}'"));
+                    }
+                    // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O):
+                    // the Assign twin of the Decl alias gate —
+                    // re-aliasing a pool object through any pool-typed
+                    // target rebinds the runtime object under a new
+                    // name whose mode bookkeeping cannot follow.
+                    if matches!(tt, Type::Pool(_)) {
+                        if let Some(src) = Self::root_var_of_expr(value) {
+                            let src_is_pool = self
+                                .lookup(&src)
+                                .map(|(t, _)| matches!(t, Type::Pool(_)))
+                                .unwrap_or(false);
+                            if src_is_pool && src != *n {
+                                self.diag.error(
+                                    *span,
+                                    format!(
+                                        "cannot alias pool '{src}' into '{n}': pool objects \
+                                         are not copyable values — the declared mode cannot \
+                                         follow an alias, and the receiving binding accepts \
+                                         unguarded mutation. Use '{src}' by name. [E0803]"
+                                    ),
+                                );
+                            }
+                        }
                     }
                 }
                 if *op == AssignOp::Eq {
@@ -2772,6 +2981,24 @@ impl Checker<'_> {
                                 arg_expr.span,
                                 format!("cannot pass blueprint '{bp}' to spawn without locking"),
                             );
+                        } else if matches!(t, Type::Pool(_)) {
+                            // SWARM RABBIT HOLE — Wave 10 / DIFF-4
+                            // (Impl-O): the pool object is not a
+                            // Sendable argument (locals never; globals
+                            // per their mode).
+                            if let Some(n) = Self::root_var_of_expr(arg_expr) {
+                                self.check_pool_capture(&n, arg_expr.span);
+                            }
+                        } else if let Some(h) = Self::root_var_of_expr(arg_expr) {
+                            // DIFF-4 (Impl-O): a handle argument is
+                            // checked against its minting pool's mode
+                            // + the capture site's window (E0803.1/.2).
+                            // Provenance keys on handle_home — handles
+                            // are held in int vars on this surface, so
+                            // the declared type does not identify them.
+                            if let Some(p) = self.handle_home.get(&h).cloned() {
+                                self.check_handle_capture(&h, &p, arg_expr.span);
+                            }
                         }
                     }
                 } else {
@@ -2862,12 +3089,100 @@ impl Checker<'_> {
                 self.pop();
                 self.rgn_exit();
             }
-            Stmt::Frozen { body, .. } => {
+            Stmt::Frozen { names, body, span } => {
+                // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the
+                // mode-conflict rule — `frozen (P) {...}` refuses to
+                // list a Synchronized pool (the vault's lock IS its
+                // discipline; lane-freezing language around it would be
+                // a lie about what is protected).
+                for n in names {
+                    if self.db.global_pools.get(n) == Some(&GlobalPoolMode::Synchronized) {
+                        self.diag.error(
+                            *span,
+                            format!(
+                                "E0803.3: cannot freeze synchronized pool '{n}': a \
+                                 'synchronized' pool is already protected by its own lock — \
+                                 'frozen ({n})' would claim a protection it does not provide. [E0803]"
+                            ),
+                        );
+                    }
+                }
+                self.frozen_names_stack.push(names.clone());
                 self.push();
                 for s in body {
                     self.check_stmt(s);
                 }
                 self.pop();
+                self.frozen_names_stack.pop();
+            }            // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the
+            // `unfrozen (P) { ... }` window — the structured
+            // single-thread mutation window on a Frozen global pool
+            // (kills G1 §1 A6c). Enter = unfreeze (P's frozen_depth++
+            // at runtime, thread-exclusively), exit = re-freeze; inside
+            // the window insert/set/remove are legal on the declaring
+            // thread and capture of P's handles by spawn/chan is
+            // E0803.2 (the receiver could race the freelist with the
+            // mutator). Mode conflicts: a window on a ThreadConfined
+            // or Synchronized pool refuses to open (those modes have
+            // their own mutation discipline), and a window refuses to
+            // nest inside a `frozen (P)` block.
+            Stmt::Unfrozen { pool, body, span } => {
+                let mode = self.pool_mode_of(pool);
+                match mode {
+                    PoolModeCheck::Local => {
+                        // A local pool is single-thread by construction
+                        // (capture is rejected below); the window is a
+                        // harmless no-op that keeps the surface total.
+                    }
+                    PoolModeCheck::Global(GlobalPoolMode::Frozen) => {}
+                    PoolModeCheck::Global(GlobalPoolMode::ThreadConfined) => {
+                        self.diag.error(
+                            *span,
+                            format!(
+                                "E0803.3: cannot open 'unfrozen ({pool})': '{pool}' is \
+                                 'thread_local' — mutations are already legal on its declaring \
+                                 thread, and the window would only widen them. [E0803]"
+                            ),
+                        );
+                    }
+                    PoolModeCheck::Global(GlobalPoolMode::Synchronized) => {
+                        self.diag.error(
+                            *span,
+                            format!(
+                                "E0803.3: cannot open 'unfrozen ({pool})': '{pool}' is \
+                                 'synchronized' — every mutation is already legal under the \
+                                 pool's lock, and the window would bypass it. [E0803]"
+                            ),
+                        );
+                    }
+                    PoolModeCheck::NotAPool => {
+                        self.diag.error(
+                            *span,
+                            format!("unknown pool '{pool}' in 'unfrozen' window"),
+                        );
+                    }
+                }
+                if self
+                    .frozen_names_stack
+                    .iter()
+                    .any(|names| names.contains(pool))
+                {
+                    self.diag.error(
+                        *span,
+                        format!(
+                            "E0803.3: cannot open 'unfrozen ({pool})' inside a \
+                             'frozen ({pool})' block: the pool cannot be simultaneously \
+                             mutable and frozen in the same scope. [E0803]"
+                        ),
+                    );
+                }
+                self.unfrozen_stack.push(pool.clone());
+                self.push();
+                for s in body {
+                    self.check_stmt(s);
+                }
+                self.pop();
+                self.unfrozen_stack.pop();
             }
             Stmt::Guard { cond, else_body, .. } => {
                 let ct = self.check_expr(cond);
@@ -3703,7 +4018,7 @@ impl Checker<'_> {
                     *ep += 1;
                 }
             }
-            let t = self.method_ret(&bt, name, args, span);
+            let t = self.method_ret(base, &bt, name, args, span);
             if matches!(base.kind, ExprKind::OptionalChain(_))
                 && !matches!(t, Type::Optional(_) | Type::Void)
             {
@@ -3954,7 +4269,21 @@ impl Checker<'_> {
             "hton32" | "ntoh32" | "swap32" => Type::U32,
             "hton64" | "ntoh64" | "swap64" => Type::U64,
             "lane_alloc" | "lane_save" | "pool_new" => Type::Ptr,
-            "lane_restore" | "lane_freeze" | "lane_unfreeze" | "pool_set" | "pool_remove" => Type::Void,
+            "lane_restore" | "lane_freeze" | "lane_unfreeze" => Type::Void,
+            // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the
+            // E0803.3 gate on the intrinsic forms (`pool_set(gp, h, v)`
+            // / `pool_remove(gp, h)`) — the pool is the first
+            // argument's root, exactly like the pool_insert arm above.
+            "pool_set" | "pool_remove" => {
+                if let Some(Arg::Pos(p_expr)) = args.first() {
+                    self.check_global_pool_mutation(
+                        p_expr,
+                        if n == "pool_set" { "set" } else { "remove" },
+                        span,
+                    );
+                }
+                Type::Void
+            }
             "lane_used" | "pool_len" => Type::Int,
             "pool_is_valid" => Type::Bool,
             /* Tier-G Z-set builtins (SWARM RABBIT HOLE, P5 slice 1; W2C §1.1).
@@ -4072,7 +4401,11 @@ impl Checker<'_> {
                 Type::Void
             }
             "pool_insert" => {
+                // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the
+                // E0803.3 gate on the intrinsic form — the pool is the
+                // first argument's root (`pool_insert(gp, v)`).
                 if let Some(Arg::Pos(p_expr)) = args.first() {
+                    self.check_global_pool_mutation(p_expr, "insert", span);
                     let pt = self.db.expr_ty.get(&(p_expr.span.file, p_expr.span.start, p_expr.span.end)).cloned().unwrap_or(Type::Ptr);
                     if let Type::Pool(elem) = pt {
                         Type::Handle(elem)
@@ -4208,6 +4541,12 @@ impl Checker<'_> {
             // scope-local as the lane stamp — a binding leaving scope
             // takes its memory category with it.
             self.gc_managed.remove(n);
+            // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the
+            // handle-home provenance is as scope-local as the borrow
+            // epochs — a binding leaving scope takes its pool tag
+            // with it (a stale entry would misattribute a later
+            // same-named binding's captures).
+            self.handle_home.remove(n);
             // A moved binding becomes valid again in the enclosing scope only if
             // it was declared here; otherwise the move still stands.
             self.moved.remove(n);
@@ -4221,6 +4560,81 @@ impl Checker<'_> {
             ExprKind::Ident(n) => Some(n.clone()),
             ExprKind::Index { base, .. } | ExprKind::Member { base, .. } => Self::root_var_of_expr(base),
             _ => None,
+        }
+    }
+
+    /// SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the pool that
+    /// minted the handle this expression evaluates to — the
+    /// provenance the tree lacked (kills G1 §1 A6c). Recognized
+    /// shapes: the method form `gp.insert(v)` (root of the base), the
+    /// intrinsic form `pool_insert(gp, v)` (first arg's root), and a
+    /// transitive copy through an already-tracked handle ident
+    /// (`h2 = h1`). None = untracked (no mode check; the runtime
+    /// generation check remains the use-after-free guard).
+    fn handle_pool_of(&self, e: &Expr) -> Option<String> {
+        match &e.kind {
+            ExprKind::Call { callee, args, .. } => {
+                match &callee.kind {
+                    ExprKind::Member { base, name } if name == "insert" => {
+                        Self::root_var_of_expr(base)
+                    }
+                    ExprKind::Ident(f) if f == "pool_insert" => {
+                        args.first().and_then(|a| match a {
+                            Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. } => {
+                                Self::root_var_of_expr(e)
+                            }
+                        })
+                    }
+                    _ => None,
+                }
+            }
+            ExprKind::Ident(h) => self.handle_home.get(h).cloned(),
+            _ => None,
+        }
+    }
+
+    /// SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the mutability
+    /// class of the pool a name refers to — the global mode table
+    /// first (CheckDb.global_pools), then the local scopes (a local
+    /// pool: single-thread by construction, mode irrelevant).
+    fn pool_mode_of(&self, name: &str) -> PoolModeCheck {
+        if let Some(&mode) = self.db.global_pools.get(name) {
+            return PoolModeCheck::Global(mode);
+        }
+        if self
+            .lookup(name)
+            .map(|(t, _)| matches!(t, Type::Pool(_)))
+            .unwrap_or(false)
+        {
+            return PoolModeCheck::Local;
+        }
+        PoolModeCheck::NotAPool
+    }
+
+    /// DIFF-4, the E0803.3 gate (frozen-by-default enforcement):
+    /// insert/set/remove on a Frozen GLOBAL pool outside an
+    /// `unfrozen` window are rejected. ThreadConfined pools mutate on
+    /// their declaring thread (E0803.1 handles capture; the runtime
+    /// home-thread tag is the backstop); Synchronized pools mutate
+    /// under their lock; local pools are single-thread by
+    /// construction. The verbatim diagnostic names the op and both
+    /// discharges (the window, the two mode declarations).
+    fn check_global_pool_mutation(&mut self, pool_expr: &Expr, op: &str, span: Span) {
+        let Some(p) = Self::root_var_of_expr(pool_expr) else {
+            return;
+        };
+        if self.db.global_pools.get(&p) == Some(&GlobalPoolMode::Frozen)
+            && !self.unfrozen_stack.contains(&p)
+        {
+            self.diag.error(
+                span,
+                format!(
+                    "E0803.3: cannot mutate global pool '{p}' ({op}): global pools are \
+                     frozen by default. Wrap the mutation in 'unfrozen ({p}) {{ ... }}', \
+                     or declare the pool 'thread_local' (single-thread) or \
+                     'synchronized' (locked). [E0803]"
+                ),
+            );
         }
     }
 
@@ -4432,6 +4846,42 @@ impl Checker<'_> {
             );
             return;
         }
+        // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the param
+        // form of the alias gate — passing a pool OBJECT by value into
+        // a pool-typed parameter rebinds the runtime object under a
+        // local name whose mutation the checker cannot mode-check
+        // (the callee's body sees a single-thread local). Pool
+        // objects are not copyable values; only handles cross.
+        for (i, a) in args.iter().enumerate() {
+            if let Some(p) = params.get(i) {
+                if !matches!(p.1, Type::Pool(_)) {
+                    continue;
+                }
+                let expr = match a {
+                    Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. } => e,
+                };
+                if let Some(src) = Self::root_var_of_expr(expr) {
+                    let src_is_pool = self
+                        .lookup(&src)
+                        .map(|(t, _)| matches!(t, Type::Pool(_)))
+                        .unwrap_or(false);
+                    if src_is_pool {
+                        self.diag.error(
+                            expr.span,
+                            format!(
+                                "cannot pass pool '{src}' by value to '{}': pool objects \
+                                 are not copyable values — the parameter binding accepts \
+                                 unguarded mutation and the declared mode cannot follow \
+                                 the call. Pass the pool's handles (ints), or make the \
+                                 callee take the pool as 'ptr' and re-prove its \
+                                 discipline. [E0803]",
+                                sig.name
+                            ),
+                        );
+                    }
+                }
+            }
+        }
         let inout_flags = if is_method && sig.inout_params.len() > param_offset {
             &sig.inout_params[param_offset..]
         } else {
@@ -4629,7 +5079,13 @@ impl Checker<'_> {
         None
     }
 
-    fn method_ret(&mut self, bt: &Type, name: &str, args: &[Arg], span: Span) -> Type {
+    /// SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): `recv` (the
+    /// method-call receiver expression) is now carried alongside the
+    /// receiver type — the E0803.3 mutation gate roots the pool's
+    /// identity from the receiver (`gp.insert(..)` → pool `gp`),
+    /// exactly like the borrow bookkeeping at the list/map mutation
+    /// sites.
+    fn method_ret(&mut self, recv: &Expr, bt: &Type, name: &str, args: &[Arg], span: Span) -> Type {
         let base = match bt {
             Type::Optional(inner) => inner.as_ref(),
             other => other,
@@ -4757,6 +5213,28 @@ impl Checker<'_> {
                 } else if !t.assignable_from(&at, &self.db.blueprints) && at != **t {
                     self.diag.error(arg_expr.span, format!("cannot send value of type {at} over chan<{t}>"));
                 }
+                // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the
+                // chan-send Sendable gate for pools and handles (kills
+                // G1 §1 A6c). A channel handoff crosses threads
+                // exactly like an unscoped spawn: a local pool is not
+                // Sendable; a ThreadConfined pool/handle never leaves
+                // its declaring thread (E0803.1); a Frozen pool's
+                // handle sent while the pool is unfrozen at the send
+                // site is E0803.2 (the receiver could race the
+                // freelist with the mutator); Frozen-outside-window and
+                // Synchronized handles send freely. Handle provenance
+                // keys on handle_home — handles are held in int vars on
+                // this surface, so the declared type does not identify
+                // them.
+                if matches!(at, Type::Pool(_)) {
+                    if let Some(n) = Self::root_var_of_expr(arg_expr) {
+                        self.check_pool_capture(&n, arg_expr.span);
+                    }
+                } else if let Some(h) = Self::root_var_of_expr(arg_expr) {
+                    if let Some(p) = self.handle_home.get(&h).cloned() {
+                        self.check_handle_capture(&h, &p, arg_expr.span);
+                    }
+                }
                 if let Some(x) = Self::root_var_of_expr(arg_expr) {
                     self.moved.insert(x.clone(), span);
                     self.channel_moved.insert(x);
@@ -4783,6 +5261,11 @@ impl Checker<'_> {
             (Type::Json, "at") => Type::Json,
             (Type::Json, "keys") => Type::List(Box::new(Type::Str)),
             (Type::Pool(elem), "insert") => {
+                // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the
+                // E0803.3 gate at the mutation seam — insert/set/
+                // remove on a Frozen global pool outside an
+                // `unfrozen` window (frozen-by-default enforcement).
+                self.check_global_pool_mutation(recv, "insert", span);
                 if let Some(Arg::Pos(e)) = args.first() {
                     let vt = self.check_expr(e);
                     if !elem.assignable_from(&vt, &self.db.blueprints) {
@@ -4804,6 +5287,8 @@ impl Checker<'_> {
                 Type::Ref(elem.clone())
             }
             (Type::Pool(elem), "set") => {
+                // DIFF-4 (Impl-O): the E0803.3 gate — see the insert arm.
+                self.check_global_pool_mutation(recv, "set", span);
                 if let Some(Arg::Pos(e)) = args.first() {
                     self.check_expr(e);
                 }
@@ -4816,6 +5301,8 @@ impl Checker<'_> {
                 Type::Void
             }
             (Type::Pool(_), "remove") => {
+                // DIFF-4 (Impl-O): the E0803.3 gate — see the insert arm.
+                self.check_global_pool_mutation(recv, "remove", span);
                 if let Some(Arg::Pos(e)) = args.first() {
                     self.check_expr(e);
                 }
@@ -5003,27 +5490,27 @@ impl Checker<'_> {
             match s {
                 Stmt::Decl { names, value, .. } => {
                     if let Some(v) = value {
-                        self.check_spawn_expr(v, locals, in_lock);
+                        self.check_spawn_expr_root(v, locals, in_lock);
                     }
                     for n in names {
                         locals.insert(n.clone());
                     }
                 }
                 Stmt::Assign { target, value, .. } => {
-                    self.check_spawn_expr(target, locals, in_lock);
-                    self.check_spawn_expr(value, locals, in_lock);
+                    self.check_spawn_expr_root(target, locals, in_lock);
+                    self.check_spawn_expr_root(value, locals, in_lock);
                 }
                 Stmt::Expr(e) => {
-                    self.check_spawn_expr(e, locals, in_lock);
+                    self.check_spawn_expr_root(e, locals, in_lock);
                 }
                 Stmt::LockBlock { body, .. } => {
                     self.check_spawn_stmts(body, locals, true);
                 }
                 Stmt::If { cond, then_body, else_ifs, else_body, .. } => {
-                    self.check_spawn_expr(cond, locals, in_lock);
+                    self.check_spawn_expr_root(cond, locals, in_lock);
                     self.check_spawn_stmts(then_body, locals, in_lock);
                     for (c, b) in else_ifs {
-                        self.check_spawn_expr(c, locals, in_lock);
+                        self.check_spawn_expr_root(c, locals, in_lock);
                         self.check_spawn_stmts(b, locals, in_lock);
                     }
                     if let Some(eb) = else_body {
@@ -5031,23 +5518,23 @@ impl Checker<'_> {
                     }
                 }
                 Stmt::While { cond, body, .. } => {
-                    self.check_spawn_expr(cond, locals, in_lock);
+                    self.check_spawn_expr_root(cond, locals, in_lock);
                     self.check_spawn_stmts(body, locals, in_lock);
                 }
                 Stmt::ForCount { init, cond, step, body, .. } => {
                     self.check_spawn_stmts(std::slice::from_ref(init), locals, in_lock);
-                    self.check_spawn_expr(cond, locals, in_lock);
+                    self.check_spawn_expr_root(cond, locals, in_lock);
                     self.check_spawn_stmts(std::slice::from_ref(step), locals, in_lock);
                     self.check_spawn_stmts(body, locals, in_lock);
                 }
                 Stmt::ForIn { name, iter, body, .. } => {
-                    self.check_spawn_expr(iter, locals, in_lock);
+                    self.check_spawn_expr_root(iter, locals, in_lock);
                     locals.insert(name.clone());
                     self.check_spawn_stmts(body, locals, in_lock);
                 }
                 Stmt::Return { value, .. } => {
                     if let Some(v) = value {
-                        self.check_spawn_expr(v, locals, in_lock);
+                        self.check_spawn_expr_root(v, locals, in_lock);
                     }
                 }
                 Stmt::Defer { body, .. }
@@ -5057,9 +5544,290 @@ impl Checker<'_> {
                 | Stmt::Frozen { body, .. } => {
                     self.check_spawn_stmts(body, locals, in_lock);
                 }
+                // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the
+                // spawn walk recurses into the new Unfrozen stmt with
+                // the window OPEN for the body — a handle captured
+                // inside a task's own window is E0803.2 exactly like
+                // the outer window (the task could hand it to yet
+                // another thread while the pool is mutable), and the
+                // window body's mutations hit the spawn-body
+                // mutation seam.
+                Stmt::Unfrozen { pool, body, .. } => {
+                    self.unfrozen_stack.push(pool.clone());
+                    self.check_spawn_stmts(body, locals, in_lock);
+                    self.unfrozen_stack.pop();
+                }
                 _ => {}
             }
         }
+    }
+
+    /// SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the E0803.1/.2
+    /// capture seam + the spawn-body mutation seam, walked over every
+    /// expression an UNSCOPED spawn (or chan send) can see (kills
+    /// G1 §1 A6c — the global-pool freelist race).
+    ///
+    /// Called ONCE per statement-root expression (check_spawn_expr_
+    /// root below) — the walker recurses through the whole expression
+    /// itself, so calling it at every check_spawn_expr recursion level
+    /// would fire each diagnostic several times. Runs REGARDLESS of
+    /// `in_lock`: a named user lock never covers a pool's freelist;
+    /// pools carry their own mode (Frozen/ThreadConfined/Synchronized).
+    ///
+    ///   • POOL OBJECT capture (`Type::Pool`): a local pool is not
+    ///     Sendable at all; a ThreadConfined pool never leaves its
+    ///     declaring thread (E0803.1); a Frozen pool captured INSIDE
+    ///     its `unfrozen` window is rejected (E0803.2 — the receiver
+    ///     could race the freelist with the mutator); Frozen captured
+    ///     outside any window and Synchronized pools are Sendable.
+    ///   • HANDLE capture (provenance from `handle_home` — the minting
+    ///     pool recorded at the binding site; handles are held in int
+    ///     vars on this surface, so the declared type does not
+    ///     identify them): the same mode+window rule keyed on the
+    ///     minting pool — E0803.1 (ThreadConfined), E0803.2 (Frozen
+    ///     in window). Frozen-outside-window handles are the
+    ///     zero-copy shared read (no legal write path exists, so the
+    ///     freelist cannot be raced); Synchronized handles are
+    ///     Sendable everywhere.
+    ///   • MUTATION inside a spawned task (insert/set/remove on a
+    ///     pool): only Synchronized pools accept cross-thread
+    ///     mutation — an `unfrozen` window is single-thread by
+    ///     contract and the task runs on another thread.
+    fn check_spawn_pool_rules(&mut self, e: &Expr, locals: &HashSet<String>) {
+        match &e.kind {
+            ExprKind::Ident(n) => {
+                if locals.contains(n) {
+                    return;
+                }
+                if let Some((t, _)) = self.lookup(n) {
+                    if matches!(t, Type::Pool(_)) {
+                        self.check_pool_capture(n, e.span);
+                    }
+                }
+                if let Some(p) = self.handle_home.get(n).cloned() {
+                    self.check_handle_capture(n, &p, e.span);
+                }
+            }
+            ExprKind::Call { callee, args, .. } => {
+                // The mutation seam: a pool mutation executed inside a
+                // spawned task runs on ANOTHER thread — the freelist
+                // race the modes exist to prevent.
+                match &callee.kind {
+                    ExprKind::Member { base, name }
+                        if matches!(name.as_str(), "insert" | "set" | "remove") =>
+                    {
+                        if let Some(root) = Self::root_var_of_expr(base) {
+                            let is_pool = self
+                                .lookup(&root)
+                                .map(|(t, _)| matches!(t, Type::Pool(_)))
+                                .unwrap_or(false);
+                            if is_pool && !locals.contains(&root) {
+                                self.check_spawn_body_mutation(&root, name, e.span);
+                            }
+                        }
+                    }
+                    ExprKind::Ident(f)
+                        if matches!(f.as_str(), "pool_insert" | "pool_set" | "pool_remove") =>
+                    {
+                        if let Some(Arg::Pos(p_expr) | Arg::Inout(p_expr)) = args.first() {
+                            if let Some(root) = Self::root_var_of_expr(p_expr) {
+                                let is_pool = self
+                                    .lookup(&root)
+                                    .map(|(t, _)| matches!(t, Type::Pool(_)))
+                                    .unwrap_or(false);
+                                if is_pool && !locals.contains(&root) {
+                                    let op = match f.as_str() {
+                                        "pool_insert" => "insert",
+                                        "pool_set" => "set",
+                                        _ => "remove",
+                                    };
+                                    self.check_spawn_body_mutation(&root, op, e.span);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                self.check_spawn_pool_rules(callee, locals);
+                for a in args {
+                    let ae = match a {
+                        Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. } => e,
+                    };
+                    self.check_spawn_pool_rules(ae, locals);
+                }
+            }
+            ExprKind::Binary { lhs, rhs, .. } => {
+                self.check_spawn_pool_rules(lhs, locals);
+                self.check_spawn_pool_rules(rhs, locals);
+            }
+            ExprKind::Unary { expr, .. }
+            | ExprKind::Cast { expr, .. }
+            | ExprKind::Await(expr)
+            | ExprKind::Try(expr)
+            | ExprKind::ForceUnwrap(expr)
+            | ExprKind::OptionalChain(expr) => {
+                self.check_spawn_pool_rules(expr, locals);
+            }
+            ExprKind::Member { base, .. } | ExprKind::Index { base, .. } => {
+                self.check_spawn_pool_rules(base, locals);
+            }
+            _ => {}
+        }
+    }
+
+    /// DIFF-4 (Impl-O): the pool OBJECT crossing an unscoped spawn/chan
+    /// boundary. Locals are not Sendable (the owning frame can die
+    /// while the task runs — and two threads on one freelist is
+    /// exactly A6c); ThreadConfined never leaves its thread; Frozen is
+    /// Sendable EXCEPT inside its own mutable window.
+    fn check_pool_capture(&mut self, n: &str, span: Span) {
+        match self.pool_mode_of(n) {
+            PoolModeCheck::Global(GlobalPoolMode::Frozen)
+                if self.unfrozen_stack.iter().any(|p| p == n) =>
+            {
+                self.diag.error(
+                    span,
+                    format!(
+                        "E0803.2: cannot access pool '{n}' in unscoped spawn/chan: '{n}' is \
+                         unfrozen in this scope (mutable window) and the receiving thread could \
+                         race its freelist. Move the capture outside the 'unfrozen ({n})' block, \
+                         or declare '{n}' 'synchronized'. [E0803]"
+                    ),
+                );
+            }
+            PoolModeCheck::Global(GlobalPoolMode::Frozen) => {
+                // The Sendable frozen read: no legal write path exists,
+                // so no thread can corrupt or race the freelist.
+            }
+            PoolModeCheck::Global(GlobalPoolMode::Synchronized) => {
+                // The locked vault: every op serialized behind the
+                // pool's lock — Sendable everywhere.
+            }
+            PoolModeCheck::Global(GlobalPoolMode::ThreadConfined) => {
+                self.diag.error(
+                    span,
+                    format!(
+                        "E0803.1: cannot access pool '{n}' in unscoped spawn/chan: '{n}' is \
+                         'thread_local' — its freelist belongs to the declaring thread. Declare \
+                         '{n}' 'synchronized' for cross-thread access. [E0803]"
+                    ),
+                );
+            }
+            PoolModeCheck::Local => {
+                self.diag.error(
+                    span,
+                    format!(
+                        "cannot access local pool '{n}' in unscoped spawn/chan: a local pool's \
+                         storage and freelist are not Sendable (the owning frame can die while \
+                         the task runs, and two threads on one freelist is the freelist-\
+                         corruption race). Send handles from a global pool, or hoist '{n}' to a \
+                         global 'frozen'/'synchronized' pool. [E0803]"
+                    ),
+                );
+            }
+            PoolModeCheck::NotAPool => {}
+        }
+    }
+
+    /// DIFF-4 (Impl-O): a HANDLE crossing an unscoped spawn/chan
+    /// boundary, keyed on the minting pool's mode and the capture
+    /// site's mutable-window depth. E0803.2 is the A6c kill: a handle
+    /// into a Frozen pool captured while the pool is unfrozen would
+    /// let the receiving thread race the freelist with the mutator.
+    fn check_handle_capture(&mut self, h: &str, pool: &str, span: Span) {
+        match self.pool_mode_of(pool) {
+            PoolModeCheck::Global(GlobalPoolMode::Frozen)
+                if self.unfrozen_stack.iter().any(|p| p == pool) =>
+            {
+                self.diag.error(
+                    span,
+                    format!(
+                        "E0803.2: cannot capture/send handle '{h}' from pool '{pool}' in \
+                         unscoped spawn/chan: '{pool}' is unfrozen in this scope (mutable \
+                         window) and the receiving thread could race its freelist. Move the \
+                         capture outside the 'unfrozen ({pool})' block, or declare '{pool}' \
+                         'synchronized'. [E0803]"
+                    ),
+                );
+            }
+            PoolModeCheck::Global(GlobalPoolMode::Frozen)
+            | PoolModeCheck::Global(GlobalPoolMode::Synchronized) => {
+                // Sendable: frozen-outside-window (no legal write path)
+                // or synchronized (every op locked).
+            }
+            PoolModeCheck::Global(GlobalPoolMode::ThreadConfined) => {
+                self.diag.error(
+                    span,
+                    format!(
+                        "E0803.1: cannot capture/send handle '{h}' from pool '{pool}' in \
+                         unscoped spawn/chan: '{pool}' is 'thread_local' — handles carry its \
+                         home-thread tag and never leave the declaring thread. Declare '{pool}' \
+                         'synchronized' for cross-thread access. [E0803]"
+                    ),
+                );
+            }
+            PoolModeCheck::Local => {
+                self.diag.error(
+                    span,
+                    format!(
+                        "cannot capture/send handle '{h}' from pool '{pool}' in unscoped \
+                         spawn/chan: '{pool}' is local — its frame can die before the receiving \
+                         thread runs. Send handles only from global pools. [E0803]"
+                    ),
+                );
+            }
+            PoolModeCheck::NotAPool => {}
+        }
+    }
+
+    /// DIFF-4 (Impl-O): mutation executed inside a spawned task — the
+    /// task body runs on ANOTHER thread, so only the Synchronized
+    /// mode's per-op lock makes the mutation safe; a ThreadConfined
+    /// freelist belongs to the declaring thread (E0803.1), and a
+    /// Frozen pool's `unfrozen` window is single-thread by contract
+    /// (the window itself cannot legalize cross-thread mutation).
+    fn check_spawn_body_mutation(&mut self, pool: &str, op: &str, span: Span) {
+        match self.pool_mode_of(pool) {
+            PoolModeCheck::Global(GlobalPoolMode::Synchronized) => {}
+            PoolModeCheck::Global(GlobalPoolMode::ThreadConfined) => {
+                self.diag.error(
+                    span,
+                    format!(
+                        "E0803.1: cannot mutate pool '{pool}' ({op}) inside a spawned task: \
+                         '{pool}' is 'thread_local' — its freelist belongs to the declaring \
+                         thread. Declare '{pool}' 'synchronized' for cross-thread mutation. [E0803]"
+                    ),
+                );
+            }
+            PoolModeCheck::Global(GlobalPoolMode::Frozen) => {
+                self.diag.error(
+                    span,
+                    format!(
+                        "cannot mutate pool '{pool}' ({op}) inside a spawned task: only \
+                         'synchronized' pools accept cross-thread mutation — an 'unfrozen' \
+                         window is single-thread by contract and the task runs on another \
+                         thread. [E0803]"
+                    ),
+                );
+            }
+            PoolModeCheck::Local | PoolModeCheck::NotAPool => {
+                // A captured LOCAL pool's error fires at the pool-ident
+                // capture site (check_pool_capture) — the root cause;
+                // a task-local pool is single-thread by construction.
+            }
+        }
+    }
+
+    /// DIFF-4 (Impl-O): the statement-root entry of the spawn walk —
+    /// the pool-rules walker runs ONCE over the whole root expression
+    /// (it recurses itself; running it per recursion node would fire
+    /// each diagnostic several times), then the per-node
+    /// Ref/Mut/Ptr/Blueprint walk proceeds unchanged. Pool rules run
+    /// regardless of `in_lock`: a named user lock never covers a
+    /// pool's freelist.
+    fn check_spawn_expr_root(&mut self, e: &Expr, locals: &HashSet<String>, in_lock: bool) {
+        self.check_spawn_pool_rules(e, locals);
+        self.check_spawn_expr(e, locals, in_lock);
     }
 
     fn check_spawn_expr(&mut self, e: &Expr, locals: &HashSet<String>, in_lock: bool) {

@@ -459,6 +459,7 @@ fn keyword(text: &str) -> TokenKind {
         "errdefer" => TokenKind::Errdefer,
         "verified" => TokenKind::Verified,
         "frozen" => TokenKind::Frozen,
+        "unfrozen" => TokenKind::Unfrozen,
         "resource" => TokenKind::Resource,
         "region" => TokenKind::Region,
         "nursery" => TokenKind::Nursery,

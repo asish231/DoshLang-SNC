@@ -1,0 +1,248 @@
+// SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O, Cohort Delta): the
+// global-pool discipline's benchmark, in-language — the per-op price
+// of the three declared modes (kills G1 §1 A6c). The frozen default
+// is the zero-cost path (no lock, no guard); synchronization prices
+// exactly what it buys (the vault lock around every freelist
+// mutation); the thread_local mode prices the home-thread guard; the
+// unfrozen window prices its own freeze/unfreeze pair per window,
+// amortized over the window's ops.
+//
+// Shape (the lcell_bench / zfix_bench W2F discipline, verbatim):
+// SNlang's only clock is the ms-resolution time_now_ms, so every
+// timed phase below totals >= 100x that (R rounds of N = 1M ops
+// each); the driver (bench/run_bench.sh, GP_ONLY=1) runs one warmup
+// at R/10 then RUNS timed runs and takes the median; every row prints
+// its own deterministic checksum, and the checksums must match across
+// all runs.
+//
+// Rows (per timed run; R = rounds, N = 1_000_000 ops per round):
+//   timer       — 100_000 time_now_ms() call pairs: the clock row.
+//   frozen_read — R x { N x pool.get on a FROZEN pool }: the zero-
+//                 lock shared read. Checksum: the sum of all N
+//                 values (i*3+1 summed over a full pass = the
+//                 triangular number formula, asserted).
+//   frozen_set  — R x { one unfrozen window + N x pool.set }: the
+//                 window mutation — the freeze/unfreeze pair
+//                 amortized over N ops (the window is the ONLY legal
+//                 write path on a frozen pool).
+//   sync_set    — R x { N x pool.set on a SYNCHRONIZED pool }: the
+//                 locked op — sn_pool_set takes the vault mutex
+//                 (maybe_lock/maybe_unlock) around the checked write.
+//   sync_insert — R x { N/K inserts + N/K removes on the SYNCHRONIZED
+//                 pool }: the locked freelist mutation (insert takes
+//                 the lock around the alloc_slot + the free_head pop;
+//                 remove around the free_head push) — the operation
+//                 the modes exist to serialize.
+//   tl_insert   — R x { N/K inserts + N/K removes on a THREAD_LOCAL
+//                 pool }: the home-thread-guard op (the E0803.1
+//                 backstop tag check per mutation, no lock — the
+//                 single-thread price).
+//
+// THE HONEST CLAIM: the frozen default is the zero-cost path — its
+// read row carries no lock, no guard, no atomic; the synchronized
+// rows carry the mutex pair per op (the price of the data-race-
+// freedom guarantee: no two threads can ever interleave
+// insert/remove on one pool); the thread_local row carries the tag
+// check but no lock (the price of confinement: the declaring thread
+// only). The window's freeze/unfreeze is O(1) per window and
+// amortizes to ~0 at N ops per window.
+
+use std.os
+
+// The three GLOBAL pools (module scope — the declarations DIFF-4
+// governs; constructed at main's entry with their declared modes):
+// a frozen default, a synchronized vault, a thread_local pool.
+pool<int> gfr = pool_new<int>(8)
+pool<int> synchronized gsy = pool_new<int>(8)
+pool<int> thread_local gtl = pool_new<int>(8)
+
+fn report(str row, int ns_per_op, int phase_ms, int ops, int ck) {
+    print("BENCH row=" + row + " ns_per_op=" + cast(ns_per_op, str)
+        + " phase_ms=" + cast(phase_ms, str)
+        + " ops=" + cast(ops, str)
+        + " checksum=" + cast(ck, str))
+}
+
+fn main() {
+    int n = 1000000
+    int rounds = 10
+    list<str> a = args()
+    if (a.length() > 1) {
+        int v = cast(a[1], int)
+        if (v > 0) {
+            rounds = v
+        }
+    }
+    int r1 = rounds
+    if (r1 < 1) { r1 = 1 }
+    gc_set_threshold(2000000000)
+    // ---- timer overhead: 100_000 time_now_ms() call pairs
+    int t0 = time_now_ms()
+    int kt = 0
+    int acct = 0
+    while (kt < 100000) {
+        acct = acct + time_now_ms()
+        kt = kt + 1
+    }
+    int t1 = time_now_ms()
+    report("timer", (t1 - t0) * 1000000 / 100000, t1 - t0, 100000, acct)
+
+    // ---- the pools (outside every timed phase): three REAL GLOBAL
+    //      pools — module-scope declarations, where the DIFF-4
+    //      discipline governs (frozen by default; the annotated modes
+    //      construct via sn_pool_new_mode at main's entry) — each
+    //      holding n/100 live values so get/set hit real slots.
+    int per = n / 100
+    unfrozen (gfr) {
+        int i = 0
+        while (i < per) {
+            gfr.insert(i * 3 + 1)
+            i = i + 1
+        }
+    }
+    int j = 0
+    while (j < per) {
+        gsy.insert(j * 3 + 1)
+        j = j + 1
+    }
+    j = 0
+    while (j < per) {
+        gtl.insert(j * 3 + 1)
+        j = j + 1
+    }
+
+    // the expected full-pass checksum: sum(i*3+1, i=0..per-1)
+    //   = 3*(per-1)*per/2 + per = per*(3*per-1)/2
+    int expect = per * (3 * per - 1) / 2
+
+    // ---- frozen_read: R x { N x get } — the zero-lock shared read.
+    int ck = 0
+    int r = 0
+    int h0 = 4294967296  // handle for slot 0, gen 1
+    int ta0 = time_now_ms()
+    while (r < r1) {
+        int k = 0
+        int sum = 0
+        while (k < n) {
+            int idx = k - (k / per) * per
+            sum = sum + gfr.get(h0 + idx)
+            k = k + 1
+        }
+        ck = ck + sum
+        r = r + 1
+    }
+    int ta1 = time_now_ms()
+    report("frozen_read", (ta1 - ta0) * 1000000 / (r1 * n), ta1 - ta0, r1 * n, ck / r1)
+    if (ck / r1 != expect * (n / per)) {
+        print("MISMATCH frozen_read expected=" + cast(expect * (n / per), str))
+    }
+
+    // ---- frozen_set: R x { one window + N x set } — the window
+    //      mutation (freeze/unfreeze amortized over N ops). A restore
+    //      pass re-writes the canonical values after each round's
+    //      stream so every round starts from the same state; it is
+    //      inside the phase's wall time but outside the op count
+    //      (1% of the ops — see RESULTS_GPOOL.md §4).
+    ck = 0
+    r = 0
+    int tb0 = time_now_ms()
+    while (r < r1) {
+        unfrozen (gfr) {
+            int k = 0
+            while (k < n) {
+                int idx = k - (k / per) * per
+                gfr.set(h0 + idx, k - (k / per) * per * 2 + 1)
+                k = k + 1
+            }
+        }
+        int k2 = 0
+        while (k2 < per) {
+            unfrozen (gfr) {
+                gfr.set(h0 + k2, k2 * 3 + 1)
+            }
+            k2 = k2 + 1
+        }
+        ck = ck + 1
+        r = r + 1
+    }
+    int tb1 = time_now_ms()
+    report("frozen_set", (tb1 - tb0) * 1000000 / (r1 * n), tb1 - tb0, r1 * n, ck)
+    gc_collect()
+
+    // ---- sync_set: R x { N x set } on the synchronized pool — the
+    //      locked op (the vault mutex around the checked write).
+    ck = 0
+    r = 0
+    int tc0 = time_now_ms()
+    while (r < r1) {
+        int k = 0
+        while (k < n) {
+            int idx = k - (k / per) * per
+            gsy.set(h0 + idx, idx * 3 + 1)
+            k = k + 1
+        }
+        ck = ck + 1
+        r = r + 1
+    }
+    int tc1 = time_now_ms()
+    report("sync_set", (tc1 - tc0) * 1000000 / (r1 * n), tc1 - tc0, r1 * n, ck)
+    gc_collect()
+
+    // ---- sync_insert: R x { N/K inserts + N/K removes } on the
+    //      synchronized pool — the locked FREELIST mutation (the op
+    //      the modes exist to serialize). K keeps each round at
+    //      n/K = 200_000 insert+remove pairs (the freelist mutation
+    //      is the expensive op; n pairs per round would dwarf the
+    //      read rows — the driver reports per-op so the ratio stays
+    //      honest). K = 5: 400_000 ops/round, 10 rounds = 4M ops,
+    //      >= 100x the ms clock at ~10ns/op.
+    int kdiv = 5
+    int pairs = n / kdiv
+    ck = 0
+    r = 0
+    int td0 = time_now_ms()
+    while (r < r1) {
+        int k = 0
+        while (k < pairs) {
+            int h = gsy.insert(k + 1)
+            gsy.remove(h)
+            k = k + 1
+        }
+        ck = ck + gsy.len()
+        r = r + 1
+    }
+    int td1 = time_now_ms()
+    report("sync_insert", (td1 - td0) * 1000000 / (r1 * pairs * 2), td1 - td0, r1 * pairs * 2, ck / r1)
+
+    // ---- tl_insert: the same shape on the thread_local pool — the
+    //      home-thread-guard op (no lock; the tag check per mutation).
+    ck = 0
+    r = 0
+    int te0 = time_now_ms()
+    while (r < r1) {
+        int k = 0
+        while (k < pairs) {
+            int h = gtl.insert(k + 1)
+            gtl.remove(h)
+            k = k + 1
+        }
+        ck = ck + gtl.len()
+        r = r + 1
+    }
+    int te1 = time_now_ms()
+    report("tl_insert", (te1 - te0) * 1000000 / (r1 * pairs * 2), te1 - te0, r1 * pairs * 2, ck / r1)
+
+    // ---- the value-integrity cross-check (untimed): every row's
+    //      pool still holds its canonical values.
+    int ok = 1
+    int i = 0
+    while (i < per) {
+        if (gfr.get(h0 + i) != i * 3 + 1) { ok = 0 }
+        if (gsy.get(h0 + i) != i * 3 + 1) { ok = 0 }
+        if (gtl.get(h0 + i) != i * 3 + 1) { ok = 0 }
+        i = i + 1
+    }
+    print("values_ok=" + cast(ok, str))
+    print("len_gfr=" + cast(gfr.len(), str) + " len_gsy=" + cast(gsy.len(), str) + " len_gtl=" + cast(gtl.len(), str))
+    print("GP_BENCH_DONE")
+}

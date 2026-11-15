@@ -1,0 +1,24 @@
+// SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the `unfrozen (P)`
+// window — the structured single-thread mutation surface of a frozen
+// global pool (the Stmt::Frozen lowering shape's syntactic mirror).
+//
+// Inside the window: insert/set/remove legal on the declaring thread.
+// Outside: E0803.3. At window exit the pool re-freezes and reads (and
+// spawn capture of its handles) become legal again — the Mode-A
+// frozen story restored.
+//
+// This file is a RUN golden case: it must compile, run, and print
+// exactly the asserted output (tests/golden.rs).
+
+pool<int> gcache = pool_new<int>(8)
+
+fn main() {
+    int h = 0
+    unfrozen (gcache) {
+        h = gcache.insert(41)
+        gcache.set(h, 99)
+    }
+    int v = gcache.get(h)      // frozen read outside the window — legal
+    print(v)                   // 99
+    print(gcache.len())        // 1
+}

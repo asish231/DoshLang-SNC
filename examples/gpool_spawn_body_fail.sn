@@ -1,0 +1,29 @@
+// SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the spawn-body
+// discipline — a spawned task's body runs on ANOTHER thread, so the
+// two cross-thread pool rules fire inside it:
+//
+//   (i)  a LOCAL pool object is not Sendable at all — the owning
+//        frame can die while the task runs, and two threads on one
+//        freelist is exactly the A6c race;
+//   (ii) a global frozen (or thread_local) pool mutated from a
+//        spawned task races the window's freelist — only
+//        'synchronized' pools accept cross-thread mutation (every op
+//        locked).
+//
+// This file is a compile-FAIL golden case (tests/golden.rs): both
+// diagnostics must fire.
+
+pool<int> gw = pool_new<int>(8)
+
+fn main() {
+    pool<int> lp = pool_new<int>(8)   // a LOCAL pool
+    int h = lp.insert(4)
+    int k = 0
+    unfrozen (gw) {
+        k = gw.insert(1)
+        spawn {
+            int r = lp.get(h)          // E0803: local pool not Sendable
+            gw.insert(2)               // E0803: frozen pool mutated in a spawn body
+        }
+    }
+}

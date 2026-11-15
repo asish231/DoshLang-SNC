@@ -1,0 +1,25 @@
+// SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the ALIAS closure —
+// the second seam of A6c. `pool<int> q = gfr` (or passing `gfr` by
+// value into a `pool<T>`-typed parameter) would rebind a global pool
+// under a LOCAL name: locals accept unguarded mutation (their
+// "single-thread by construction" story is a LIE once the local
+// aliases a global), and the declared mode cannot follow the alias —
+// the mode table is keyed by the declared name. Pool objects are
+// therefore not copyable values: only handles (ints) cross, and the
+// pool is used by its declared name. All three alias forms are
+// rejected: the declaration alias, the assignment alias, and the
+// parameter alias.
+//
+// This file is a compile-FAIL golden case (tests/golden.rs).
+
+pool<int> gall = pool_new<int>(8)
+
+fn take(pool<int> p) {
+    int h = p.insert(1)
+}
+
+fn main() {
+    pool<int> q = gall            // E0803: declaration alias
+    q = gall                      // E0803: assignment alias
+    take(gall)                    // E0803: parameter alias
+}

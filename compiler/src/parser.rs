@@ -758,6 +758,22 @@ impl Parser {
                     span: start.merge(self.prev_span()),
                 })
             }
+            // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the
+            // `unfrozen (P) { ... }` window — Stmt::Frozen's pattern
+            // (parser.rs:741), exactly one pool (the window is
+            // per-pool: P's freelist is what a receiver could race).
+            TokenKind::Unfrozen => {
+                let start = self.bump().span;
+                self.eat(TokenKind::LParen)?;
+                let pool = self.expect_ident()?;
+                self.eat(TokenKind::RParen)?;
+                let body = self.parse_block()?;
+                Ok(Stmt::Unfrozen {
+                    pool,
+                    body,
+                    span: start.merge(self.prev_span()),
+                })
+            }
             TokenKind::Stop => {
                 let span = self.bump().span;
                 Ok(Stmt::Stop(span))
@@ -871,6 +887,13 @@ impl Parser {
             | TokenKind::Mut
             | TokenKind::LParen => true,
             TokenKind::Fn => true,
+            // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the typed
+            // pool/handle declarations (`pool<T> p = ...`,
+            // `handle<T> h = ...`) parse through the typed-decl path
+            // (the pool-mode annotation is parsed there). Without this
+            // arm the decl fell through to the expression path and
+            // failed on the `<`.
+            TokenKind::PoolKw | TokenKind::HandleKw => true,
             TokenKind::Ident => {
                 matches!(self.peek_n(1), TokenKind::Ident | TokenKind::Question)
                     // `Foo<Bar> x = ...` — generic type application in a decl
@@ -1023,6 +1046,9 @@ impl Parser {
             ty,
             names,
             value,
+            // DIFF-4 (Impl-O): `let` declarations carry no pool-mode
+            // annotation (only the typed-decl surface parses them).
+            mode: crate::ast::PoolMode::Frozen,
             span: start.merge(self.prev_span()),
         })
     }
@@ -1031,6 +1057,22 @@ impl Parser {
         let start = self.peek().span;
         let is_const = false;
         let ty = self.parse_type()?;
+        // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the pool
+        // mutability-class annotation — parsed WITH the declaration.
+        // `pool<T>` bare = Frozen (the default), `pool<T> thread_local`
+        // = ThreadConfined, `pool<T> synchronized` = Synchronized. The
+        // two idents are plain Tokens (not keywords — they stay valid
+        // variable names everywhere else).
+        let mut mode = crate::ast::PoolMode::Frozen;
+        if matches!(ty, TypeAst::Pool(_)) {
+            if self.at(TokenKind::Ident) && self.peek().text == "thread_local" {
+                self.bump();
+                mode = crate::ast::PoolMode::ThreadConfined;
+            } else if self.at(TokenKind::Ident) && self.peek().text == "synchronized" {
+                self.bump();
+                mode = crate::ast::PoolMode::Synchronized;
+            }
+        }
         let mut names = vec![self.expect_ident()?];
         while self.eat_if(TokenKind::Comma) {
             names.push(self.expect_ident()?);
@@ -1045,6 +1087,7 @@ impl Parser {
             ty: Some(ty),
             names,
             value,
+            mode,
             span: start.merge(self.prev_span()),
         })
     }
@@ -1221,6 +1264,7 @@ impl Parser {
                 ty: Some(TypeAst::Named("lock".into())),
                 names: vec![name],
                 value: None,
+                mode: crate::ast::PoolMode::Frozen,
                 span: start.merge(self.prev_span()),
             })
         }

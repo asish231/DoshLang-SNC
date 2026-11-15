@@ -1,0 +1,23 @@
+// SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the int-COPY
+// provenance — handles are held in `int` variables on this surface,
+// so the copy `int x2 = h` must KEEP the provenance: a copy of a
+// handle into pool P is a handle into pool P, and E0803.2 fires on
+// the copy exactly as on the original. Without the side table's copy
+// tracking (keyed on handle_home, not the declared type), the copy
+// would cross the window boundary unchecked — the A6c hole through a
+// copy.
+//
+// This file is a compile-FAIL golden case (tests/golden.rs).
+
+pool<int> gz = pool_new<int>(8)
+
+fn main() {
+    int h = 0
+    unfrozen (gz) {
+        h = gz.insert(1)
+        int hcopy = h          // the int copy — provenance follows
+        spawn {
+            int r = gz.get(hcopy)   // E0803.2 must fire on the COPY
+        }
+    }
+}

@@ -1,0 +1,45 @@
+BENCH row=timer ns_per_op=10 phase_ms=1 ops=100000 checksum=179470571826849115
+BENCH row=frozen_read ns_per_op=2 phase_ms=24 ops=10000000 checksum=14999500000
+BENCH row=frozen_set ns_per_op=3 phase_ms=33 ops=10000000 checksum=10
+BENCH row=sync_set ns_per_op=4 phase_ms=45 ops=10000000 checksum=10
+BENCH row=sync_insert ns_per_op=5 phase_ms=20 ops=4000000 checksum=10000
+BENCH row=tl_insert ns_per_op=4 phase_ms=16 ops=4000000 checksum=10000
+values_ok=1
+len_gfr=10000 len_gsy=10000 len_gtl=10000
+GP_BENCH_DONE
+BENCH row=timer ns_per_op=10 phase_ms=1 ops=100000 checksum=179470571841029943
+BENCH row=frozen_read ns_per_op=2 phase_ms=20 ops=10000000 checksum=14999500000
+BENCH row=frozen_set ns_per_op=3 phase_ms=35 ops=10000000 checksum=10
+BENCH row=sync_set ns_per_op=4 phase_ms=45 ops=10000000 checksum=10
+BENCH row=sync_insert ns_per_op=5 phase_ms=21 ops=4000000 checksum=10000
+BENCH row=tl_insert ns_per_op=3 phase_ms=15 ops=4000000 checksum=10000
+values_ok=1
+len_gfr=10000 len_gsy=10000 len_gtl=10000
+GP_BENCH_DONE
+BENCH row=timer ns_per_op=10 phase_ms=1 ops=100000 checksum=179470571855067511
+BENCH row=frozen_read ns_per_op=2 phase_ms=21 ops=10000000 checksum=14999500000
+BENCH row=frozen_set ns_per_op=3 phase_ms=34 ops=10000000 checksum=10
+BENCH row=sync_set ns_per_op=4 phase_ms=45 ops=10000000 checksum=10
+BENCH row=sync_insert ns_per_op=5 phase_ms=21 ops=4000000 checksum=10000
+BENCH row=tl_insert ns_per_op=4 phase_ms=16 ops=4000000 checksum=10000
+values_ok=1
+len_gfr=10000 len_gsy=10000 len_gtl=10000
+GP_BENCH_DONE
+BENCH row=timer ns_per_op=10 phase_ms=1 ops=100000 checksum=179470571869148823
+BENCH row=frozen_read ns_per_op=2 phase_ms=20 ops=10000000 checksum=14999500000
+BENCH row=frozen_set ns_per_op=3 phase_ms=35 ops=10000000 checksum=10
+BENCH row=sync_set ns_per_op=4 phase_ms=45 ops=10000000 checksum=10
+BENCH row=sync_insert ns_per_op=5 phase_ms=21 ops=4000000 checksum=10000
+BENCH row=tl_insert ns_per_op=4 phase_ms=16 ops=4000000 checksum=10000
+values_ok=1
+len_gfr=10000 len_gsy=10000 len_gtl=10000
+GP_BENCH_DONE
+BENCH row=timer ns_per_op=20 phase_ms=2 ops=100000 checksum=179470571883199212
+BENCH row=frozen_read ns_per_op=2 phase_ms=20 ops=10000000 checksum=14999500000
+BENCH row=frozen_set ns_per_op=3 phase_ms=33 ops=10000000 checksum=10
+BENCH row=sync_set ns_per_op=4 phase_ms=44 ops=10000000 checksum=10
+BENCH row=sync_insert ns_per_op=5 phase_ms=21 ops=4000000 checksum=10000
+BENCH row=tl_insert ns_per_op=4 phase_ms=16 ops=4000000 checksum=10000
+values_ok=1
+len_gfr=10000 len_gsy=10000 len_gtl=10000
+GP_BENCH_DONE

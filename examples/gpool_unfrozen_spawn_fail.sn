@@ -1,0 +1,23 @@
+// SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): E0803.2 — the A6c
+// kill. A handle into a global pool captured by unscoped spawn (or
+// sent over chan) WHILE THE POOL IS UNFROZEN AT THE CAPTURE SITE —
+// inside an `unfrozen (P) { ... }` window — is rejected: the pool is
+// momentarily mutable and the receiving thread could race its
+// freelist. Frozen-outside-window and synchronized handles are
+// Sendable; this is the one capture that is not.
+//
+// This file is a compile-FAIL golden case (tests/golden.rs): the
+// verbatim E0803.2 diagnostic must fire for BOTH the pool object and
+// the handle.
+
+pool<int> gz = pool_new<int>(8)
+
+fn main() {
+    int h = 0
+    unfrozen (gz) {
+        h = gz.insert(1)
+        spawn {
+            int r = gz.get(h)   // E0803.2 (pool 'gz' + handle 'h')
+        }
+    }
+}

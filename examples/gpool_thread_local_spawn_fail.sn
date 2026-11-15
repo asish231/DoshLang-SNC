@@ -1,0 +1,20 @@
+// SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): E0803.1 made
+// effective for pools. `pool<T> thread_local` mutations are legal on
+// the declaring thread only; handles (and the pool object itself)
+// carry the confinement — any spawn/chan capture is rejected with
+// E0803.1. Before DIFF-4 this rule existed only in spec prose (E0803
+// covered thread-local ref/mut/handle; Type::Handle passed freely
+// through check_spawn_expr).
+//
+// This file is a compile-FAIL golden case (tests/golden.rs): the
+// E0803.1 diagnostic must fire for BOTH the pool object and the
+// handle.
+
+pool<int> thread_local gtl = pool_new<int>(8)
+
+fn main() {
+    int h = gtl.insert(5)       // legal: the declaring thread mutates
+    spawn {
+        int r = gtl.get(h)      // E0803.1 (pool 'gtl' + handle 'h')
+    }
+}

@@ -589,9 +589,61 @@ else
 fi
 
 echo ""
+
+# 18. Global-pool discipline — the DIFF-4 runtime mechanics (SWARM
+#     RABBIT HOLE, Wave 10, Impl-O; kills G1 §1 A6c). The frozen
+#     concurrent read (N threads, stable generations, exact
+#     checksums), the synchronized vault under N-thread mutation
+#     (the lock serializes; final state exact), the unfrozen
+#     window's freeze/unfreeze depth discipline (nested windows,
+#     LIFO unwind, no underflow), and the E0803.1 home-thread
+#     backstop probe (fork'd, the E-LKIND pattern). Built twice:
+#     plain, then ASan (18b).
+echo "-----------------------------------------------------------------"
+echo "18. GLOBAL-POOL DISCIPLINE, RUNTIME MECHANICS (test_gpool.c)"
+echo "-----------------------------------------------------------------"
+OUT_GPOOL_C="/tmp/snc_test_gpool_c"
+rm -f "$OUT_GPOOL_C"
+if clang -O1 -g -o "$OUT_GPOOL_C" "$DIR/test_gpool.c" "$ROOT/compiler/runtime.c" -lpthread 2>/dev/null; then
+    OUTPUT=$("$OUT_GPOOL_C")
+    echo "$OUTPUT"
+    if echo "$OUTPUT" | grep -q "PASS:"; then
+        echo ">>> test_gpool(.c): PASSED"
+    else
+        echo ">>> test_gpool(.c): FAILED"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> test_gpool(.c): BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+echo ""
+
+# 18b. The ASan stress pass of the same global-pool test
+echo "-----------------------------------------------------------------"
+echo "18b. GLOBAL-POOL DISCIPLINE, ASAN STRESS (test_gpool.c)"
+echo "-----------------------------------------------------------------"
+OUT_GPOOL_ASAN="/tmp/snc_test_gpool_c_asan"
+rm -f "$OUT_GPOOL_ASAN"
+if clang -O1 -g -fsanitize=address -o "$OUT_GPOOL_ASAN" "$DIR/test_gpool.c" "$ROOT/compiler/runtime.c" -lpthread 2>/dev/null; then
+    OUTPUT=$(ASAN_OPTIONS=detect_leaks=0 "$OUT_GPOOL_ASAN" 2>&1)
+    echo "$OUTPUT"
+    if echo "$OUTPUT" | grep -q "PASS:"; then
+        echo ">>> test_gpool(.c ASan): PASSED (no ASan reports over the concurrent frozen read / locked mutation / window cycles)"
+    else
+        echo ">>> test_gpool(.c ASan): FAILED"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> test_gpool(.c ASan): BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+echo ""
 echo "================================================================="
 if [ $FAILURES -eq 0 ]; then
-    echo "  ALL SYSTEMS & SECURITY TESTS PASSED (25 checks)"
+    echo "  ALL SYSTEMS & SECURITY TESTS PASSED (27 checks)"
     exit 0
 else
     echo "  $FAILURES SYSTEMS TESTS FAILED"
