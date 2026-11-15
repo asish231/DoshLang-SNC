@@ -4042,7 +4042,7 @@ fn wave_visit_stmt(s: &Stmt, f: &mut dyn FnMut(&Expr)) {
         | Stmt::Frozen { body, .. }
         | Stmt::Unfrozen { body, .. }
         | Stmt::SpawnBlock { body, .. }
-        | Stmt::LockBlock { body: body, .. }
+        | Stmt::LockBlock { body, .. }
         | Stmt::GoroutineBlock { body, .. }
         | Stmt::Defer { body, .. }
         | Stmt::Wave { body, .. } => walk(body, f),
@@ -4053,9 +4053,10 @@ fn wave_visit_stmt(s: &Stmt, f: &mut dyn FnMut(&Expr)) {
             // wholesale below (a template can read cycle counters).
             if let Stmt::New { args, .. } = s {
                 for a in args {
-                    if let Arg::Pos(x) | Arg::Inout(x) | Arg::Named { value: x, .. } = a {
-                        wave_visit_expr(x, f);
-                    }
+                    let x = match a {
+                        Arg::Pos(x) | Arg::Inout(x) | Arg::Named { value: x, .. } => x,
+                    };
+                    wave_visit_expr(x, f);
                 }
             }
         }
@@ -6991,13 +6992,14 @@ impl Checker<'_> {
        span (the verbatim arms the golden suite pins). */
     fn sfc_arg_ty(&self, args: &[Arg], i: usize) -> Type {
         args.get(i)
-            .and_then(|a| match a {
-                Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. } => self
-                    .db
+            .and_then(|a| {
+                let e = match a {
+                    Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. } => e,
+                };
+                self.db
                     .expr_ty
                     .get(&(e.span.file, e.span.start, e.span.end))
-                    .cloned(),
-                _ => None,
+                    .cloned()
             })
             .unwrap_or(Type::Int)
     }
