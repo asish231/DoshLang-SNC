@@ -1,0 +1,26 @@
+blueprint Inner {
+    int val
+}
+blueprint Outer {
+    Inner sub
+}
+
+fn worker(chan<Outer> ch) {
+    Outer o = ch.receive()
+    o.sub.val = 100
+}
+
+fn main() {
+    chan<Outer> ch
+    new Outer o()
+    new Inner i()
+    i.val = 42
+    o.sub = i
+
+    Inner alias = o.sub
+
+    spawn worker(ch)
+    ch.send(o)
+
+    print(alias.val)
+}

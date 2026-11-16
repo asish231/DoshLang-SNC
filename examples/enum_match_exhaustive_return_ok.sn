@@ -1,0 +1,28 @@
+enum Direction {
+    North
+    South
+    East
+    West
+}
+
+fn get_heading(Direction d) -> int {
+    match (d) {
+        Direction.North {
+            return 0
+        }
+        Direction.South {
+            return 180
+        }
+        Direction.East {
+            return 90
+        }
+        Direction.West {
+            return 270
+        }
+    }
+}
+
+fn main() {
+    print(get_heading(Direction.North))
+    print(get_heading(Direction.East))
+}

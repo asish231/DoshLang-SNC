@@ -172,7 +172,7 @@ struct Cx<'a> {
     dbg: &'a mut DbgInfo,
     terminated: bool,
     current_fn_ret: Type,
-    defers: Vec<Vec<Stmt>>,
+    defers: Vec<(Vec<Stmt>, bool)>,
     current_nursery: Option<String>,
     active_locks: Vec<String>,
     active_nurseries: Vec<String>,
@@ -1701,7 +1701,32 @@ impl Cx<'_> {
                         let (rc, _) = self.coerce(r.clone(), &t, &rt);
                         self.contract_exit_check(Some((rc, rt)));
                     }
-                    self.exit_active_scopes();
+                    let has_errdefers = self.defers.iter().any(|(_, is_err)| *is_err);
+                    let err_cond = if has_errdefers {
+                        match &t {
+                            Type::Error => {
+                                let is_err = self.t();
+                                self.line(&format!("{is_err} = icmp ne ptr {r}, null"));
+                                Some(is_err)
+                            }
+                            Type::Tuple(ts) => {
+                                if let Some(idx) = ts.iter().rposition(|elem| *elem == Type::Error) {
+                                    let st = tuple_ll(ts);
+                                    let err_val = self.t();
+                                    self.line(&format!("{err_val} = extractvalue {st} {r}, {idx}"));
+                                    let is_err = self.t();
+                                    self.line(&format!("{is_err} = icmp ne ptr {err_val}, null"));
+                                    Some(is_err)
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    self.exit_active_scopes_with_err(err_cond.as_deref());
                     if let Type::Tuple(ts) = t {
                         let mut final_r = r;
                         for (i, elem_t) in ts.iter().enumerate() {
@@ -1738,7 +1763,7 @@ impl Cx<'_> {
                     if !self.contract_exit.is_empty() {
                         self.contract_exit_check(None);
                     }
-                    self.exit_active_scopes();
+                    self.exit_active_scopes_with_err(None);
                     self.line("ret void");
                 }
             }
@@ -1876,10 +1901,10 @@ impl Cx<'_> {
                 }
             }
             Stmt::Defer { body, .. } => {
-                self.defers.push(body.clone());
+                self.defers.push((body.clone(), false));
             }
             Stmt::ErrDefer { body, .. } => {
-                self.defers.push(body.clone());
+                self.defers.push((body.clone(), true));
             }
             Stmt::Region { body, .. } => {
                 // SWARM RABBIT HOLE — D0 gap #2/#3 (Impl-B, Wave 5): the
@@ -2106,7 +2131,11 @@ impl Cx<'_> {
     }
 
     fn exit_active_scopes(&mut self) {
-        self.emit_defers();
+        self.exit_active_scopes_with_err(None);
+    }
+
+    fn exit_active_scopes_with_err(&mut self, err_cond: Option<&str>) {
+        self.emit_defers(err_cond);
         self.release_active_locks();
         let regions = self.active_regions.clone();
         for wm in regions.iter().rev() {
@@ -2118,11 +2147,38 @@ impl Cx<'_> {
         }
     }
 
-    fn emit_defers(&mut self) {
+    fn emit_defers(&mut self, err_cond: Option<&str>) {
+        let has_errdefers = self.defers.iter().any(|(_, is_err)| *is_err);
         let ds = self.defers.clone();
-        for body in ds.iter().rev() {
-            for s in body {
-                self.stmt(s);
+        for (body, is_errdefer) in ds.iter().rev() {
+            if !*is_errdefer {
+                for s in body {
+                    self.stmt(s);
+                }
+            } else if has_errdefers {
+                match err_cond {
+                    None => {
+                        // Clean success return: do not run errdefer.
+                    }
+                    Some("1") | Some("true") => {
+                        for s in body {
+                            self.stmt(s);
+                        }
+                    }
+                    Some(cond) => {
+                        let run = self.l("errdef_run");
+                        let cont = self.l("errdef_cont");
+                        self.line(&format!("br i1 {cond}, label %{run}, label %{cont}"));
+                        self.raw(&format!("{run}:"));
+                        for s in body {
+                            self.stmt(s);
+                        }
+                        if !self.terminated {
+                            self.line(&format!("br label %{cont}"));
+                        }
+                        self.raw(&format!("{cont}:"));
+                    }
+                }
             }
         }
     }
@@ -2270,7 +2326,7 @@ impl Cx<'_> {
             for s in body {
                 child.stmt(s);
             }
-            child.emit_defers();
+            child.emit_defers(None);
             child.release_active_locks();
             child.release_active_locks();
             if !child.terminated {
@@ -2494,7 +2550,7 @@ impl Cx<'_> {
                         _ => (Type::Str, Type::Int),
                     }
                 };
-                let kk = if kt.is_ptr() { 1 } else { 0 };
+                let kk = if matches!(kt, Type::Str) { 1 } else { 0 };
                 let vk = if vt.is_ptr() { 1 } else { 0 };
                 let m = self.t();
                 self.line(&format!("{m} = call ptr @sn_map_new(i64 {kk}, i64 {vk})"));
@@ -2849,8 +2905,16 @@ impl Cx<'_> {
             BinOp::BitAnd => self.line(&format!("{d} = and i64 {l}, {r}")),
             BinOp::BitOr => self.line(&format!("{d} = or i64 {l}, {r}")),
             BinOp::BitXor => self.line(&format!("{d} = xor i64 {l}, {r}")),
-            BinOp::Shl => self.line(&format!("{d} = shl i64 {l}, {r}")),
-            BinOp::Shr => self.line(&format!("{d} = ashr i64 {l}, {r}")),
+            BinOp::Shl => {
+                let sh = self.t();
+                self.line(&format!("{sh} = and i64 {r}, 63"));
+                self.line(&format!("{d} = shl i64 {l}, {sh}"));
+            }
+            BinOp::Shr => {
+                let sh = self.t();
+                self.line(&format!("{sh} = and i64 {r}, 63"));
+                self.line(&format!("{d} = ashr i64 {l}, {sh}"));
+            }
             _ => self.line(&format!("{d} = add i64 {l}, {r}")),
         }
         self.wrap_int(d.clone(), t)
@@ -6353,7 +6417,7 @@ impl Cx<'_> {
         self.line(&format!("{c} = icmp eq ptr {err}, null"));
         self.line(&format!("br i1 {c}, label %{ok}, label %{fail}"));
         self.raw(&format!("{fail}:"));
-        self.exit_active_scopes();
+        self.exit_active_scopes_with_err(Some("1"));
         match &self.current_fn_ret.clone() {
             Type::Tuple(rts) if rts.len() == 2 && rts[1] == Type::Error => {
                 let rst = tuple_ll(rts);
@@ -6653,7 +6717,7 @@ impl Cx<'_> {
             for s in body {
                 child.stmt(s);
             }
-            child.emit_defers();
+            child.emit_defers(None);
             child.release_active_locks();
             if matches!(ret, Type::Void) {
                 child.line("ret void");

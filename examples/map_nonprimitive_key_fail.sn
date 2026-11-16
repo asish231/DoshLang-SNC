@@ -1,0 +1,8 @@
+record Point {
+    int x
+    int y
+}
+
+fn main() {
+    map<Point, int> m = {}
+}

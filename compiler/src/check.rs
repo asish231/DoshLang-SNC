@@ -1883,6 +1883,7 @@ fn layout_blueprint_from_item(db: &mut CheckDb, b: &BlueprintItem, diag: &mut Di
             diag.error(b.span, format!("duplicate field '{}'", f.name));
         }
         let ty = resolve_type_ast(&f.ty, db);
+        validate_map_keys(&ty, b.span, diag);
         fields.push(FieldInfo {
             name: f.name.clone(),
             ty,
@@ -2187,6 +2188,7 @@ fn collect(db: &mut CheckDb, programs: &[Program], diag: &mut Diagnostics) {
                     let mut f_infos = Vec::new();
                     for f in &v.fields {
                         let ty = resolve_type_ast(&f.ty, db);
+                        validate_map_keys(&ty, e.span, diag);
                         f_infos.push((f.name.clone(), ty));
                     }
                     v_infos.push(EnumVariantInfo {
@@ -2340,6 +2342,7 @@ fn collect(db: &mut CheckDb, programs: &[Program], diag: &mut Diagnostics) {
                         // — which is the named slice-2 form; refuse
                         // rather than silently lower a dead slot).
                         check_tape_type(&rt, *span, diag);
+                        validate_map_keys(&rt, *span, diag);
                         if matches!(rt, Type::Tape(_)) {
                             diag.error(
                                 *span,
@@ -4652,6 +4655,48 @@ fn check_tape_type(t: &Type, span: Span, diag: &mut Diagnostics) {
     }
 }
 
+pub fn is_hashable_primitive_map_key(k: &Type) -> bool {
+    matches!(k, Type::Int | Type::Str | Type::Byte | Type::Ptr | Type::Any) || k.is_fixed_int()
+}
+
+pub fn validate_map_keys(t: &Type, span: Span, diag: &mut Diagnostics) {
+    match t {
+        Type::Map(k, v) => {
+            if !is_hashable_primitive_map_key(k) {
+                diag.error(
+                    span,
+                    format!("map key type '{k}' is not a valid hashable primitive"),
+                );
+            }
+            validate_map_keys(k, span, diag);
+            validate_map_keys(v, span, diag);
+        }
+        Type::List(inner)
+        | Type::Chan(inner)
+        | Type::Ref(inner)
+        | Type::Mut(inner)
+        | Type::Pool(inner)
+        | Type::Handle(inner)
+        | Type::Link(inner)
+        | Type::Tape(inner)
+        | Type::Optional(inner) => {
+            validate_map_keys(inner, span, diag);
+        }
+        Type::Tuple(ts) => {
+            for inner in ts {
+                validate_map_keys(inner, span, diag);
+            }
+        }
+        Type::Fn { params, ret } => {
+            for p in params {
+                validate_map_keys(p, span, diag);
+            }
+            validate_map_keys(ret, span, diag);
+        }
+        _ => {}
+    }
+}
+
 /// SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort Delta): the morton
 /// constructors' literal dims — morton_new(d1, d2), morton_from_lex(src,
 /// d1, d2), morton_from_bytes(bytes, d1, d2) — extracted for the
@@ -4717,7 +4762,7 @@ fn layout_record(db: &mut CheckDb, r: &RecordItem, diag: &mut Diagnostics) {
             diag.error(r.span, format!("duplicate field '{}'", f.name));
         }
         let ty = resolve_type_ast(&f.ty, db);
-        // SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): a link<T, u16>
+        validate_map_keys(&ty, r.span, diag);
         // field is a 2-byte delta — 2-align it in packed records so the
         // u16 load/store in the runtime (sn_link_*) is never unaligned.
         // (Non-packed records slot every field 8-aligned already.)
@@ -4778,6 +4823,7 @@ fn layout_blueprint(
                 diag.error(b.span, format!("duplicate field '{}'", f.name));
             }
             let ty = resolve_type_ast(&f.ty, db);
+        validate_map_keys(&ty, b.span, diag);
             fields.push(FieldInfo {
                 name: f.name.clone(),
                 ty,
@@ -5064,7 +5110,9 @@ impl Checker<'_> {
             }
         }
         for (i, p) in f.params.iter().enumerate() {
-            self.declare(&p.name, resolve_type_ast(&p.ty, self.db), false, f.span);
+            let pt = resolve_type_ast(&p.ty, self.db);
+            validate_map_keys(&pt, f.span, self.diag);
+            self.declare(&p.name, pt, false, f.span);
             // DIFF-1 Rule 1a seed space: this function's own inout params,
             // with their sig.inout_params indices — the same space
             // check_arity's param_offset logic maps call-site args into.
@@ -5082,6 +5130,7 @@ impl Checker<'_> {
         let was_async = self.in_async;
         self.in_async = f.is_async;
         self.current_fn_ret = f.ret.as_ref().map(|t| resolve_type_ast(t, self.db)).unwrap_or(Type::Void);
+        validate_map_keys(&self.current_fn_ret, f.span, self.diag);
         if f.is_async {
             if self.current_fn_ret == Type::Void {
                 self.current_fn_ret = Type::Named("future".into());
@@ -5091,7 +5140,7 @@ impl Checker<'_> {
             self.check_stmt(s);
         }
         if self.current_fn_ret != Type::Void && !f.is_abstract {
-            if !Self::body_terminates(&f.body) {
+            if !self.body_terminates(&f.body) {
                 self.diag.error(
                     f.span,
                     format!(
@@ -5141,16 +5190,16 @@ impl Checker<'_> {
         false
     }
 
-    fn body_terminates(stmts: &[Stmt]) -> bool {
+    fn body_terminates(&self, stmts: &[Stmt]) -> bool {
         for s in stmts {
-            if Self::stmt_terminates(s) {
+            if self.stmt_terminates(s) {
                 return true;
             }
         }
         false
     }
 
-    fn stmt_terminates(s: &Stmt) -> bool {
+    fn stmt_terminates(&self, s: &Stmt) -> bool {
         match s {
             Stmt::Return { .. } => true,
             Stmt::Expr(e) => {
@@ -5162,31 +5211,71 @@ impl Checker<'_> {
                 false
             }
             Stmt::If { then_body, else_ifs, else_body, .. } => {
-                if !Self::body_terminates(then_body) {
+                if !self.body_terminates(then_body) {
                     return false;
                 }
                 for (_, elb) in else_ifs {
-                    if !Self::body_terminates(elb) {
+                    if !self.body_terminates(elb) {
                         return false;
                     }
                 }
                 match else_body {
-                    Some(elb) => Self::body_terminates(elb),
+                    Some(elb) => self.body_terminates(elb),
                     None => false,
                 }
             }
-            Stmt::Match { arms, default, .. } => {
+            Stmt::Match { expr, arms, default, .. } => {
                 if let Some(def) = default {
-                    if !Self::body_terminates(def) {
+                    if !self.body_terminates(def) {
                         return false;
                     }
                     for (_, b) in arms {
-                        if !Self::body_terminates(b) {
+                        if !self.body_terminates(b) {
                             return false;
                         }
                     }
                     true
                 } else {
+                    let enum_name = match &expr.kind {
+                        ExprKind::Ident(n) => {
+                            if let Some((Type::Enum(en), _)) = self.lookup(n) {
+                                Some(en)
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+                    if let Some(en) = enum_name {
+                        if let Some(variants) = self.db.enum_variants.get(&en) {
+                            let mut matched_variants = HashSet::new();
+                            for (pat, _) in arms {
+                                match &pat.kind {
+                                    ExprKind::Member { base, name } => {
+                                        if let ExprKind::Ident(pen) = &base.kind {
+                                            if pen == &en {
+                                                matched_variants.insert(name.clone());
+                                            }
+                                        }
+                                    }
+                                    ExprKind::Call { callee, .. } => {
+                                        if let ExprKind::Member { base, name } = &callee.kind {
+                                            if let ExprKind::Ident(pen) = &base.kind {
+                                                if pen == &en {
+                                                    matched_variants.insert(name.clone());
+                                                }
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            let all_covered = variants.iter().all(|v| matched_variants.contains(&v.name));
+                            if all_covered && !arms.is_empty() {
+                                return arms.iter().all(|(_, b)| self.body_terminates(b));
+                            }
+                        }
+                    }
                     false
                 }
             }
@@ -5201,7 +5290,7 @@ impl Checker<'_> {
             Stmt::Region { body, .. }
             | Stmt::NurseryBlock { body, .. }
             | Stmt::Frozen { body, .. }
-            | Stmt::Unfrozen { body, .. } => Self::body_terminates(body),
+            | Stmt::Unfrozen { body, .. } => self.body_terminates(body),
             _ => false,
         }
     }
@@ -5237,6 +5326,7 @@ impl Checker<'_> {
                         // declaration site (slice 1: tape<int> — the
                         // same rule the module-scope arm runs).
                         check_tape_type(&t, *span, &mut self.diag);
+                        validate_map_keys(&t, *span, &mut self.diag);
                         // The dims-are-in-the-type rule: a morton
                         // constructor's literal dims must agree with
                         // the declared type — the annotation must not
@@ -5338,9 +5428,9 @@ impl Checker<'_> {
                         if let Some(tier) = self.tape_delta_tier_of_expr(v) {
                             self.tape_local_tiers.insert(name.clone(), tier);
                         }
-                        if let ExprKind::Ident(rhs_name) = &v.kind {
+                        if let Some(rhs_name) = Self::root_var_of_expr(v) {
                             if matches!(decl_ty_clone, Type::Blueprint(_) | Type::List(_) | Type::Map(_, _) | Type::Ref(_) | Type::Mut(_)) {
-                                self.record_alias(name, rhs_name);
+                                self.record_alias(name, &rhs_name);
                             }
                         }
                     }
@@ -5724,9 +5814,9 @@ impl Checker<'_> {
                         }
                     }
                     self.clear_alias(n);
-                    if let ExprKind::Ident(rhs_name) = &value.kind {
+                    if let Some(rhs_name) = Self::root_var_of_expr(value) {
                         if matches!(tt, Type::Blueprint(_) | Type::List(_) | Type::Map(_, _) | Type::Ref(_) | Type::Mut(_)) {
-                            self.record_alias(n, rhs_name);
+                            self.record_alias(n, &rhs_name);
                         }
                     }
                     // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O):
@@ -7218,6 +7308,12 @@ impl Checker<'_> {
                     if vt.as_ref().is_some_and(|t| t != &vty) {
                         self.diag.error(v.span, "map values must share a type");
                     }
+                    if !is_hashable_primitive_map_key(&kty) {
+                        self.diag.error(
+                            k.span,
+                            format!("map key type '{kty}' is not a valid hashable primitive"),
+                        );
+                    }
                     kt = Some(kty);
                     vt = Some(vty);
                 }
@@ -7236,7 +7332,9 @@ impl Checker<'_> {
             ExprKind::Tuple(xs) => Type::Tuple(xs.iter().map(|x| self.check_expr(x)).collect()),
             ExprKind::Cast { expr, ty } => {
                 self.check_expr(expr);
-                resolve_type_ast(ty, self.db)
+                let t = resolve_type_ast(ty, self.db);
+                validate_map_keys(&t, e.span, &mut self.diag);
+                t
             }
             ExprKind::SuperCall { method, args } => {
                 let bp = self.current_bp.clone().unwrap_or_default();

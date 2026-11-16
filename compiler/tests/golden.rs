@@ -2983,3 +2983,52 @@ fn tier4_freestanding_ok() {
     assert_eq!(code, 0, "freestanding ok failed ({code}): {stderr}\n{stdout}");
     assert_eq!(stdout, "30\n120\nFreestanding bare-metal execution successful\n");
 }
+
+#[test]
+fn map_nonprimitive_key_rejected() {
+    let err = compile_err("examples/map_nonprimitive_key_fail.sn");
+    assert!(
+        err.contains("is not a valid hashable primitive"),
+        "expected non-primitive map key rejection, got: {err}"
+    );
+}
+
+#[test]
+fn map_primitive_keys_ok() {
+    let (code, stdout, stderr) = compile_run("examples/map_primitive_keys.sn");
+    assert_eq!(code, 0, "map primitive keys ok failed ({code}): {stderr}\n{stdout}");
+    assert_eq!(stdout, "one\ntwo\n10\n20\n999\n");
+}
+
+#[test]
+fn shift_deterministic_ok() {
+    let (code, stdout, stderr) = compile_run("examples/shift_deterministic.sn");
+    assert_eq!(code, 0, "shift deterministic ok failed ({code}): {stderr}\n{stdout}");
+    assert_eq!(stdout, "1\n2\n16\n4\n");
+}
+
+#[test]
+fn errdefer_ok() {
+    let (code, stdout, stderr) = compile_run("examples/errdefer_test.sn");
+    assert_eq!(code, 0, "errdefer ok failed ({code}): {stderr}\n{stdout}");
+    assert_eq!(
+        stdout,
+        "--- success case ---\ndefer in may_fail\nresult: 42\n--- error return case ---\nerrdefer in may_fail\ndefer in may_fail\nerror: failed\n--- try error case ---\nerrdefer in may_fail\ndefer in may_fail\nerrdefer in test_try\ndefer in test_try\ncaught: failed\n"
+    );
+}
+
+#[test]
+fn enum_match_exhaustive_return_ok() {
+    let (code, stdout, stderr) = compile_run("examples/enum_match_exhaustive_return_ok.sn");
+    assert_eq!(code, 0, "enum match exhaustive return ok failed ({code}): {stderr}\n{stdout}");
+    assert_eq!(stdout, "0\n90\n");
+}
+
+#[test]
+fn chan_sub_alias_race_rejected() {
+    let err = compile_err("examples/chan_sub_alias_race_fail.sn");
+    assert!(
+        err.contains("use of moved value 'alias': value was transferred over channel"),
+        "expected deep alias channel move rejection, got: {err}"
+    );
+}

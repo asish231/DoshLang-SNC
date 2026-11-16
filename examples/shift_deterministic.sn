@@ -1,0 +1,14 @@
+fn test_shl(int val, int amt) -> int {
+    return val << amt
+}
+
+fn test_shr(int val, int amt) -> int {
+    return val >> amt
+}
+
+fn main() {
+    print(test_shl(1, 64))
+    print(test_shl(1, 65))
+    print(test_shr(16, 64))
+    print(test_shr(16, 66))
+}

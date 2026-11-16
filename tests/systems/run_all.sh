@@ -1204,6 +1204,89 @@ else
 fi
 
 echo ""
+echo "=== Section 29: Post-Tier Language Soundness & Exploit Hardening ==="
+
+ERR_MNP=$("$SNC" "$ROOT/examples/map_nonprimitive_key_fail.sn" -o /tmp/snc_fail_mnp 2>&1 || true)
+if echo "$ERR_MNP" | grep -q "is not a valid hashable primitive"; then
+    echo ">>> map_nonprimitive_key_fail: PASSED (compiler rejected non-primitive map key)"
+else
+    echo ">>> map_nonprimitive_key_fail: FAILED (expected map key rejection, got: $ERR_MNP)"
+    FAILURES=$((FAILURES + 1))
+fi
+
+OUT_MPK="/tmp/snc_map_prim_keys"
+rm -f "$OUT_MPK"
+if "$SNC" "$ROOT/examples/map_primitive_keys.sn" -o "$OUT_MPK"; then
+    OUTPUT=$("$OUT_MPK")
+    EXPECTED=$(printf 'one\ntwo\n10\n20\n999')
+    if [ "$OUTPUT" = "$EXPECTED" ]; then
+        echo ">>> map_primitive_keys_ok: PASSED"
+    else
+        echo ">>> map_primitive_keys_ok: FAILED (bad output: $OUTPUT)"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> map_primitive_keys_ok: BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+OUT_SD0="/tmp/snc_shift_det_o0"
+OUT_SD2="/tmp/snc_shift_det_o2"
+rm -f "$OUT_SD0" "$OUT_SD2"
+if "$SNC" -O 0 "$ROOT/examples/shift_deterministic.sn" -o "$OUT_SD0" && "$SNC" -O 2 "$ROOT/examples/shift_deterministic.sn" -o "$OUT_SD2"; then
+    OUT0=$("$OUT_SD0")
+    OUT2=$("$OUT_SD2")
+    if [ "$OUT0" = "$OUT2" ] && [ "$OUT0" = "$(printf '1\n2\n16\n4')" ]; then
+        echo ">>> shift_deterministic: PASSED (output deterministic and identical across -O 0 and -O 2)"
+    else
+        echo ">>> shift_deterministic: FAILED (-O 0: '$OUT0', -O 2: '$OUT2')"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> shift_deterministic: BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+OUT_ED="/tmp/snc_errdefer"
+rm -f "$OUT_ED"
+if "$SNC" "$ROOT/examples/errdefer_test.sn" -o "$OUT_ED"; then
+    OUTPUT=$("$OUT_ED")
+    EXPECTED=$(printf -- '--- success case ---\ndefer in may_fail\nresult: 42\n--- error return case ---\nerrdefer in may_fail\ndefer in may_fail\nerror: failed\n--- try error case ---\nerrdefer in may_fail\ndefer in may_fail\nerrdefer in test_try\ndefer in test_try\ncaught: failed')
+    if [ "$OUTPUT" = "$EXPECTED" ]; then
+        echo ">>> errdefer_ok: PASSED (errdefer only executed on error paths)"
+    else
+        echo ">>> errdefer_ok: FAILED (bad output: $OUTPUT)"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> errdefer_ok: BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+OUT_EM="/tmp/snc_enum_match"
+rm -f "$OUT_EM"
+if "$SNC" "$ROOT/examples/enum_match_exhaustive_return_ok.sn" -o "$OUT_EM"; then
+    OUTPUT=$("$OUT_EM")
+    if [ "$OUTPUT" = "$(printf '0\n90')" ]; then
+        echo ">>> enum_match_exhaustive_return_ok: PASSED"
+    else
+        echo ">>> enum_match_exhaustive_return_ok: FAILED (bad output: $OUTPUT)"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> enum_match_exhaustive_return_ok: BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+ERR_CSA=$("$SNC" "$ROOT/examples/chan_sub_alias_race_fail.sn" -o /tmp/snc_fail_csa 2>&1 || true)
+if echo "$ERR_CSA" | grep -q "use of moved value 'alias': value was transferred over channel"; then
+    echo ">>> chan_sub_alias_race_fail: PASSED (compiler rejected deep member alias access after send)"
+else
+    echo ">>> chan_sub_alias_race_fail: FAILED (expected alias move rejection, got: $ERR_CSA)"
+    FAILURES=$((FAILURES + 1))
+fi
+
+echo ""
 echo "================================================================="
 if [ $FAILURES -eq 0 ]; then
     echo "  ALL SYSTEMS & SECURITY TESTS PASSED"

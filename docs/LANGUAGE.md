@@ -211,6 +211,7 @@ fn describe(Token tok) {
 The compiler enforces exhaustive coverage:
 - Omitting a variant from `match` without a `default` arm triggers a compile error.
 - Matching on nullable `T?` requires covering `none` and value arms or providing `default`.
+- **Exhaustive Return Guarantees**: When all arms of an exhaustive `enum` or variant match terminate (e.g. via `return`), the reachability checker verifies full coverage, satisfying non-void function return requirements without requiring a dummy `default` branch.
 
 ```sn
 str? nickname = none
@@ -244,6 +245,25 @@ To avoid tedious `if (err != none)` boilerplate, the `try` operator unwraps the 
 fn compute(int a, int b) -> (int, error) {
     int quotient = try div(a, b)
     return quotient * 2, none
+}
+```
+
+### Resource Cleanup: `defer` and `errdefer`
+SNlang provides deterministic lexical scope unwinding:
+* **`defer { ... }`**: Executes automatically when the enclosing block exits for **any reason** (normal return, break, or error).
+* **`errdefer { ... }`**: Executes **exclusively on error paths** (when returning a non-none `error` or when an unhandled `try` unwinds the scope). On successful returns, `errdefer` blocks are bypassed, eliminating manual rollback flags.
+
+```sn
+fn process_transaction() -> (int, error) {
+    open_file()
+    defer { close_file() }         // Always executes on exit
+
+    lock_resource()
+    errdefer { rollback_lock() }   // Only runs if an error occurs
+
+    int status = try step_one()
+    int res = try step_two()
+    return res, none               // Success: rollback_lock() is skipped!
 }
 ```
 
@@ -461,6 +481,9 @@ blueprint Account {
 * **Heterogeneous Lists & Strict Container Invariance**:
   * A `list<Animal>` can store instances of subclasses (`zoo.push(dog)`, `zoo.push(cat)`).
   * **Strict Invariance**: A `list<Cat>` is **NOT** a `list<Animal>`. Mutable collections (`list<T>`, `map<K, V>`) are strictly invariant. Passing `list<Cat>` where `list<Animal>` is expected is rejected at compile time, eliminating heap type confusion and invalid memory dereferences.
+* **Hashable Primitive Map Keys**:
+  * In `map<K, V>`, key type `K` is statically restricted to hashable primitives (`int`, `float`, `bool`, `str`, `byte`, `dec(X)`).
+  * Composite types (`record`, `blueprint`) are rejected at compile time, guaranteeing fast deterministic $O(1)$ hashing and preventing raw struct memory confusion in the runtime hash map.
 * **Generic Monomorphization**: `blueprint Box<T>` monomorphizes into specialized zero-overhead types for primitives (`float`, `u8`..`u64`, `int`), strings, and blueprints.
 * **Type Bounds & Variance Positions**:
   * `blueprint Container<T: Drawable>`: Enforces that type argument `T` must implement contract `Drawable`.
@@ -473,7 +496,7 @@ SNlang delivers high-throughput Go-style concurrency combined with Rust-grade co
 
 - `spawn { }` — Work-stealing green tasks (M:N cooperative scheduler scaling to 10,000+ tasks in milliseconds with minimal RAM)
 - `nursery { }` — Structured Concurrency scope: automatically awaits all child `spawn` tasks before exiting the block, eliminating orphaned thread leaks
-- `chan<T>` — Move-on-Send Channels: sending an object transfers ownership at compile time, eliminating shared-memory data races with zero locks
+- `chan<T>` — Move-on-Send Channels: sending an object transfers ownership at compile time, eliminating shared-memory data races with zero locks. Deep member aliases (`Inner alias = o.sub`) are transitively invalidated upon sending `o`, preventing concurrent access from the sending thread.
 - `val, ok = ch.receive()` — Closed channel detection returning a `(T, bool)` tuple without crashing
 - `lock` — Thread synchronization with guaranteed unwind safety
 
@@ -727,6 +750,8 @@ The compiler statically enforces Rust-grade memory safety and thread safety with
 5. **Thread Concurrency Safety:** `spawn` statically rejects passing unsynchronized mutable references or unlocked blueprints, preventing data races across threads.
 6. **`const` Immutability & Reference Invariance:** Coercing a shared borrow `ref<T>` into an exclusive `mut<T>` is strictly forbidden. Taking a mutable borrow on a `const` variable (`mut<int> m = address(my_const)`) is rejected at compile time.
 7. **Collection Invariance:** Mutable containers (`list<T>`, `map<K, V>`) are invariant. A `list<Cat>` cannot be coerced to `list<Animal>`, preventing polymorphic heap corruption.
+8. **Deterministic Arithmetic Shifts:** Integer shift operators (`<<`, `>>`) implicitly mask the shift operand modulo 64 (`amt & 63`), preventing CPU architecture discrepancies, compiler undefined behavior, and optimization level divergence between `-O 0` and `-O 2`.
+9. **Deep Aliasing Channel Invalidation:** Sending a container or blueprint over a `chan<T>` invalidates all active aliases referencing its subfields (`Inner alias = o.sub; ch.send(o)`), preventing data races via retained interior references.
 
 ```sn
 fn read_both(int a, int b) -> int {

@@ -1,0 +1,43 @@
+fn may_fail(bool fail) -> (int, error) {
+    defer {
+        print("defer in may_fail")
+    }
+    errdefer {
+        print("errdefer in may_fail")
+    }
+    if (fail) {
+        return (0, error("failed"))
+    }
+    return (42, none)
+}
+
+fn test_try() -> (int, error) {
+    defer {
+        print("defer in test_try")
+    }
+    errdefer {
+        print("errdefer in test_try")
+    }
+    int v = try may_fail(true)
+    return (v, none)
+}
+
+fn main() {
+    print("--- success case ---")
+    int s = 0
+    error err1 = none
+    s, err1 = may_fail(false)
+    print("result: {s}")
+
+    print("--- error return case ---")
+    int f = 0
+    error err2 = none
+    f, err2 = may_fail(true)
+    print("error: {err2.message()}")
+
+    print("--- try error case ---")
+    int t = 0
+    error err3 = none
+    t, err3 = test_try()
+    print("caught: {err3.message()}")
+}

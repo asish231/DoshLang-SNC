@@ -1,0 +1,13 @@
+fn main() {
+    map<int, str> m1 = {1: "one", 2: "two"}
+    print(m1[1])
+    print(m1[2])
+
+    map<str, int> m2 = {"a": 10, "b": 20}
+    print(m2["a"])
+    print(m2["b"])
+
+    map<int, int> m3 = {}
+    m3[100] = 999
+    print(m3[100])
+}
