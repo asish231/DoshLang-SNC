@@ -516,6 +516,12 @@ pub fn ast_to_type(t: &TypeAst) -> Type {
         TypeAst::Dec(s) => Type::Dec(*s),
         TypeAst::Ptr => Type::Ptr,
         TypeAst::Mut(inner) => Type::Mut(Box::new(ast_to_type(inner))),
+        // `-> void` is the explicit void return; it must resolve to
+        // Type::Void (not a Blueprint named "void") so the reachability
+        // guard (`current_fn_ret != Type::Void`) and every other
+        // Void-keyed rule treat it as void. Before this arm the explicit
+        // spelling fell through to Type::Blueprint("void").
+        TypeAst::Named(n) if n == "void" => Type::Void,
         TypeAst::Named(n) if n == "lock" => Type::Lock,
         TypeAst::Named(n) if n == "future" => Type::Named("future".into()),
         TypeAst::Named(n) if n == "json" => Type::Json,
