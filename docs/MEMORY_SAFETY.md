@@ -88,7 +88,7 @@ Virtual Memory Window (e.g. 128 MB Reservation)
 1. **`Base`**: The base virtual address of the lane mmap reservation.
 2. **`Watermark` (High-Water Mark)**: A 64-bit pointer pointing to the first unallocated byte. Allocation is simply:
    $$\text{Watermark}_{\text{new}} = \text{Watermark}_{\text{old}} + \text{AlignUp}(\text{RequestedSize}, 8)$$
-3. **`Limit`**: The upper boundary of the allocated virtual address space. Exceeding `Limit` triggers an out-of-memory trap (`E0802`).
+3. **`Limit`**: The upper boundary of the allocated virtual address space. Exceeding `Limit` triggers an out-of-memory trap (hardware guard-page fault or OOM panic).
 
 ### 2.3 Cacheline Alignment Discipline
 All lane allocations enforce an 8-byte minimum alignment boundary. For vector and SIMD structures (such as space-filling curve grids or cryptographic state), lane allocators align to 64-byte hardware cacheline boundaries to eliminate unaligned memory penalties and false sharing across cores.
@@ -223,18 +223,26 @@ $$\text{Local Region}_{\text{inner}} \prec \text{Local Region}_{\text{outer}} \p
 
 ### 4.2 Escape Diagnostics & Concrete Rules
 
-#### Rule 1: Region-Allocated Pointers Cannot Be Returned (`E0802` / `E-ESCAPE`)
-Returning a pointer allocated in a local region to an outer calling scope is strictly forbidden.
+#### Rule 1: Region-Allocated Pointers and References Cannot Escape or Be Returned (`[E-ESCAPE]`)
+Returning a pointer or reference allocated in a local region to an outer calling scope, or assigning it to an outer variable, is strictly forbidden and rejected at compile time.
 
 ```snlang
-// FORBIDDEN: Compiler refuses with E0802
+// FORBIDDEN: Compiler refuses with [E-ESCAPE]
 fn illegal_escape() -> ptr {
     ptr escaped_ptr = none
     region {
         ptr temp = lane_alloc(0, 128)
-        escaped_ptr = temp // ERROR E0802: target outlives declaring region scope
+        escaped_ptr = temp // ERROR [E-ESCAPE]: pointer 'temp' (allocated on lane in region 1) escapes into region 0 which does not outlive it — the target region rewinds on exit
     }
-    return escaped_ptr // Region is dead; returning this would cause a wild crash!
+    return escaped_ptr
+}
+
+// FORBIDDEN: Returning directly from a region
+fn illegal_return() -> ptr {
+    region {
+        ptr temp = lane_alloc(0, 128)
+        return temp // ERROR [E-ESCAPE]: cannot return 'temp': it points to lane memory allocated in region 1, which rewinds on return
+    }
 }
 
 // ALLOWED: Compute the scalar result inside the region and return the value:
@@ -249,30 +257,25 @@ fn legal_regional_computation() -> int {
 }
 ```
 
-#### Rule 2: Outliving Structures Cannot Hold Scoped Pointers (`E0802c`)
-Assigning a region-scoped pointer into a struct or blueprint defined in an outer scope is statically rejected.
+#### Rule 2: Outliving Structures and Containers Cannot Hold Scoped Pointers (`[E-ESCAPE]`)
+Assigning a region-scoped pointer into a list, struct, or variable defined in an outer scope is statically rejected.
 
 ```snlang
-blueprint PacketHeader {
-    int packet_id
-    ptr payload_ref
-}
-
-fn illegal_field_assignment() {
-    new PacketHeader pkt() // Outer scope
+fn illegal_list_push() {
+    list<ptr> box = [] // Outer scope (region 0)
     
     region {
-        ptr scratch = lane_alloc(0, 256)
-        // ERROR E0802c: cannot store pointer from inner region into outer struct field
-        pkt.payload_ref = scratch 
+        ptr scratch = lane_alloc(0, 256) // Inner scope (region 1)
+        // ERROR [E-ESCAPE]: pointer 'scratch' escapes into region 0 which does not outlive it
+        box.push(scratch) 
     }
 }
 ```
 
-#### Rule 3: Pinned Lane Accumulator Budget (`E0802c`)
+#### Rule 3: Pinned Lane Accumulator Budget (`E0802` / `E0802c`)
 The compiler automatically colors recursive `inout` list accumulators onto dedicated pinned execution lanes (Lanes L2 through L6) so their headers survive recursive chains and unwind in $\mathcal{O}(1)$ time. 
 
-Because lanes L2–L6 provide 5 hardware-isolated accumulator lanes per thread, having more than 5 live recursive accumulators simultaneously within one Strongly Connected Component (SCC) triggers `E0802c`:
+Passing an unpinned scratch buffer (`lane 0`) as an accumulator across recursive SCC frames triggers `E0802`, while having more than 5 live recursive accumulators simultaneously within one Strongly Connected Component (SCC) triggers `E0802c`:
 
 ```snlang
 // FORBIDDEN: 6th simultaneous accumulator exceeds pinned lane hardware budget
@@ -576,8 +579,9 @@ fn compile_expression(str source_code) -> int {
 | Error Code | Category | Root Cause | Remediation Strategy |
 | :--- | :--- | :--- | :--- |
 | **`E-GC-IN-LANE`** | Space Isolation | Attempted to store a managed garbage-collected reference into a pinned lane or vice versa. | Keep memory tiers isolated. Copy data by value or convert managed payloads into raw lane bytes. |
-| **`E0802` / `E-ESCAPE`** | Lifetime Escape | A pointer or reference allocated in an inner `region` was returned to an outer scope. | Return calculated scalar values or deep-copy the payload to the caller's target buffer before region exit. |
-| **`E0802c`** | Lifetime Escape | A region-scoped pointer was assigned to a field of a struct that outlives the region. | Ensure the target struct is declared inside the same region, or store a generation handle / scalar index. |
+| **`E-ESCAPE`** | Lifetime Escape | A pointer or reference allocated in an inner `region` (or local variable borrow) escaped to an outer scope or was returned. | Return calculated scalar values or deep-copy the payload to the caller's target buffer before region exit. |
+| **`E0802`** | SCC Accumulator Hazard | SCC accumulator allocated on scratch lane (L0/L1) or pre-colored onto mismatched pinned lane across recursive call. | Declare accumulator on a pinned lane (`L2..L6`) or make it pool-backed. |
+| **`E0802c`** | Pinned Lane Budget | SCC accumulator needs a pinned lane but all pinned lanes (`L2..L6`) are currently live (exceeds 5 live accumulators). | Restructure recursion or use explicit pool-backed memory. |
 | **`E0803.1`** | Concurrency Violation | A `thread_local` pool or arena handle was captured across a `spawn` task boundary. | Use a `pool<T> synchronized` pool or channel message passing (`chan<T>`) to transfer ownership safely. |
 | **`E0803.2`** | Concurrency Violation | An unfrozen pool was read concurrently without an active `unfrozen` guard block. | Enclose concurrent updates inside an `unfrozen (P) { ... }` block to ensure atomic batch visibility. |
 | **`T-FIBR`** | Sanitizer Trap | Memory read from an unwritten or unwound region buffer in `--poison` mode. | Initialize all lane allocations before reading, and never access pointers past their declaring region scope. |

@@ -5222,6 +5222,11 @@ impl Checker<'_> {
                             }
                         }
                     }
+                    if let Some(Expr { kind: ExprKind::Ident(src), .. }) = value.as_ref() {
+                        if let Some(la) = self.lane_of.get(src).cloned() {
+                            self.lane_of.insert(name.to_string(), la);
+                        }
+                    }
                     // Borrow creation and move-out.
                     let exclusive = matches!(decl_ty_clone, Type::Mut(_));
                     if Self::is_borrow_type(&decl_ty_clone) {
@@ -5381,6 +5386,29 @@ impl Checker<'_> {
                         }
                         None => {
                             self.handle_home.remove(n);
+                        }
+                    }
+                    if let ExprKind::Ident(src) = &value.kind {
+                        if let Some(la) = self.lane_of.get(src).cloned() {
+                            self.lane_of.insert(n.clone(), la);
+                        }
+                    } else if let ExprKind::Call { callee, args, .. } = &value.kind {
+                        if let ExprKind::Ident(f) = &callee.kind {
+                            if f == "lane_alloc" {
+                                let lane = match args.first() {
+                                    Some(Arg::Pos(e)) => match e.kind {
+                                        ExprKind::Int(k) => k.clamp(0, 255) as u8,
+                                        _ => 0,
+                                    },
+                                    _ => 0,
+                                };
+                                let class = match lane {
+                                    2..=6 => LaneClass::PinnedAccumulator,
+                                    7 => LaneClass::CallerSretOut,
+                                    _ => LaneClass::ScratchPingPong,
+                                };
+                                self.lane_of.insert(n.clone(), LaneAssignment { lane, class });
+                            }
                         }
                     }
                 }
@@ -5958,6 +5986,42 @@ impl Checker<'_> {
                                 }
                             }
                             _ => {}
+                        }
+                    }
+                }
+                if let Some(val) = value {
+                    let lane_target = match &val.kind {
+                        ExprKind::Ident(n) if self.is_lane_backed(n) => {
+                            let rgn = self.region_instance.get(n).copied().unwrap_or(0);
+                            Some((n.clone(), rgn))
+                        }
+                        ExprKind::Call { callee, .. } => {
+                            if let ExprKind::Ident(f) = &callee.kind {
+                                if f == "lane_alloc" {
+                                    Some(("lane_alloc".to_string(), self.current_rgn()))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+                    if let Some((name, rgn)) = lane_target {
+                        if rgn > 0 {
+                            let desc = if name == "lane_alloc" {
+                                "lane pointer".to_string()
+                            } else {
+                                format!("'{name}'")
+                            };
+                            self.diag.error(
+                                *span,
+                                format!(
+                                    "cannot return {desc}: it points to lane memory allocated in region {rgn}, \
+                                     which rewinds on return [E-ESCAPE]"
+                                ),
+                            );
                         }
                     }
                 }
@@ -8869,6 +8933,45 @@ impl Checker<'_> {
     /// the existing return-escape machinery owns the interprocedural
     /// side), globals live in γ, which outlives everything (W2A §1.1).
     fn escape_check_store(&mut self, value: &Expr, dst: &str, span: Span) {
+        // Lane-backed pointer escape check:
+        let lane_target = match &value.kind {
+            ExprKind::Ident(n) if self.is_lane_backed(n) => {
+                let rgn = self.region_instance.get(n).copied().unwrap_or(0);
+                Some((n.clone(), rgn))
+            }
+            ExprKind::Call { callee, .. } => {
+                if let ExprKind::Ident(f) = &callee.kind {
+                    if f == "lane_alloc" {
+                        Some(("lane_alloc".to_string(), self.current_rgn()))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some((name, target_rgn)) = lane_target {
+            if let Some(&holder_rgn) = self.region_instance.get(dst) {
+                if !self.rgn_outlives(target_rgn, holder_rgn) {
+                    let desc = if name == "lane_alloc" {
+                        format!("pointer allocated on lane in region {target_rgn}")
+                    } else {
+                        format!("pointer '{name}' (allocated on lane in region {target_rgn})")
+                    };
+                    self.diag.error(
+                        span,
+                        format!(
+                            "{desc} escapes into region {holder_rgn} which does not outlive it — \
+                             the target region rewinds on exit [E-ESCAPE]"
+                        ),
+                    );
+                    return;
+                }
+            }
+        }
+
         let Some(target) = self.value_ref_target(value) else {
             return;
         };

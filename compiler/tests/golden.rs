@@ -378,6 +378,37 @@ fn escape_ref_into_shorter_region_fail() {
     );
 }
 
+#[test]
+fn escape_lane_ptr_into_shorter_region_fail() {
+    let err = compile_err("examples/lane_ptr_escape_fail.sn");
+    assert!(
+        err.contains("[E-ESCAPE]"),
+        "expected the E-ESCAPE diagnostic, got: {err}"
+    );
+    assert!(
+        err.contains("the target region rewinds on exit"),
+        "expected the lane rewind explanation, got: {err}"
+    );
+}
+
+#[test]
+fn return_lane_ptr_from_region_fail() {
+    let err = compile_err("examples/lane_ptr_return_fail.sn");
+    assert!(
+        err.contains("[E-ESCAPE]"),
+        "expected the E-ESCAPE diagnostic, got: {err}"
+    );
+    assert!(
+        err.contains("which rewinds on return"),
+        "expected the return rewind explanation, got: {err}"
+    );
+}
+
+#[test]
+fn lane_ptr_region_ok() {
+    assert_out("examples/lane_ptr_region_ok.sn", "42\n");
+}
+
 /// SWARM RABBIT HOLE — Wave 8 (Impl-J) discharge: refs created and
 /// stored within the SAME region — reg(target) == reg(holder), ⊑ₗ by
 /// reflexivity — the push site and the assignment site must both stay

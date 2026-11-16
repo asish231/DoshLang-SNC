@@ -1,0 +1,9 @@
+fn main() {
+    int sum = 0
+    region {
+        ptr temp = lane_alloc(0, 16)
+        ptr_store(temp, 0, 42)
+        sum = ptr_load(temp, 0)
+    }
+    print(sum)
+}

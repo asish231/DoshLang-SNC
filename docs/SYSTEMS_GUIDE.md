@@ -92,7 +92,7 @@ fn process_batch(list<int> input) -> int {
 
 ### 1.3 Compile-Time Type Safety & Invariants
 * **`E-GC-IN-LANE` (Memory Space Isolation)**: The compiler strictly forbids storing references to lane-allocated objects into GC-managed structures, and vice versa. Because lanes are reclaimed wholesale, cross-tier pointers would create dangling references.
-* **`E0802` / `E0802c` (Affine Escape Analysis)**: The type checker performs interprocedural escape analysis. Returning a pointer allocated in a child region or passing a local lane reference to an outer scope is rejected at compile time.
+* **`E-ESCAPE` (Affine Escape Analysis)**: The type checker performs static escape analysis. Returning a pointer or reference allocated in an inner region or passing a local reference to an outer scope is rejected at compile time.
 * **Poison Invariant (`T-FIBR`)**: In debug and `-O0` builds (`--poison`), reclaimed lane segments are immediately overwritten with the poison byte `0xAA`. Any read-before-write or use-after-scope access immediately triggers an AddressSanitizer panic.
 
 ---
@@ -993,7 +993,8 @@ fn verify_account_network(ptr transaction_graph, ptr seed_accounts) -> bool {
 | Error Code | Category | Cause and Remedy |
 | :--- | :--- | :--- |
 | **`E-GC-IN-LANE`** | Memory Safety | Attempted to store a lane reference into a GC-managed object or vice versa. Keep memory tiers isolated. |
-| **`E0802` / `E0802c`** | Lifetime Escape | A local lane reference escaped its declaring region scope or exceeded lane capacity. |
+| **`E-ESCAPE`** | Lifetime Escape | A pointer or reference escaped its declaring region scope or function frame. |
+| **`E0802` / `E0802c`** | Lane Budget & Coloring | SCC accumulator allocated on scratch lane or exceeds the 5-accumulator pinned lane budget. |
 | **`E-SFC`** | Geometry Invariant | Morton list dimensions are not equal powers of two (must be square $2^k \times 2^k$). |
 | **`E-SFC-ORDER`** | Order Refusal | Attempted out-of-order insertion into a Hilbert map. Inserts must follow Hilbert order. |
 | **`W-SFC-T5B`** | Performance Warning | Row-major nested loop detected over Morton storage. Traverse in curve order to maintain cache locality. |

@@ -147,7 +147,7 @@ irq fn keyboard_isr() {
 |---|---|
 | **Types** | `int`, `bool`, `str`, `byte`, `dec(X)`, `list<T>`, `map<K,V>`, `T?`, `error`, `chan<T>`, `ref<T>`, `morton list<T, dims=[N, M]>`, `hilbert map<K, V>`, `tape<T>` |
 | **Memory** | Stack, Thread-Local Pinned Lanes (3 ns bump), Scoped `region { }` Arenas, Generational Pools (`std.pool`), Self-Relative Links (`link<T, u16>`), Freestanding Mode |
-| **Safety** | Affine stack escape analysis (`E0802`), isolated memory spaces (`E-GC-IN-LANE`), wave purity check (`E0812`), copy discipline (`E0801`), global pool discipline (`E0803`) |
+| **Safety** | Affine stack & region escape analysis (`E-ESCAPE`), isolated memory spaces (`E-GC-IN-LANE`), wave purity check (`E0812`), copy discipline (`E0801`), global pool discipline (`E0803`) |
 | **Verification** | Difference Bound Matrix (DBM) zone solver for `requires` and `ensures`, typed runtime assertion boundaries (`[E-0702]`), `verified fn` strict mode (`E0701`) |
 | **Speed** | LLVM IR backend + clang `-O2`, direct method devirtualization, native `StringBuilder`, branchless Morton bit-interleaving via BMI2 (`PDEP`/`PEXT`) |
 | **Concurrency** | Work-stealing green tasks (`spawn`), task groups (`nursery { }`), move-on-send channels (`chan<T>`), confluent semilattices (`lcell`), deterministic waves (`wave`) |

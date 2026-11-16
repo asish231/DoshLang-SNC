@@ -1,0 +1,13 @@
+fn illegal_escape() -> ptr {
+    ptr escaped_ptr = none
+    region {
+        ptr temp = lane_alloc(0, 128)
+        escaped_ptr = temp
+    }
+    return escaped_ptr
+}
+
+fn main() {
+    ptr p = illegal_escape()
+    print(1)
+}

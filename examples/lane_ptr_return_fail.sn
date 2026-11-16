@@ -1,0 +1,11 @@
+fn bad() -> ptr {
+    region {
+        ptr temp = lane_alloc(0, 128)
+        return temp
+    }
+}
+
+fn main() {
+    ptr p = bad()
+    print(1)
+}
