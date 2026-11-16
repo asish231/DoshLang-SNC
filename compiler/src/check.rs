@@ -6051,41 +6051,22 @@ impl Checker<'_> {
                 self.spawn_depth -= 1;
             }
             Stmt::SpawnExpr { expr, .. } => {
-                if let ExprKind::Call { callee: _, args, .. } = &expr.kind {
+                if let ExprKind::Call { callee, args, .. } = &expr.kind {
+                    // The method-call form captures its RECEIVER too:
+                    // `spawn c.bump()` hands `c` to the spawned task
+                    // exactly like `spawn f(c)` does. Before this arm
+                    // only the arguments were checked, so an unlocked
+                    // blueprint raced freely through the call form
+                    // while the block form was refused — the same
+                    // capture rule, one spelling apart.
+                    if let ExprKind::Member { base, .. } = &callee.kind {
+                        self.check_spawn_call_capture(base);
+                    }
                     for a in args {
                         let arg_expr = match a {
                             Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. } => e,
                         };
-                        let t = self.check_expr(arg_expr);
-                        if matches!(t, Type::Ref(_) | Type::Mut(_) | Type::Ptr) {
-                            self.diag.error(
-                                arg_expr.span,
-                                format!("cannot pass reference of type '{t}' to spawn: data race hazard"),
-                            );
-                        } else if let Type::Blueprint(bp) = &t {
-                            self.diag.error(
-                                arg_expr.span,
-                                format!("cannot pass blueprint '{bp}' to spawn without locking"),
-                            );
-                        } else if matches!(t, Type::Pool(_)) {
-                            // SWARM RABBIT HOLE — Wave 10 / DIFF-4
-                            // (Impl-O): the pool object is not a
-                            // Sendable argument (locals never; globals
-                            // per their mode).
-                            if let Some(n) = Self::root_var_of_expr(arg_expr) {
-                                self.check_pool_capture(&n, arg_expr.span);
-                            }
-                        } else if let Some(h) = Self::root_var_of_expr(arg_expr) {
-                            // DIFF-4 (Impl-O): a handle argument is
-                            // checked against its minting pool's mode
-                            // + the capture site's window (E0803.1/.2).
-                            // Provenance keys on handle_home — handles
-                            // are held in int vars on this surface, so
-                            // the declared type does not identify them.
-                            if let Some(p) = self.handle_home.get(&h).cloned() {
-                                self.check_handle_capture(&h, &p, arg_expr.span);
-                            }
-                        }
+                        self.check_spawn_call_capture(arg_expr);
                     }
                 } else {
                     self.check_expr(expr);
@@ -10095,6 +10076,44 @@ impl Checker<'_> {
     fn check_spawn_block(&mut self, body: &[Stmt]) {
         let mut local_decls = HashSet::new();
         self.check_spawn_stmts(body, &mut local_decls, false);
+    }
+
+    /// Stmt::SpawnExpr's capture discipline, shared by the arguments of
+    /// a call-form spawn and by the RECEIVER of a method-call form
+    /// (`spawn c.bump()`): the receiver is captured state exactly like
+    /// an argument, and the same ref/ptr/blueprint/pool/handle rules
+    /// apply. The diagnostics are the argument-form wording; the
+    /// block-form spawn (check_spawn_stmts) walks the same categories
+    /// with its own spelling.
+    fn check_spawn_call_capture(&mut self, e: &Expr) {
+        let t = self.check_expr(e);
+        if matches!(t, Type::Ref(_) | Type::Mut(_) | Type::Ptr) {
+            self.diag.error(
+                e.span,
+                format!("cannot pass reference of type '{t}' to spawn: data race hazard"),
+            );
+        } else if let Type::Blueprint(bp) = &t {
+            self.diag.error(
+                e.span,
+                format!("cannot pass blueprint '{bp}' to spawn without locking"),
+            );
+        } else if matches!(t, Type::Pool(_)) {
+            // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the pool
+            // object is not a Sendable argument (locals never; globals
+            // per their mode).
+            if let Some(n) = Self::root_var_of_expr(e) {
+                self.check_pool_capture(&n, e.span);
+            }
+        } else if let Some(h) = Self::root_var_of_expr(e) {
+            // DIFF-4 (Impl-O): a handle argument is checked against
+            // its minting pool's mode + the capture site's window
+            // (E0803.1/.2). Provenance keys on handle_home — handles
+            // are held in int vars on this surface, so the declared
+            // type does not identify them.
+            if let Some(p) = self.handle_home.get(&h).cloned() {
+                self.check_handle_capture(&h, &p, e.span);
+            }
+        }
     }
 
     fn check_spawn_stmts(&mut self, stmts: &[Stmt], locals: &mut HashSet<String>, in_lock: bool) {

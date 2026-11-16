@@ -1,0 +1,17 @@
+// guard(cond) otherwise { ... }: when cond HOLDS the else block is
+// skipped; when cond FAILS the recovery block runs and execution
+// CONTINUES after the guard. (Regression pin: before the fix the
+// else-block fell through into the ok label mid-block and the module
+// failed to assemble — "expected instruction opcode".)
+fn main() {
+    int x = 1
+    guard (x > 0) otherwise {
+        print("guard failed")
+    }
+    print("guard passed")
+    int y = 0
+    guard (y > 0) otherwise {
+        print("else taken")
+    }
+    print("done")
+}

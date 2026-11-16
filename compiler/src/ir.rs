@@ -1975,6 +1975,14 @@ impl Cx<'_> {
                 for s in else_body {
                     self.stmt(s);
                 }
+                // The else block must terminate before the ok label:
+                // without this branch the label lands mid-block and
+                // clang rejects the module ("expected instruction
+                // opcode"). A body that already returned (or broke)
+                // has its own terminator and needs no extra branch.
+                if !self.terminated {
+                    self.line(&format!("br label %{l_ok}"));
+                }
                 self.raw(&format!("{l_ok}:"));
             }
             Stmt::Asm { template, clobbers, .. } => {

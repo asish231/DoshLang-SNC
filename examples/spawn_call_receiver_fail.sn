@@ -1,0 +1,18 @@
+// The spawn CALL form captures its receiver exactly like an argument:
+// `spawn c.bump()` hands `c` to the spawned task, so the unlocked
+// blueprint capture is refused with the same diagnostic the argument
+// form and the block form produce. (Regression pin: before the fix only
+// the arguments were walked — the receiver slipped past the discipline.)
+blueprint Counter {
+    int count = 0
+
+    fn bump() {
+        self.count += 1
+    }
+}
+
+fn main() {
+    new Counter c()
+    spawn c.bump()
+    c.bump()
+}

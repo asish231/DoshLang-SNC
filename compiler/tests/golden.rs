@@ -130,6 +130,27 @@ fn blueprint_super() {
     assert_out("examples/blueprint_super.sn", "Dog:Animal:Canine:Lab\n");
 }
 
+/// The guard else-block must terminate before the ok label: without the
+/// branch the label lands mid-block and clang rejects the module
+/// ("expected instruction opcode"). Both paths run here — cond holds
+/// (skip the else) and cond fails (run the recovery block, continue).
+#[test]
+fn guard_else_branch_terminates() {
+    assert_out("examples/guard_ok.sn", "guard passed\nelse taken\ndone\n");
+}
+
+/// The spawn CALL form captures its receiver like an argument: the
+/// unlocked blueprint reaches the spawned task exactly as it would
+/// through `spawn f(c)` or the block form.
+#[test]
+fn spawn_call_form_receiver_refused() {
+    let err = compile_err("examples/spawn_call_receiver_fail.sn");
+    assert!(
+        err.contains("cannot pass blueprint 'Counter' to spawn without locking"),
+        "expected the receiver-capture refusal, got: {err}"
+    );
+}
+
 #[test]
 fn contract_draw() {
     assert_out("examples/contract_draw.sn", "5\n");
