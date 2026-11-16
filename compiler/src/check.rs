@@ -316,6 +316,7 @@ pub struct CheckDb {
     pub contracts: HashMap<String, ContractInfo>,
     pub expr_ty: HashMap<(u32, u32, u32), Type>,
     pub globals: HashMap<String, Type>,
+    pub global_consts: std::collections::HashSet<String>,
     /// SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the declared mode
     /// of every GLOBAL pool (kills G1 §1 A6c — the global-pool freelist
     /// race). Recorded at collect time from the declaration's parsed
@@ -724,6 +725,7 @@ pub fn check_programs(programs: &[Program], diag: &mut Diagnostics) -> CheckDb {
         contracts: HashMap::new(),
         expr_ty: HashMap::new(),
         globals: HashMap::new(),
+        global_consts: std::collections::HashSet::new(),
         global_pools: HashMap::new(),
         method_slots: HashMap::new(),
         vtable_methods: Vec::new(),
@@ -2199,9 +2201,21 @@ fn collect(db: &mut CheckDb, programs: &[Program], diag: &mut Diagnostics) {
                         db.funcs.insert(format!("{}::{}", b.name, m.name), sig);
                     }
                 }
-                Item::Stmt(Stmt::Decl { names, ty, mode, value, span, .. }) => {
-                    if let (Some(n), Some(t)) = (names.first(), ty) {
-                        let rt = resolve_type_ast(t, db);
+                Item::Stmt(Stmt::Decl { names, ty, mode, value, span, is_const, .. }) => {
+                    if let Some(n) = names.first() {
+                        let rt = if let Some(t) = ty {
+                            resolve_type_ast(t, db)
+                        } else if let Some(v) = value {
+                            match &v.kind {
+                                ExprKind::Int(_) => Type::Int,
+                                ExprKind::Float(_) => Type::Float,
+                                ExprKind::Bool(_) => Type::Bool,
+                                ExprKind::Str(_) => Type::Str,
+                                _ => Type::Int,
+                            }
+                        } else {
+                            Type::Int
+                        };
                         // SWARM RABBIT HOLE — Wave 14 (Impl-S, Cohort
                         // Delta): the SFC layout types' discipline at
                         // the module-scope site (the same check the
@@ -2232,6 +2246,9 @@ fn collect(db: &mut CheckDb, programs: &[Program], diag: &mut Diagnostics) {
                             );
                         }
                         db.globals.insert(n.clone(), rt);
+                        if *is_const {
+                            db.global_consts.insert(n.clone());
+                        }
                         // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O):
                         // the global-declaration arm records the pool's
                         // mode (the annotation parsed WITH the
@@ -2241,17 +2258,19 @@ fn collect(db: &mut CheckDb, programs: &[Program], diag: &mut Diagnostics) {
                         // is the table E0803.1/.2/.3 consult at the
                         // spawn/chan capture seam and the mutation seam
                         // (kills G1 §1 A6c).
-                        if matches!(t, crate::ast::TypeAst::Pool(_)) {
-                            let gm = match *mode {
-                                crate::ast::PoolMode::Frozen => GlobalPoolMode::Frozen,
-                                crate::ast::PoolMode::ThreadConfined => {
-                                    GlobalPoolMode::ThreadConfined
-                                }
-                                crate::ast::PoolMode::Synchronized => {
-                                    GlobalPoolMode::Synchronized
-                                }
-                            };
-                            db.global_pools.insert(n.clone(), gm);
+                        if let Some(t) = ty {
+                            if matches!(t, crate::ast::TypeAst::Pool(_)) {
+                                let gm = match *mode {
+                                    crate::ast::PoolMode::Frozen => GlobalPoolMode::Frozen,
+                                    crate::ast::PoolMode::ThreadConfined => {
+                                        GlobalPoolMode::ThreadConfined
+                                    }
+                                    crate::ast::PoolMode::Synchronized => {
+                                        GlobalPoolMode::Synchronized
+                                    }
+                                };
+                                db.global_pools.insert(n.clone(), gm);
+                            }
                         }
                         // SWARM RABBIT HOLE — Wave 13 (Impl-R): the
                         // SEAM-CELL declaration — a module-scope
@@ -2265,7 +2284,7 @@ fn collect(db: &mut CheckDb, programs: &[Program], diag: &mut Diagnostics) {
                         // rejected: the seam's carrier must be a
                         // compile-time fact for the fold (J2) and
                         // the R1 analysis to be well-defined.
-                        if matches!(t, crate::ast::TypeAst::Ptr) {
+                        if matches!(ty, Some(crate::ast::TypeAst::Ptr)) {
                             if let Some(value) = &value {
                                 if let ExprKind::Call { callee, args, .. } = &value.kind {
                                     if let ExprKind::Ident(cn) = &callee.kind {
@@ -4843,7 +4862,8 @@ impl Checker<'_> {
             }
         }
         if let Some(t) = self.db.globals.get(name) {
-            return Some((t.clone(), false));
+            let is_const = self.db.global_consts.contains(name);
+            return Some((t.clone(), is_const));
         }
         None
     }
@@ -5070,6 +5090,12 @@ impl Checker<'_> {
                     }
                     let decl_ty_clone = decl_ty.clone();
                     self.declare(name, decl_ty, *is_const, *span);
+                    if self.scopes.len() == 1 {
+                        self.db.globals.insert(name.clone(), decl_ty_clone.clone());
+                        if *is_const {
+                            self.db.global_consts.insert(name.clone());
+                        }
+                    }
                     // SWARM RABBIT HOLE — Wave 16 (Impl-U, Cohort
                     // Delta): the tape's DELTA-ORIGIN record — a
                     // local whose initializer is a tier-classified

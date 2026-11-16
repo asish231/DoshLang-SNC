@@ -430,6 +430,23 @@ fn lane_ptr_region_ok() {
     assert_out("examples/lane_ptr_region_ok.sn", "42\n");
 }
 
+#[test]
+fn module_globals_ok() {
+    assert_out(
+        "examples/module_globals_ok.sn",
+        "Count: 15\n3\n3\n99\n",
+    );
+}
+
+#[test]
+fn module_global_const_fail() {
+    let err = compile_err("examples/module_global_const_fail.sn");
+    assert!(
+        err.contains("cannot assign to const 'STEP'"),
+        "expected cannot assign to const error, got: {err}"
+    );
+}
+
 /// SWARM RABBIT HOLE — Wave 8 (Impl-J) discharge: refs created and
 /// stored within the SAME region — reg(target) == reg(holder), ⊑ₗ by
 /// reflexivity — the push site and the assignment site must both stay

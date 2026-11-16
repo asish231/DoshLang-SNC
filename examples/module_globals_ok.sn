@@ -1,0 +1,22 @@
+int counter = 10
+const int STEP = 5
+str prefix = "Count: "
+list<int> numbers = [1, 2]
+chan<int> ch
+
+fn worker() {
+    counter += STEP
+    numbers.push(3)
+    ch.send(99)
+}
+
+fn main() {
+    spawn {
+        worker()
+    }
+    int msg = ch.receive()
+    print(prefix + cast(counter, str))
+    print(numbers.length())
+    print(numbers[2])
+    print(msg)
+}

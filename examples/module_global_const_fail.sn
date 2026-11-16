@@ -1,0 +1,6 @@
+const int STEP = 5
+
+fn main() {
+    STEP += 1
+    print(STEP)
+}

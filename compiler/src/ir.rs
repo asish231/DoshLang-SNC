@@ -320,6 +320,14 @@ pub fn lower(programs: &[Program], db: &CheckDb, files: &[SourceFile]) -> IrModu
         }
         dbg.file_map[f.id as usize] = id;
     }
+    let mut module_stmts = Vec::new();
+    for p in programs {
+        for item in &p.items {
+            if let Item::Stmt(s) = item {
+                module_stmts.push(s.clone());
+            }
+        }
+    }
     for p in programs {
         for item in &p.items {
             match item {
@@ -344,6 +352,7 @@ pub fn lower(programs: &[Program], db: &CheckDb, files: &[SourceFile]) -> IrModu
                         &mut extra,
                         files,
                         &mut dbg,
+                        &module_stmts,
                     ));
                 }
                 Item::Blueprint(b) => {
@@ -359,6 +368,7 @@ pub fn lower(programs: &[Program], db: &CheckDb, files: &[SourceFile]) -> IrModu
                             &mut extra,
                             files,
                             &mut dbg,
+                            &[],
                         ));
                     }
                 }
@@ -396,6 +406,7 @@ pub fn lower(programs: &[Program], db: &CheckDb, files: &[SourceFile]) -> IrModu
                 &mut extra,
                 files,
                 &mut dbg,
+                &[],
             ));
         }
     }
@@ -408,6 +419,7 @@ pub fn lower(programs: &[Program], db: &CheckDb, files: &[SourceFile]) -> IrModu
             &mut extra,
             files,
             &mut dbg,
+            &[],
         ));
     }
     functions.extend(extra);
@@ -418,32 +430,22 @@ pub fn lower(programs: &[Program], db: &CheckDb, files: &[SourceFile]) -> IrModu
         }
         globals.push(build_vtable(db, name));
     }
-    // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the global pools'
-    // runtime slots. Module-level statements were check-only before
-    // this wave; the global-pool discipline makes the declared pool a
-    // real runtime object: `@sn_g_{name}` holds the pool pointer,
-    // constructed by main's entry (sn_pool_new_mode with the declared
-    // mode). Sorted for deterministic emission; the naming follows the
-    // lvalue_addr convention (@sn_g_{nm}).
+    // Runtime slots for all module-scope globals:
     {
-        let mut names: Vec<&String> = db.global_pools.keys().collect();
+        let mut names: Vec<&String> = db.globals.keys().collect();
         names.sort();
         for name in names {
-            globals.push(format!("@sn_g_{name} = internal global ptr null"));
-        }
-    }
-    // SWARM RABBIT HOLE — Wave 13 (Impl-R): the seam cells' runtime
-    // slots — the same @sn_g_{name} convention (W2B §4.1: the seam
-    // cells ARE the module-scope Tier-L cells). Each module-scope
-    // `ptr NAME = lcell_new(k)` becomes a real runtime object
-    // constructed at main entry (the DIFF-4 global-pool pattern:
-    // module initializers never run as code); the carrier literal k
-    // is the compile-time fact the checker recorded at collect.
-    {
-        let mut names: Vec<&String> = db.lcell_globals.keys().collect();
-        names.sort();
-        for name in names {
-            globals.push(format!("@sn_g_{name} = internal global ptr null"));
+            if db.global_pools.contains_key(name) || db.lcell_globals.contains_key(name) {
+                globals.push(format!("@sn_g_{name} = internal global ptr null"));
+            } else if let Some(t) = db.globals.get(name) {
+                let init = match llty(t) {
+                    "ptr" => "null",
+                    "double" => "0.0",
+                    "i16" => "0",
+                    _ => "0",
+                };
+                globals.push(format!("@sn_g_{name} = internal global {} {init}", llty(t)));
+            }
         }
     }
     IrModule {
@@ -610,6 +612,7 @@ fn lower_fn(
     extra: &mut Vec<String>,
     files: &[SourceFile],
     dbg: &mut DbgInfo,
+    module_stmts: &[Stmt],
 ) -> String {
     let llvm_name = if let Some(b) = &bp {
         format!("sn_m_{}_{}", b, f.name.replace('.', "_"))
@@ -781,6 +784,38 @@ fn lower_fn(
                 ));
                 cx.line(&format!("call void @sn_gc_register_global(ptr {r})"));
                 cx.line(&format!("store ptr {r}, ptr @sn_g_{name}"));
+            }
+        }
+        for s in module_stmts {
+            match s {
+                Stmt::Decl { names, value, .. } => {
+                    if let Some(name) = names.first() {
+                        if !db.global_pools.contains_key(name) && !db.lcell_globals.contains_key(name) {
+                            let gt = db.globals.get(name).cloned().unwrap_or(Type::Int);
+                            let lt = llty(&gt);
+                            if let Some(v) = value {
+                                let (vr, vt) = cx.expr(v);
+                                let (vr, _) = cx.coerce(vr, &vt, &gt);
+                                if lt == "ptr" {
+                                    cx.line(&format!("call void @sn_gc_register_global(ptr {vr})"));
+                                }
+                                cx.line(&format!("store {lt} {vr}, ptr @sn_g_{name}"));
+                            } else if matches!(gt, Type::Chan(_)) {
+                                let c = cx.t();
+                                cx.line(&format!("{c} = call ptr @sn_chan_new()"));
+                                cx.line(&format!("call void @sn_gc_register_global(ptr {c})"));
+                                cx.line(&format!("store ptr {c}, ptr @sn_g_{name}"));
+                            } else if gt == Type::Lock {
+                                let c = cx.t();
+                                cx.line(&format!("{c} = call ptr @sn_lock_new()"));
+                                cx.line(&format!("store ptr {c}, ptr @sn_g_{name}"));
+                            }
+                        }
+                    }
+                }
+                other => {
+                    cx.stmt(other);
+                }
             }
         }
     }
@@ -1224,11 +1259,15 @@ impl Cx<'_> {
                                 let (an, lt) = match self.locals.get(n).cloned() {
                                     Some(pair) => pair,
                                     None => {
-                                        let an = format!("%v_{}_{}", n, self.l("lv"));
-                                        let et = ts[i].clone();
-                                        self.emit_alloca(&format!("{an} = alloca {}", llty(&et)));
-                                        self.locals.insert(n.clone(), (an.clone(), et.clone()));
-                                        (an, et)
+                                        if let Some(gt) = self.db.globals.get(n).cloned() {
+                                            (format!("@sn_g_{n}"), gt)
+                                        } else {
+                                            let an = format!("%v_{}_{}", n, self.l("lv"));
+                                            let et = ts[i].clone();
+                                            self.emit_alloca(&format!("{an} = alloca {}", llty(&et)));
+                                            self.locals.insert(n.clone(), (an.clone(), et.clone()));
+                                            (an, et)
+                                        }
                                     }
                                 };
                                 let ev = self.t();
@@ -1237,6 +1276,9 @@ impl Cx<'_> {
                                     tuple_ll(ts)
                                 ));
                                 self.line(&format!("store {} {ev}, ptr {an}", llty(&lt)));
+                                if an.starts_with("@sn_g_") && llty(&lt) == "ptr" {
+                                    self.line(&format!("call void @sn_gc_register_global(ptr {ev})"));
+                                }
                             }
                         }
                     }
@@ -1255,7 +1297,13 @@ impl Cx<'_> {
                                 self.concrete_types.remove(n);
                             }
                         }
-                        let (an, lt) = self.locals.get(n).cloned().expect("assign ident");
+                        let (an, lt) = if let Some(loc) = self.locals.get(n).cloned() {
+                            loc
+                        } else if let Some(gt) = self.db.globals.get(n).cloned() {
+                            (format!("@sn_g_{n}"), gt)
+                        } else {
+                            panic!("assign ident: {n}");
+                        };
                         if *op == AssignOp::Eq && matches!(lt, Type::Record(_)) {
                             let (vr, _) = self.coerce(vr, &vt, &lt);
                             let sz = if let Type::Record(rn) = &lt {
@@ -1275,6 +1323,9 @@ impl Cx<'_> {
                             self.arith_op(assign_bin(*op), cur, vr, &lt)
                         };
                         self.line(&format!("store {} {src}, ptr {an}", llty(&lt)));
+                        if an.starts_with("@sn_g_") && llty(&lt) == "ptr" {
+                            self.line(&format!("call void @sn_gc_register_global(ptr {src})"));
+                        }
                     }
                     ExprKind::Index { base, index } => {
                         let (b, bt) = self.expr(base);
@@ -1695,7 +1746,13 @@ impl Cx<'_> {
                 }
             }
             Stmt::LockBlock { name, body, .. } => {
-                let (an, _) = self.locals.get(name).cloned().unwrap();
+                let an = if let Some((loc, _)) = self.locals.get(name).cloned() {
+                    loc
+                } else if self.db.globals.contains_key(name) {
+                    format!("@sn_g_{name}")
+                } else {
+                    panic!("lock {name}");
+                };
                 let lk = self.t();
                 self.line(&format!("{lk} = load ptr, ptr {an}"));
                 self.line(&format!("call void @sn_lock_acq(ptr {lk})"));
@@ -2257,21 +2314,22 @@ impl Cx<'_> {
                     })
                 } else if self.db.blueprints.contains_key(n) {
                     (n.clone(), Type::Blueprint(n.clone()))
-                } else if let (Some(t), true) = (
-                    self.db.globals.get(n).cloned(),
-                    // SWARM RABBIT HOLE — Wave 13 (Impl-R): the global
-                    // POOL objects and the SEAM CELLS (module-scope
-                    // Tier-L lcells) are the real runtime globals —
-                    // each @sn_g_{n} slot (constructed at main's
-                    // entry) holds the object pointer; every use
-                    // loads it. Module-level reads of anything else
-                    // remain check-only (the pre-DIFF-4 behavior).
-                    self.db.global_pools.contains_key(n)
-                        || self.db.lcell_globals.contains_key(n),
-                ) {
-                    let v = self.t();
-                    self.line(&format!("{v} = load ptr, ptr @sn_g_{n}"));
-                    (v, t)
+                } else if let Some(t) = self.db.globals.get(n).cloned() {
+                    if matches!(t, Type::Record(_)) {
+                        (format!("@sn_g_{n}"), t)
+                    } else {
+                        let v = self.t();
+                        self.line(&format!("{v} = load {}, ptr @sn_g_{n}", llty(&t)));
+                        let want = self.lookup_ty(e);
+                        if want != t && want != Type::Int && (t.is_fixed_int() || t == Type::Int || matches!(t, Type::Optional(_))) {
+                            let (v, wt) = self.coerce_narrow(v, &t, &want);
+                            (v, wt)
+                        } else if matches!((&t, &want), (Type::Optional(_), _)) && t != want {
+                            self.coerce_narrow(v, &t, &want)
+                        } else {
+                            (v, t)
+                        }
+                    }
                 } else {
                     (n.clone(), Type::Named(n.clone()))
                 }
