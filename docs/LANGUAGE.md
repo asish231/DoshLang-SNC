@@ -13,14 +13,33 @@ fn main() {
 
 ## Types
 
-`int`, `bool`, `byte`, `str`, `dec(X)`, `list<T>`, `map<K,V>`, `T?`, `none`, `error`,
-`chan<T>`, `ref<T>`, `lock`, `json`, `any`, `record`, function types.
+`int`, `float`, `bool`, `byte`, `str`, `dec(X)`, `list<T>`, `map<K,V>`, `T?`, `none`, `error`,
+`chan<T>`, `ref<T>`, `mut<T>`, `lock`, `json`, `any`, `record`, function types.
 
-Null is opt-in: `str name` cannot be `none`; `str? nickname` can.
+### Null Safety & Optional Types (`T?`)
+
+In SNlang, references and objects are **non-nullable by default**. A variable of type `str` or `Node` is statically guaranteed to never be `none` or a null pointer. Nullable values must be explicitly wrapped in `T?`:
 
 ```sn
 str? nick = none
 str shown = nick otherwise "anon"
+
+// Float and scalar optionals
+float? f = 3.14
+print(f!!) // Force unwrap (3.14)
+
+// Optional chaining (?.) safely extracts fields or returns none:
+blueprint Node {
+    int val
+}
+
+Node? opt_node = none
+int? extracted = opt_node?.val // Evaluates to none without null-pointer dereference!
+
+new Node n()
+n.val = 42
+opt_node = n
+print(opt_node?.val) // Evaluates to 42
 ```
 
 ## Lexical & Formatting Rules
@@ -117,6 +136,50 @@ if (x > 100) {
 }
 ```
 
+### 6. Functions & Definite Return Reachability
+
+Functions are declared with `fn`. Functions with non-void return types specify `-> Type`:
+
+```sn
+fn compute(int x) -> int {
+    if (x > 0) {
+        return x * 2
+    } else {
+        return -x
+    }
+}
+```
+
+> [!IMPORTANT]
+> **Control-Flow Reachability Analysis (`[E-MISSING-RETURN]`):**
+> Every non-void function must return a value of its declared return type on all execution branches. An empty body, an `if` without an `else`, or a `match` without a `default` that fails to return on all paths is rejected at compile time with `function '{name}' must return a value of type '{T}' on all paths`. This guarantees that non-nullable references (`Blueprint`, `str`, `list<T>`) never return null pointers or cause runtime segmentation faults.
+
+### 7. Closures, Nested Functions & Capture Safety
+
+Functions can be nested inside other functions or passed as first-class values:
+
+```sn
+fn main() {
+    int factor = 10
+
+    // Closures capture outer variables by immutable snapshot
+    fn multiply(int x) -> int {
+        return x * factor
+    }
+    print(multiply(5)) // 50
+
+    // Recursive nested closures resolve correctly
+    fn fact(int n) -> int {
+        if (n <= 1) { return 1 }
+        return n * fact(n - 1)
+    }
+    print(fact(5)) // 120
+}
+```
+
+* **Capture Immutability:** Outer variables captured by closures are captured by value snapshot. Assigning to a captured variable (`factor = 20`) or taking a mutable borrow (`mut<int> m = address(factor)`) inside the closure is strictly rejected at compile time, eliminating silent state divergence.
+* **Lvalue Storage Enforcement:** Assignments (`target = value`) require a valid storage location (`Ident`, `Member`, `Index`, or `Tuple`). Attempting to reassign a function symbol (`foo = bar`) or literal (`1 = 2`) is rejected at compile time.
+
 ## Pattern Matching & Enums
 
 ### Algebraic Enums & Pattern Matching
@@ -212,7 +275,9 @@ verified fn add_positive(int a, int b) -> int
 - **Safe Degradation:** In standard `fn`, unprovable invariants degrade safely to typed runtime assertions (`[E-0702]`).
 - **Verified Mode (`verified fn`):** Unprovable or non-linear expressions produce a hard compilation error (`E0701`).
 
-## Modules
+## Modules & Module-Scope State
+
+Modules are imported with `use`:
 
 ```sn
 use std.math
@@ -220,6 +285,38 @@ use mylib.calc
 ```
 
 Search order: importer dir, `packages/`, `stdlib/`, path deps in `sn.toml`.
+
+### Module-Scope Global Variables, Channels, Lists & Constants
+
+SNlang supports top-level declarations at module scope. All global initializers are evaluated deterministically at process entry before `main()` begins:
+
+```sn
+// Module-level typed globals with initializers
+int global_request_count = 0
+const int MAX_CLIENTS = 1024
+const str SERVER_NAME = "SN-Edge"
+
+// Global channels for cross-task coordination
+chan<int> task_channel
+
+// Global lists and containers
+list<int> server_ports = [8080, 8443, 9000]
+
+// Global pools and locks
+pool<Session> session_pool
+lock registry_mutex
+
+fn main() {
+    global_request_count += 1
+    task_channel.send(42)
+    server_ports.push(9001)
+    print("Server: {SERVER_NAME}, Active: {global_request_count}")
+}
+```
+
+* **Deterministic Startup Order:** Constant literals and primitive expressions evaluate into static slots; dynamically computed module initializers evaluate in declaration order at process entry.
+* **Type Invariance & Immutability:** `const` globals cannot be assigned to or mutably borrowed (`mut<T> m = address(MAX_CLIENTS)` is a compile-time error).
+* **Direct Channel & List Operations:** Global channels support `.send()` and `.receive()`; global lists support index access and mutation methods (`.push()`, `.length()`, etc.).
 
 ## Object-Oriented Architecture (OOP)
 
@@ -361,12 +458,14 @@ blueprint Account {
 
 ### 6. Devirtualization, Generics & Variance
 * **Direct Devirtualization (1B calls/sec)**: When the concrete receiver type is known at compile time, the compiler bypasses the `vptr` and lowers calls directly to `@sn_m_{Blueprint}_{method}` with full LLVM inlining.
-* **Heterogeneous Lists**: `list<Animal>` accepts any subclass instance (`zoo.push(dog)`, `zoo.push(cat)`).
-* **Generic Monomorphization**: `blueprint Box<T>` monomorphizes into specialized zero-overhead types.
-* **Type Bounds & Variance**:
+* **Heterogeneous Lists & Strict Container Invariance**:
+  * A `list<Animal>` can store instances of subclasses (`zoo.push(dog)`, `zoo.push(cat)`).
+  * **Strict Invariance**: A `list<Cat>` is **NOT** a `list<Animal>`. Mutable collections (`list<T>`, `map<K, V>`) are strictly invariant. Passing `list<Cat>` where `list<Animal>` is expected is rejected at compile time, eliminating heap type confusion and invalid memory dereferences.
+* **Generic Monomorphization**: `blueprint Box<T>` monomorphizes into specialized zero-overhead types for primitives (`float`, `u8`..`u64`, `int`), strings, and blueprints.
+* **Type Bounds & Variance Positions**:
   * `blueprint Container<T: Drawable>`: Enforces that type argument `T` must implement contract `Drawable`.
-  * `blueprint Producer<out T>`: Covariant in `T`.
-  * `blueprint Consumer<in T>`: Contravariant in `T`.
+  * `blueprint Producer<out T>`: Declares `T` as covariant. The compiler statically enforces that `out T` can **only appear in output positions** (method return types, immutable fields). Using `out T` as a method parameter (`fn set(T v)`) is rejected at compile time.
+  * `blueprint Consumer<in T>`: Declares `T` as contravariant. The compiler enforces that `in T` can **only appear in input positions** (method parameters).
 
 ## Concurrency & Structured Concurrency
 
@@ -385,11 +484,12 @@ nursery {
     spawn worker(2)
 } // The closing brace automatically joins all child tasks!
 
-// Move-on-Send Channels (Zero-Lock Data-Race Immunity)
-chan<str> ch
-str msg = "secret"
-ch.send(msg) // 'msg' is moved to the channel
-// print(msg) // Compile Error: use of moved value 'msg'
+// Move-on-Send Channels (Zero-Lock Data-Race Immunity with Alias Invalidation)
+chan<Counter> ch
+new Counter c1()
+Counter c2 = c1 // Alias
+ch.send(c1)     // 'c1' AND all its aliases ('c2') are moved!
+// c2.value = 100 // Compile Error: use of moved value 'c2': value was transferred over channel
 
 // Safe Channel Read
 str val, bool ok = ch.receive()
@@ -625,6 +725,8 @@ The compiler statically enforces Rust-grade memory safety and thread safety with
 3. **Collection Invalidation Protection:** While an element of a `list` or `map` is borrowed (`ref<T>`), mutating methods (`.push()`, `.clear()`, `.pop()`, `.insert()`) are rejected at compile time to prevent dangling pointer reallocations.
 4. **Affine Pointer Safety:** Calling `free(p)` invalidates `p`. Any subsequent read (`value(p)`), write (`set(p, ...)`), or second `free(p)` is caught at compile time as a use-after-free or double-free.
 5. **Thread Concurrency Safety:** `spawn` statically rejects passing unsynchronized mutable references or unlocked blueprints, preventing data races across threads.
+6. **`const` Immutability & Reference Invariance:** Coercing a shared borrow `ref<T>` into an exclusive `mut<T>` is strictly forbidden. Taking a mutable borrow on a `const` variable (`mut<int> m = address(my_const)`) is rejected at compile time.
+7. **Collection Invariance:** Mutable containers (`list<T>`, `map<K, V>`) are invariant. A `list<Cat>` cannot be coerced to `list<Animal>`, preventing polymorphic heap corruption.
 
 ```sn
 fn read_both(int a, int b) -> int {
@@ -783,7 +885,18 @@ See `examples/std_test.sn`.
 
 ## Advanced Systems Programming & Kernel Development
 
-For high-performance systems architecture and bare-metal programming:
+### Freestanding & Bare-Metal Compilation (`--freestanding`)
+
+SNlang compiles directly to bare-metal environments (OS kernels, hypervisors, embedded targets) using the `--freestanding` flag:
+
+```sh
+snc --freestanding kernel.sn -o kernel.bin
+```
+
+* **Zero GC Overhead:** Suppresses all GC runtime code, cycle collectors, and metadata. Binaries link against `compiler/runtime_freestanding.c`, introducing zero external OS dependencies.
+* **Compile-Time Allocation Guard (`[E-NO-GC-IN-FREESTANDING]`):** Any attempt to dynamically allocate managed heap objects (`new Blueprint()`) is rejected at compile time. Memory must be allocated on the stack, in `region { }` arenas, via pinned lanes, or through `std.pool`.
+
+For in-depth architectural specifications and systems design:
 
 * **[Memory Safety & Tiered Execution Architecture](MEMORY_SAFETY.md)**: Deep dive into the 4 memory tiers, pinned thread lanes, $O(1)$ lexical region scopes (`region { }`), affine escape analysis (`E-ESCAPE`), memory space isolation (`E-GC-IN-LANE`), poison safety (`T-FIBR`), and nursery lane carving.
 * **[Advanced Systems Guide](SYSTEMS_GUIDE.md)**: Deterministic regional memory, cache-oblivious collections (`morton list`, `hilbert map`), confluent race-free concurrency (`wave { }`, `lcell`), contract-driven static verification (`requires`, `ensures`), and differential state chronology (`tape`, `zset`, `zfix`).

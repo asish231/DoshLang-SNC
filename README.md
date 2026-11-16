@@ -204,7 +204,7 @@ Commit `sn.lock.toml` in apps. Registry `index.json` format and recipes: [docs/P
 | **Contract-Driven Verification** | **Stable** | DBM linear range discharge, remainder axioms, and typed runtime boundaries. |
 | **Differential State & Tapes** | **Stable** | $\mathbb{Z}$-set deltas, bounded fixpoint loops (`zfix`), and append-only tapes. |
 | **Relocatable Links & Pools** | **Stable** | Self-relative displacements (`link<T, u16>`) and generational handle vaults. |
-| **Bare-Metal & Freestanding Mode** | **Preview (v0.3.1)** | `--freestanding` compilation, memory provider ABI, `mmio<T>`, and IRQ safety. |
+| **Bare-Metal & Freestanding Mode** | **Stable (v0.3.1)** | `--freestanding` compilation with zero GC symbols, `runtime_freestanding.c`, and `[E-NO-GC-IN-FREESTANDING]`. |
 | **Language Server Protocol (LSP)** | **Scaffold** | Diagnostics with line/col ranges and structured document symbols. |
 | **Self-Hosting Compiler** | **Roadmap** | Self-hosted lexer complete; AST and code generation in development. |
 
