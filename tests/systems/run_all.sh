@@ -971,9 +971,242 @@ else
 fi
 
 echo ""
+echo "-----------------------------------------------------------------"
+echo "25. TIER 1 MEMORY SAFETY & TYPE EXPLOIT VERIFICATION"
+echo "-----------------------------------------------------------------"
+OUT_T1="/tmp/snc_test_tier1_ok"
+rm -f "$OUT_T1"
+if "$SNC" "$ROOT/examples/tier1_memory_safety_ok.sn" -o "$OUT_T1"; then
+    OUTPUT=$("$OUT_T1")
+    echo "$OUTPUT"
+    if [ "$OUTPUT" = "$(printf '1\n100\n77')" ]; then
+        echo ">>> tier1_memory_safety_ok: PASSED"
+    else
+        echo ">>> tier1_memory_safety_ok: FAILED (bad output)"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> tier1_memory_safety_ok: BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+ERR_COV=$("$SNC" "$ROOT/examples/tier1_list_covariance_fail.sn" -o /tmp/snc_fail1 2>&1 || true)
+if echo "$ERR_COV" | grep -q "expected list<Animal>, got list<Cat>"; then
+    echo ">>> tier1_list_covariance_fail: PASSED (compiler rejected mutable collection covariance)"
+else
+    echo ">>> tier1_list_covariance_fail: FAILED (expected covariance rejection, got: $ERR_COV)"
+    FAILURES=$((FAILURES + 1))
+fi
+
+ERR_CONST=$("$SNC" "$ROOT/examples/tier1_const_mut_borrow_fail.sn" -o /tmp/snc_fail2 2>&1 || true)
+if echo "$ERR_CONST" | grep -q "cannot mutably borrow const"; then
+    echo ">>> tier1_const_mut_borrow_fail: PASSED (compiler rejected mutable borrow of const)"
+else
+    echo ">>> tier1_const_mut_borrow_fail: FAILED (expected const borrow rejection, got: $ERR_CONST)"
+    FAILURES=$((FAILURES + 1))
+fi
+
+ERR_VAR=$("$SNC" "$ROOT/examples/tier1_variance_out_param_fail.sn" -o /tmp/snc_fail3 2>&1 || true)
+if echo "$ERR_VAR" | grep -q "covariant type parameter 'T' cannot appear in method parameter position"; then
+    echo ">>> tier1_variance_out_param_fail: PASSED (compiler rejected out T in parameter position)"
+else
+    echo ">>> tier1_variance_out_param_fail: FAILED (expected variance rejection, got: $ERR_VAR)"
+    FAILURES=$((FAILURES + 1))
+fi
+
+ERR_RET=$("$SNC" "$ROOT/examples/tier1_missing_return_fail.sn" -o /tmp/snc_fail4 2>&1 || true)
+if echo "$ERR_RET" | grep -q "must return a value of type 'Node' on all paths"; then
+    echo ">>> tier1_missing_return_fail: PASSED (compiler rejected missing non-void return)"
+else
+    echo ">>> tier1_missing_return_fail: FAILED (expected missing return rejection, got: $ERR_RET)"
+    FAILURES=$((FAILURES + 1))
+fi
+
+ERR_RET_EMP=$("$SNC" "$ROOT/examples/tier1_missing_return_empty_body_fail.sn" -o /tmp/snc_fail4_emp 2>&1 || true)
+if echo "$ERR_RET_EMP" | grep -q "must return a value of type 'Node' on all paths"; then
+    echo ">>> tier1_missing_return_empty_body_fail: PASSED (compiler rejected empty-body missing return)"
+else
+    echo ">>> tier1_missing_return_empty_body_fail: FAILED (expected missing return rejection, got: $ERR_RET_EMP)"
+    FAILURES=$((FAILURES + 1))
+fi
+
+ERR_RET_MND=$("$SNC" "$ROOT/examples/tier1_missing_return_match_no_default_fail.sn" -o /tmp/snc_fail4_mnd 2>&1 || true)
+if echo "$ERR_RET_MND" | grep -q "must return a value of type 'Node' on all paths"; then
+    echo ">>> tier1_missing_return_match_no_default_fail: PASSED (compiler rejected match-without-default missing return)"
+else
+    echo ">>> tier1_missing_return_match_no_default_fail: FAILED (expected missing return rejection, got: $ERR_RET_MND)"
+    FAILURES=$((FAILURES + 1))
+fi
+
+ERR_MAP_INV=$("$SNC" "$ROOT/examples/tier1_map_invariance_fail.sn" -o /tmp/snc_fail_map 2>&1 || true)
+if echo "$ERR_MAP_INV" | grep -q "expected map<int, int>, got map<i8, i8>"; then
+    echo ">>> tier1_map_invariance_fail: PASSED (compiler rejected mutable map covariance)"
+else
+    echo ">>> tier1_map_invariance_fail: FAILED (expected map invariance rejection, got: $ERR_MAP_INV)"
+    FAILURES=$((FAILURES + 1))
+fi
+
+echo ""
+echo "-----------------------------------------------------------------"
+echo "26. TIER 2 COMPILER PANIC & CRASH DEFENSE"
+echo "-----------------------------------------------------------------"
+OUT_T2="/tmp/snc_test_tier2_ok"
+rm -f "$OUT_T2"
+if "$SNC" "$ROOT/examples/tier2_generic_mono_ok.sn" -o "$OUT_T2"; then
+    OUTPUT=$("$OUT_T2")
+    echo "$OUTPUT"
+    if [ "$OUTPUT" = "$(printf '3.14\n255')" ]; then
+        echo ">>> tier2_generic_mono_ok: PASSED"
+    else
+        echo ">>> tier2_generic_mono_ok: FAILED (bad output)"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> tier2_generic_mono_ok: BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+ERR_AF=$("$SNC" "$ROOT/examples/tier2_assign_func_fail.sn" -o /tmp/snc_fail5 2>&1 || true)
+if echo "$ERR_AF" | grep -q "cannot assign to function 'foo'"; then
+    echo ">>> tier2_assign_func_fail: PASSED (compiler rejected assign to function)"
+else
+    echo ">>> tier2_assign_func_fail: FAILED (expected assign to function rejection, got: $ERR_AF)"
+    FAILURES=$((FAILURES + 1))
+fi
+
+ERR_AL=$("$SNC" "$ROOT/examples/tier2_assign_literal_fail.sn" -o /tmp/snc_fail5_lit 2>&1 || true)
+if echo "$ERR_AL" | grep -q "invalid assignment target"; then
+    echo ">>> tier2_assign_literal_fail: PASSED (compiler rejected assign to literal)"
+else
+    echo ">>> tier2_assign_literal_fail: FAILED (expected invalid assignment target rejection, got: $ERR_AL)"
+    FAILURES=$((FAILURES + 1))
+fi
+
+ERR_BA=$("$SNC" "$ROOT/examples/tier2_builtin_arity_fail.sn" -o /tmp/snc_fail6 2>&1 || true)
+if echo "$ERR_BA" | grep -q "builtin 'get_async' expects 1 arguments, got 0"; then
+    echo ">>> tier2_builtin_arity_fail: PASSED (compiler rejected builtin arity mismatch)"
+else
+    echo ">>> tier2_builtin_arity_fail: FAILED (expected arity mismatch rejection, got: $ERR_BA)"
+    FAILURES=$((FAILURES + 1))
+fi
+
+echo ""
+echo "=== Section 27: Tier 3 Silent Miscompilations & Backend LLVM Fixes ==="
+
+OUT_T3A="/tmp/snc_tier3_opt_member"
+rm -f "$OUT_T3A"
+if "$SNC" "$ROOT/examples/tier3_optional_member_ok.sn" -o "$OUT_T3A"; then
+    OUTPUT=$("$OUT_T3A")
+    if [ "$OUTPUT" = "$(printf '42\nnone')" ]; then
+        echo ">>> tier3_optional_member_ok: PASSED"
+    else
+        echo ">>> tier3_optional_member_ok: FAILED (bad output: $OUTPUT)"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> tier3_optional_member_ok: BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+OUT_T3B="/tmp/snc_tier3_float_opt"
+rm -f "$OUT_T3B"
+if "$SNC" "$ROOT/examples/tier3_float_optional_ok.sn" -o "$OUT_T3B"; then
+    OUTPUT=$("$OUT_T3B")
+    if [ "$OUTPUT" = "$(printf '3.14\n2.71')" ]; then
+        echo ">>> tier3_float_optional_ok: PASSED"
+    else
+        echo ">>> tier3_float_optional_ok: FAILED (bad output: $OUTPUT)"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> tier3_float_optional_ok: BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+OUT_T3C="/tmp/snc_tier3_match_opt"
+rm -f "$OUT_T3C"
+if "$SNC" "$ROOT/examples/tier3_match_opt_ok.sn" -o "$OUT_T3C"; then
+    OUTPUT=$("$OUT_T3C")
+    if [ "$OUTPUT" = "$(printf 'none\n42\nother')" ]; then
+        echo ">>> tier3_match_opt_ok: PASSED"
+    else
+        echo ">>> tier3_match_opt_ok: FAILED (bad output: $OUTPUT)"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> tier3_match_opt_ok: BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+OUT_T3D="/tmp/snc_tier3_rec_clos"
+rm -f "$OUT_T3D"
+if "$SNC" "$ROOT/examples/tier3_recursive_closure_ok.sn" -o "$OUT_T3D"; then
+    OUTPUT=$("$OUT_T3D")
+    if [ "$OUTPUT" = "120" ]; then
+        echo ">>> tier3_recursive_closure_ok: PASSED"
+    else
+        echo ">>> tier3_recursive_closure_ok: FAILED (bad output: $OUTPUT)"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> tier3_recursive_closure_ok: BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+echo ""
+echo "=== Section 28: Tier 4 Concurrency Soundness & Specification Gaps ==="
+
+ERR_CA=$("$SNC" "$ROOT/examples/tier4_chan_alias_data_race_fail.sn" -o /tmp/snc_fail7 2>&1 || true)
+if echo "$ERR_CA" | grep -q "use of moved value 'c2': value was transferred over channel"; then
+    echo ">>> tier4_chan_alias_data_race_fail: PASSED (compiler rejected access to channel-moved alias)"
+else
+    echo ">>> tier4_chan_alias_data_race_fail: FAILED (expected alias move rejection, got: $ERR_CA)"
+    FAILURES=$((FAILURES + 1))
+fi
+
+ERR_CC=$("$SNC" "$ROOT/examples/tier4_closure_captured_mutate_fail.sn" -o /tmp/snc_fail8 2>&1 || true)
+if echo "$ERR_CC" | grep -q "cannot assign to captured outer variable 'x'"; then
+    echo ">>> tier4_closure_captured_mutate_fail: PASSED (compiler rejected mutation of outer captured variable)"
+else
+    echo ">>> tier4_closure_captured_mutate_fail: FAILED (expected closure captured mutation rejection, got: $ERR_CC)"
+    FAILURES=$((FAILURES + 1))
+fi
+
+ERR_CB=$("$SNC" "$ROOT/examples/tier4_closure_captured_borrow_fail.sn" -o /tmp/snc_fail8_b 2>&1 || true)
+if echo "$ERR_CB" | grep -q "cannot mutably borrow captured outer variable 'x'"; then
+    echo ">>> tier4_closure_captured_borrow_fail: PASSED (compiler rejected mutable borrow of outer captured variable)"
+else
+    echo ">>> tier4_closure_captured_borrow_fail: FAILED (expected closure captured mutable borrow rejection, got: $ERR_CB)"
+    FAILURES=$((FAILURES + 1))
+fi
+
+ERR_FN=$("$SNC" --freestanding "$ROOT/examples/tier4_freestanding_new_fail.sn" -o /tmp/snc_fail9 2>&1 || true)
+if echo "$ERR_FN" | grep -q "E-NO-GC-IN-FREESTANDING"; then
+    echo ">>> tier4_freestanding_new_fail: PASSED (compiler rejected GC heap allocation in --freestanding mode)"
+else
+    echo ">>> tier4_freestanding_new_fail: FAILED (expected E-NO-GC-IN-FREESTANDING rejection, got: $ERR_FN)"
+    FAILURES=$((FAILURES + 1))
+fi
+
+OUT_T4D="/tmp/snc_tier4_freestanding_ok"
+rm -f "$OUT_T4D"
+if "$SNC" --freestanding "$ROOT/examples/tier4_freestanding_ok.sn" -o "$OUT_T4D"; then
+    OUTPUT=$("$OUT_T4D")
+    if [ "$OUTPUT" = "$(printf '30\n120\nFreestanding bare-metal execution successful')" ]; then
+        echo ">>> tier4_freestanding_ok: PASSED"
+    else
+        echo ">>> tier4_freestanding_ok: FAILED (bad output: $OUTPUT)"
+        FAILURES=$((FAILURES + 1))
+    fi
+else
+    echo ">>> tier4_freestanding_ok: BUILD FAILED"
+    FAILURES=$((FAILURES + 1))
+fi
+
+echo ""
 echo "================================================================="
 if [ $FAILURES -eq 0 ]; then
-    echo "  ALL SYSTEMS & SECURITY TESTS PASSED (39 checks)"
+    echo "  ALL SYSTEMS & SECURITY TESTS PASSED"
     exit 0
 else
     echo "  $FAILURES SYSTEMS TESTS FAILED"

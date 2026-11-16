@@ -1,0 +1,13 @@
+fn test_match(int? x) {
+    match (x) {
+        none { print("none") }
+        42 { print("42") }
+        default { print("other") }
+    }
+}
+
+fn main() {
+    test_match(none)
+    test_match(42)
+    test_match(99)
+}

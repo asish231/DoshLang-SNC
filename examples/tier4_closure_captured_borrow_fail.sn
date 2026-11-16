@@ -1,0 +1,9 @@
+fn main() {
+    int x = 10
+    fn inner() {
+        mut<int> m = address(x)
+        set(m, 99)
+    }
+    inner()
+    print(x)
+}

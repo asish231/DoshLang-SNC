@@ -1,0 +1,7 @@
+fn main() {
+    float? f = 3.14f
+    print(f!!)
+    float? empty = none
+    float fallback = empty otherwise 2.71f
+    print(fallback)
+}

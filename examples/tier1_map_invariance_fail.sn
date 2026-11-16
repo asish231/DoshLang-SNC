@@ -1,0 +1,8 @@
+fn mutate(map<int, int> m) {
+    m[100] = 200
+}
+
+fn main() {
+    map<i8, i8> m = {}
+    mutate(m)
+}

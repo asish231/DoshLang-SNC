@@ -641,6 +641,9 @@ struct Checker<'a> {
     /// recorded origin (they classify O) — slice-1 tapes and their
     /// carriers are function-local.
     tape_local_tiers: HashMap<String, i64>,
+    alias_sets: HashMap<String, HashSet<String>>,
+    closure_boundaries: Vec<usize>,
+    freestanding: bool,
 }
 
 pub fn template_param_names(tp: &[crate::ast::TypeParam]) -> Vec<String> {
@@ -713,7 +716,88 @@ fn check_type_arg_bounds(
     }
 }
 
+fn type_ast_contains_param(ast: &TypeAst, param: &str) -> bool {
+    match ast {
+        TypeAst::Named(n) => n == param,
+        TypeAst::Ref(inner)
+        | TypeAst::Mut(inner)
+        | TypeAst::Optional(inner)
+        | TypeAst::List(inner)
+        | TypeAst::Handle(inner)
+        | TypeAst::Link(inner)
+        | TypeAst::Tape(inner) => type_ast_contains_param(inner, param),
+        TypeAst::Morton { elem, .. } => type_ast_contains_param(elem, param),
+        TypeAst::Map(k, v) | TypeAst::Hilbert(k, v) => {
+            type_ast_contains_param(k, param) || type_ast_contains_param(v, param)
+        }
+        TypeAst::Tuple(ts) => ts.iter().any(|t| type_ast_contains_param(t, param)),
+        TypeAst::Generic(base, args) => {
+            base == param || args.iter().any(|a| type_ast_contains_param(a, param))
+        }
+        TypeAst::Fn { params, ret } => {
+            params.iter().any(|p| type_ast_contains_param(p, param))
+                || ret
+                    .as_ref()
+                    .map(|r| type_ast_contains_param(r, param))
+                    .unwrap_or(false)
+        }
+        _ => false,
+    }
+}
+
+fn builtin_arity(name: &str) -> Option<(usize, usize)> {
+    match name {
+        "print" | "printn" => Some((1, usize::MAX)),
+        "free" => Some((1, 1)),
+        "panic" => Some((1, 1)),
+        "set" => Some((2, 2)),
+        "input" => Some((0, 1)),
+        "file_read" | "file_read_ex" | "file_exists" | "file_list" => Some((1, 1)),
+        "file_write" => Some((2, 2)),
+        "file_write_ex" | "file_append" | "file_copy" | "file_move" => Some((2, 2)),
+        "file_delete" | "file_mkdir" | "file_rmdir" => Some((1, 1)),
+        "path_join" => Some((2, 2)),
+        "path_base" | "path_dir" | "path_ext" => Some((1, 1)),
+        "os_getenv" => Some((1, 1)),
+        "os_exit" => Some((0, 1)),
+        "os_args" => Some((0, 0)),
+        "os_exec" => Some((2, 2)),
+        "os_system" => Some((1, 1)),
+        "alloc" => Some((1, 1)),
+        "address" | "value" => Some((1, 1)),
+        "error" => Some((1, 1)),
+        "json_parse" | "json_encode" => Some((1, 1)),
+        "http_get" => Some((1, 1)),
+        "http_post" | "http_serve_once" => Some((2, 2)),
+        "time_now_ms" => Some((0, 0)),
+        "time_sleep_ms" => Some((1, 1)),
+        "time_format" => Some((1, 1)),
+        "sleep_async" | "get_async" | "future_data" => Some((1, 1)),
+        "tcp_listen" | "tcp_listen_any" => Some((0, 1)),
+        "tcp_local_port" | "tcp_accept" | "tcp_close" => Some((1, 1)),
+        "tcp_connect" => Some((2, 3)),
+        "tcp_read" => Some((1, 2)),
+        "tcp_write" => Some((2, 2)),
+        "hton16" | "ntoh16" | "swap16"
+        | "hton32" | "ntoh32" | "swap32"
+        | "hton64" | "ntoh64" | "swap64" => Some((1, 1)),
+        "any_box" => Some((1, 1)),
+        "ptr_int" | "int_ptr" | "ptr_alloc" | "ptr_free" => Some((1, 1)),
+        "ptr_load" | "ptr_load_byte" | "ptr_load_f64" | "ptr_load_str" => Some((2, 2)),
+        "ptr_store" | "ptr_store_byte" | "ptr_store_f64" | "ptr_store_str" => Some((3, 3)),
+        "lane_alloc" => Some((2, 2)),
+        "lane_save" | "lane_used" => Some((0, 1)),
+        "lane_restore" => Some((1, 2)),
+        "lane_freeze" | "lane_unfreeze" => Some((1, 1)),
+        _ => None,
+    }
+}
+
 pub fn check_programs(programs: &[Program], diag: &mut Diagnostics) -> CheckDb {
+    check_programs_opts(programs, diag, false)
+}
+
+pub fn check_programs_opts(programs: &[Program], diag: &mut Diagnostics, freestanding: bool) -> CheckDb {
     let mut db = CheckDb {
         funcs: HashMap::new(),
         blueprints: HashMap::new(),
@@ -790,6 +874,9 @@ pub fn check_programs(programs: &[Program], diag: &mut Diagnostics) -> CheckDb {
             joined_stack: vec![Vec::new()],
             lex_loop_vars: Vec::new(),
             tape_local_tiers: HashMap::new(),
+            alias_sets: HashMap::new(),
+            closure_boundaries: Vec::new(),
+            freestanding,
         };
         for item in &p.items {
             match item {
@@ -934,6 +1021,9 @@ pub fn check_programs(programs: &[Program], diag: &mut Diagnostics) -> CheckDb {
             joined_stack: vec![Vec::new()],
             lex_loop_vars: Vec::new(),
             tape_local_tiers: HashMap::new(),
+            alias_sets: HashMap::new(),
+            closure_boundaries: Vec::new(),
+            freestanding,
         };
         c.current_bp = Some(inst.name.clone());
         c.current_bp_hierarchy = hierarchy(&c.db.blueprints, &inst.name);
@@ -1988,6 +2078,23 @@ fn collect(db: &mut CheckDb, programs: &[Program], diag: &mut Diagnostics) {
             if let Item::Blueprint(b) = item {
                 if !b.type_params.is_empty() {
                     db.blueprint_templates.insert(b.name.clone(), b.clone());
+                    for tp in &b.type_params {
+                        if tp.variance == Variance::Covariant {
+                            for m in &b.methods {
+                                for p in &m.params {
+                                    if type_ast_contains_param(&p.ty, &tp.name) {
+                                        diag.error(
+                                            m.span,
+                                            format!(
+                                                "covariant type parameter '{}' cannot appear in method parameter position",
+                                                tp.name
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 if let Some(parent) = &b.parent {
                     if !programs.iter().any(|pr| {
@@ -4928,6 +5035,7 @@ impl Checker<'_> {
         self.moved.clear();
         self.channel_moved.clear();
         self.freed.clear();
+        self.alias_sets.clear();
         self.borrowed.clear();
         self.borrow_owner.clear();
         self.list_epochs.clear();
@@ -4982,11 +5090,120 @@ impl Checker<'_> {
         for s in &f.body {
             self.check_stmt(s);
         }
+        if self.current_fn_ret != Type::Void && !f.is_abstract {
+            if !Self::body_terminates(&f.body) {
+                self.diag.error(
+                    f.span,
+                    format!(
+                        "function '{}' must return a value of type '{}' on all paths",
+                        f.name, self.current_fn_ret
+                    ),
+                );
+            }
+        }
         self.in_async = was_async;
         self.pop();
         self.in_static = prev_static;
         self.current_fn_key = prev_fn_key;
         self.current_inout_params = prev_inout_params;
+    }
+
+    fn has_stop(stmts: &[Stmt]) -> bool {
+        for s in stmts {
+            match s {
+                Stmt::Stop(_) => return true,
+                Stmt::If { then_body, else_ifs, else_body, .. } => {
+                    if Self::has_stop(then_body) { return true; }
+                    for (_, elb) in else_ifs {
+                        if Self::has_stop(elb) { return true; }
+                    }
+                    if let Some(elb) = else_body {
+                        if Self::has_stop(elb) { return true; }
+                    }
+                }
+                Stmt::Match { arms, default, .. } => {
+                    for (_, body) in arms {
+                        if Self::has_stop(body) { return true; }
+                    }
+                    if let Some(def) = default {
+                        if Self::has_stop(def) { return true; }
+                    }
+                }
+                Stmt::Region { body, .. }
+                | Stmt::NurseryBlock { body, .. }
+                | Stmt::Frozen { body, .. }
+                | Stmt::Unfrozen { body, .. } => {
+                    if Self::has_stop(body) { return true; }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn body_terminates(stmts: &[Stmt]) -> bool {
+        for s in stmts {
+            if Self::stmt_terminates(s) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn stmt_terminates(s: &Stmt) -> bool {
+        match s {
+            Stmt::Return { .. } => true,
+            Stmt::Expr(e) => {
+                if let ExprKind::Call { callee, .. } = &e.kind {
+                    if let ExprKind::Ident(f) = &callee.kind {
+                        return f == "panic" || f == "os_exit";
+                    }
+                }
+                false
+            }
+            Stmt::If { then_body, else_ifs, else_body, .. } => {
+                if !Self::body_terminates(then_body) {
+                    return false;
+                }
+                for (_, elb) in else_ifs {
+                    if !Self::body_terminates(elb) {
+                        return false;
+                    }
+                }
+                match else_body {
+                    Some(elb) => Self::body_terminates(elb),
+                    None => false,
+                }
+            }
+            Stmt::Match { arms, default, .. } => {
+                if let Some(def) = default {
+                    if !Self::body_terminates(def) {
+                        return false;
+                    }
+                    for (_, b) in arms {
+                        if !Self::body_terminates(b) {
+                            return false;
+                        }
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
+            Stmt::While { cond, body, .. } => {
+                let is_infinite = matches!(&cond.kind, ExprKind::Bool(true))
+                    || matches!(&cond.kind, ExprKind::Int(n) if *n != 0);
+                if is_infinite && !Self::has_stop(body) {
+                    return true;
+                }
+                false
+            }
+            Stmt::Region { body, .. }
+            | Stmt::NurseryBlock { body, .. }
+            | Stmt::Frozen { body, .. }
+            | Stmt::Unfrozen { body, .. } => Self::body_terminates(body),
+            _ => false,
+        }
     }
 
     fn check_stmt(&mut self, s: &Stmt) {
@@ -5046,7 +5263,17 @@ impl Checker<'_> {
                             }
                         }
                         if let Some(vt) = &val_ty {
+                            let is_address = value.as_ref().map(|v| match &v.kind {
+                                ExprKind::Call { callee, .. } => matches!(&callee.kind, ExprKind::Ident(f) if f == "address" || f == "as_ptr"),
+                                _ => false,
+                            }).unwrap_or(false);
+                            let mut_address = if let (Type::Mut(inner), Type::Ref(val_inner)) = (&t, vt) {
+                                is_address && inner == val_inner
+                            } else {
+                                false
+                            };
                             let ok = t.assignable_from(vt, &self.db.blueprints)
+                                || mut_address
                                 || *vt == Type::None
                                 || (value.as_ref().map(|v| Self::int_lit_value(v).is_some()).unwrap_or(false)
                                     && matches!(t, Type::I8|Type::I16|Type::I32|Type::U8|Type::U16|Type::U32|Type::U64|Type::Float|Type::Enum(_)))
@@ -5110,6 +5337,11 @@ impl Checker<'_> {
                     if let Some(v) = value {
                         if let Some(tier) = self.tape_delta_tier_of_expr(v) {
                             self.tape_local_tiers.insert(name.clone(), tier);
+                        }
+                        if let ExprKind::Ident(rhs_name) = &v.kind {
+                            if matches!(decl_ty_clone, Type::Blueprint(_) | Type::List(_) | Type::Map(_, _) | Type::Ref(_) | Type::Mut(_)) {
+                                self.record_alias(name, rhs_name);
+                            }
                         }
                     }
                     // SWARM RABBIT HOLE — Wave 11 / DIFF-5 (Impl-P): the
@@ -5272,6 +5504,25 @@ impl Checker<'_> {
                                                 }
                                                 ExprKind::Index { base, .. } | ExprKind::Member { base, .. } => {
                                                     if let Some(root) = Self::root_var_of_expr(base) {
+                                                        if exclusive {
+                                                            if let Some((_, is_const)) = self.lookup(&root) {
+                                                                if is_const {
+                                                                    self.diag.error(*span, format!("cannot mutably borrow const '{root}'"));
+                                                                    return;
+                                                                }
+                                                            }
+                                                            if let Some(&boundary) = self.closure_boundaries.last() {
+                                                                if let Some(depth) = self.declaring_scope_depth(&root) {
+                                                                    if depth < boundary {
+                                                                        self.diag.error(
+                                                                            *span,
+                                                                            format!("cannot mutably borrow captured outer variable '{root}': captured variables are immutable snapshots; use a reference cell or pass as parameter"),
+                                                                        );
+                                                                        return;
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
                                                         self.borrow_owner.insert(name.to_string(), root.clone());
                                                         let ep = self.list_epochs.get(&root).copied().unwrap_or(0);
                                                         self.borrow_epoch.insert(name.to_string(), (root.clone(), ep));
@@ -5394,6 +5645,10 @@ impl Checker<'_> {
                 }
                 let tt = self.check_expr(target);
                 let vt = self.check_expr(value);
+                if !matches!(&target.kind, ExprKind::Ident(_) | ExprKind::Member { .. } | ExprKind::Index { .. } | ExprKind::Tuple(_)) {
+                    self.diag.error(*span, "invalid assignment target: expected variable, field, index, or tuple");
+                    return;
+                }
                 // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the
                 // handle-home table's assignment half — `h2 = h1` and
                 // `h2 = gp.insert(v)` keep the provenance (a copy of a
@@ -5439,8 +5694,40 @@ impl Checker<'_> {
                     }
                 }
                 if let ExprKind::Ident(n) = &target.kind {
+                    if self.lookup(n).is_none() {
+                        if self.db.funcs.contains_key(n) {
+                            self.diag.error(*span, format!("cannot assign to function '{n}'"));
+                            return;
+                        } else if self.db.blueprints.contains_key(n) {
+                            self.diag.error(*span, format!("cannot assign to blueprint '{n}'"));
+                            return;
+                        } else if self.db.contracts.contains_key(n) {
+                            self.diag.error(*span, format!("cannot assign to contract '{n}'"));
+                            return;
+                        } else {
+                            self.diag.error(*span, format!("cannot assign to unknown variable '{n}'"));
+                            return;
+                        }
+                    }
                     if self.lookup(n).map(|(_, c)| c).unwrap_or(false) {
                         self.diag.error(*span, format!("cannot assign to const '{n}'"));
+                    }
+                    if let Some(&boundary) = self.closure_boundaries.last() {
+                        if let Some(depth) = self.declaring_scope_depth(n) {
+                            if depth < boundary {
+                                self.diag.error(
+                                    *span,
+                                    format!("cannot assign to captured outer variable '{n}': captured variables are immutable snapshots; use a reference cell or pass as parameter"),
+                                );
+                                return;
+                            }
+                        }
+                    }
+                    self.clear_alias(n);
+                    if let ExprKind::Ident(rhs_name) = &value.kind {
+                        if matches!(tt, Type::Blueprint(_) | Type::List(_) | Type::Map(_, _) | Type::Ref(_) | Type::Mut(_)) {
+                            self.record_alias(n, rhs_name);
+                        }
                     }
                     // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O):
                     // the Assign twin of the Decl alias gate —
@@ -6116,6 +6403,13 @@ impl Checker<'_> {
                 span,
                 ..
             } => {
+                if self.freestanding {
+                    self.diag.error(
+                        *span,
+                        "E-NO-GC-IN-FREESTANDING: dynamic GC heap allocation 'new T()' is forbidden in --freestanding mode. Use stack allocation, 'region { }' elastic arenas, pinned lanes, or 'std.pool'."
+                    );
+                    return;
+                }
                 let resolved = if !type_args.is_empty() {
                     if let Some(template) = self.db.blueprint_templates.get(ty).cloned() {
                         instantiate_blueprint(self.db, &template, type_args, self.diag);
@@ -6452,7 +6746,9 @@ impl Checker<'_> {
                     ret: Box::new(f.ret.as_ref().map(|t| resolve_type_ast(t, self.db)).unwrap_or(Type::Void)),
                 };
                 self.declare(&f.name, ty, true, f.span);
+                self.closure_boundaries.push(self.scopes.len());
                 self.check_fn(f);
+                self.closure_boundaries.pop();
                 self.current_fn_ret = saved;
             }
             Stmt::Asm { .. } => {}
@@ -6480,7 +6776,8 @@ impl Checker<'_> {
                 Arg::Named { name, value } => {
                     let vt = self.check_expr(value);
                     if let Some(f) = bp.fields.iter().find(|f| f.name == *name) {
-                        if !f.ty.assignable_from(&vt, &self.db.blueprints) {
+                        let int_compat = f.ty.is_fixed_int() && matches!(value.kind, ExprKind::Int(_));
+                        if !f.ty.assignable_from(&vt, &self.db.blueprints) && !int_compat {
                             self.diag.error(value.span, "constructor field type mismatch");
                         }
                     } else {
@@ -7024,6 +7321,7 @@ impl Checker<'_> {
             ExprKind::Lambda { params, ret, body } => {
                 let saved = self.current_fn_ret.clone();
                 self.push();
+                self.closure_boundaries.push(self.scopes.len() - 1);
                 for p in params {
                     self.declare(&p.name, resolve_type_ast(&p.ty, self.db), false, e.span);
                 }
@@ -7031,6 +7329,7 @@ impl Checker<'_> {
                 for s in body {
                     self.check_stmt(s);
                 }
+                self.closure_boundaries.pop();
                 self.pop();
                 self.current_fn_ret = saved;
                 Type::Fn {
@@ -7738,6 +8037,17 @@ impl Checker<'_> {
             }
             return sig.ret;
         }
+        if let Some((min_args, max_args)) = builtin_arity(n) {
+            let given = args.len();
+            if given < min_args || given > max_args {
+                if min_args == max_args {
+                    self.diag.error(span, format!("builtin '{n}' expects {min_args} arguments, got {given}"));
+                } else {
+                    self.diag.error(span, format!("builtin '{n}' expects {min_args}..{max_args} arguments, got {given}"));
+                }
+                return Type::Void;
+            }
+        }
         match n {
             "print" | "printn" | "free" | "panic" => Type::Void,
             "set" => {
@@ -7746,6 +8056,22 @@ impl Checker<'_> {
                     return Type::Void;
                 }
                 if let (Some(Arg::Pos(p_expr)), Some(Arg::Pos(v_expr))) = (args.first(), args.get(1)) {
+                    if let Some(root) = Self::root_var_of_expr(p_expr) {
+                        if let Some((_, is_const)) = self.lookup(&root) {
+                            if is_const {
+                                self.diag.error(p_expr.span, format!("cannot mutate const '{root}' via pointer"));
+                            }
+                        }
+                    }
+                    if let ExprKind::Ident(ref n) = p_expr.kind {
+                        if let Some(owner) = self.borrow_owner.get(n) {
+                            if let Some((_, is_const)) = self.lookup(owner) {
+                                if is_const {
+                                    self.diag.error(p_expr.span, format!("cannot mutate const '{owner}' via pointer"));
+                                }
+                            }
+                        }
+                    }
                     let pt = self.db.expr_ty.get(&(p_expr.span.file, p_expr.span.start, p_expr.span.end)).cloned().unwrap_or(Type::Ptr);
                     let vt = self.db.expr_ty.get(&(v_expr.span.file, v_expr.span.start, v_expr.span.end)).cloned().unwrap_or(Type::Int);
                     match &pt {
@@ -8688,6 +9014,25 @@ impl Checker<'_> {
     /// location has at most one live borrow and that a mutable borrow is
     /// exclusive.
     fn register_borrow(&mut self, borrower: &str, owner: &str, exclusive: bool, span: Span) {
+        if exclusive {
+            if let Some((_, is_const)) = self.lookup(owner) {
+                if is_const {
+                    self.diag.error(span, format!("cannot mutably borrow const '{owner}'"));
+                    return;
+                }
+            }
+            if let Some(&boundary) = self.closure_boundaries.last() {
+                if let Some(depth) = self.declaring_scope_depth(owner) {
+                    if depth < boundary {
+                        self.diag.error(
+                            span,
+                            format!("cannot mutably borrow captured outer variable '{owner}': captured variables are immutable snapshots; use a reference cell or pass as parameter"),
+                        );
+                        return;
+                    }
+                }
+            }
+        }
         if let Some((holder, held_excl)) = self.borrowed.get(owner).cloned() {
             if exclusive && held_excl {
                 self.diag.error(
@@ -8744,12 +9089,50 @@ impl Checker<'_> {
             // with it (a stale entry would misattribute a later
             // same-named binding's captures).
             self.handle_home.remove(n);
+            self.clear_alias(n);
             // A moved binding becomes valid again in the enclosing scope only if
             // it was declared here; otherwise the move still stands.
             self.moved.remove(n);
             self.channel_moved.remove(n);
             self.freed.remove(n);
         }
+    }
+
+    fn record_alias(&mut self, a: &str, b: &str) {
+        let mut set = HashSet::new();
+        if let Some(existing) = self.alias_sets.get(b) {
+            set.extend(existing.clone());
+        } else {
+            set.insert(b.to_string());
+        }
+        if let Some(existing) = self.alias_sets.get(a) {
+            set.extend(existing.clone());
+        } else {
+            set.insert(a.to_string());
+        }
+        for name in &set {
+            self.alias_sets.insert(name.clone(), set.clone());
+        }
+    }
+
+    fn clear_alias(&mut self, a: &str) {
+        if let Some(mut set) = self.alias_sets.remove(a) {
+            set.remove(a);
+            for name in &set {
+                if let Some(peer_set) = self.alias_sets.get_mut(name) {
+                    peer_set.remove(a);
+                }
+            }
+        }
+    }
+
+    fn declaring_scope_depth(&self, name: &str) -> Option<usize> {
+        for (i, s) in self.scopes.iter().enumerate().rev() {
+            if s.contains_key(name) {
+                return Some(i);
+            }
+        }
+        None
     }
 
     fn root_var_of_expr(e: &Expr) -> Option<String> {
@@ -9328,6 +9711,28 @@ impl Checker<'_> {
             );
             return;
         }
+        for (i, a) in args.iter().enumerate() {
+            let expr = match a {
+                Arg::Pos(e) | Arg::Inout(e) | Arg::Named { value: e, .. } => e,
+            };
+            let p = match a {
+                Arg::Named { name, .. } => params.iter().find(|p| &p.0 == name),
+                _ => params.get(i),
+            };
+            let Some(p) = p else { continue };
+            let at = self.db.expr_ty.get(&(expr.span.file, expr.span.start, expr.span.end)).cloned().unwrap_or_else(|| self.check_expr(expr));
+            let expected = &p.1;
+            let ptr_compat = at == Type::Ptr && expected.is_ptr();
+            let int_compat = expected.is_fixed_int() && (at == Type::Int || at.is_fixed_int());
+            let lit_compat = (matches!(expr.kind, ExprKind::Int(_)) && expected.is_fixed_int())
+                || (matches!(expr.kind, ExprKind::Float(_)) && *expected == Type::Float);
+            if !expected.assignable_from(&at, &self.db.blueprints) && expected != &at && !int_compat && !lit_compat && !ptr_compat {
+                self.diag.error(
+                    expr.span,
+                    format!("argument {} for '{}' expected {}, got {}", i + 1, sig.name, expected, at),
+                );
+            }
+        }
         // SWARM RABBIT HOLE — Wave 10 / DIFF-4 (Impl-O): the param
         // form of the alias gate — passing a pool OBJECT by value into
         // a pool-typed parameter rebinds the runtime object under a
@@ -9855,8 +10260,15 @@ impl Checker<'_> {
                     }
                 }
                 if let Some(x) = Self::root_var_of_expr(arg_expr) {
-                    self.moved.insert(x.clone(), span);
-                    self.channel_moved.insert(x);
+                    let targets: Vec<String> = if let Some(set) = self.alias_sets.get(&x) {
+                        set.iter().cloned().collect()
+                    } else {
+                        vec![x.clone()]
+                    };
+                    for t in targets {
+                        self.moved.insert(t.clone(), span);
+                        self.channel_moved.insert(t);
+                    }
                 }
                 Type::Void
             }

@@ -1,0 +1,24 @@
+// Test Tier 4: Freestanding Execution OK
+// Freestanding mode bare-metal execution without GC or pthreads
+
+fn add(int a, int b) -> int {
+    return a + b
+}
+
+fn factorial(int n) -> int {
+    int res = 1
+    int i = 1
+    while (i <= n) {
+        res = res * i
+        i = i + 1
+    }
+    return res
+}
+
+fn main() {
+    int sum = add(10, 20)
+    print(sum)
+    int fact5 = factorial(5)
+    print(fact5)
+    print("Freestanding bare-metal execution successful")
+}

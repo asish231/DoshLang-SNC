@@ -1,0 +1,9 @@
+blueprint Box<out T> {
+    T val
+    fn set(T v) {
+        self.val = v
+    }
+}
+
+fn main() {
+}

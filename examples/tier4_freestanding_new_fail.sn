@@ -1,0 +1,12 @@
+// Test Tier 4: Freestanding Mode Rejection of GC Heap Allocation
+// Section 31: dynamic GC heap allocation 'new T()' is forbidden under --freestanding.
+
+blueprint Box {
+    int val = 0
+}
+
+fn main() {
+    new Box b()
+    b.val = 42
+    print(b.val)
+}

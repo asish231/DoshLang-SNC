@@ -1,0 +1,8 @@
+blueprint Node { int v }
+
+fn get_node() -> Node {
+    int x = 5
+}
+
+fn main() {
+}

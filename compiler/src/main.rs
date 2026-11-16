@@ -37,6 +37,9 @@ struct Cli {
     /// add these automatically.
     #[arg(short = 'L', long = "link-lib")]
     libs: Vec<String>,
+    /// Compile in freestanding / bare-metal mode (no GC, minimal runtime)
+    #[arg(long)]
+    freestanding: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -243,6 +246,7 @@ fn main() -> ExitCode {
                 poison: cli.poison,
                 libs: cli.libs,
                 coverage: false,
+                freestanding: cli.freestanding,
             })
         }
     }
@@ -337,6 +341,7 @@ fn run_pkg(action: PkgCmd) -> Result<String, String> {
                 poison: false,
                 libs: Vec::new(),
                 coverage: false,
+                freestanding: false,
             };
             match compile(&opts) {
                 Ok(res) => {

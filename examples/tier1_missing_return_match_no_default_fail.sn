@@ -1,0 +1,20 @@
+blueprint Node {
+    int v
+}
+
+fn make_node() -> Node {
+    new Node n()
+    n.v = 42
+    return n
+}
+
+fn get_node(int x) -> Node {
+    match (x) {
+        1 { return make_node() }
+    }
+}
+
+fn main() {
+    Node n = get_node(2)
+    print(n.v)
+}

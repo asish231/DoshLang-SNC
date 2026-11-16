@@ -1,0 +1,13 @@
+blueprint Animal { int tag }
+blueprint Dog from Animal { int bark_volume }
+blueprint Cat from Animal { str meow_sound }
+
+fn add_dog(list<Animal> animals) {
+    new Dog d()
+    animals.push(d)
+}
+
+fn main() {
+    list<Cat> cats = []
+    add_dog(cats)
+}

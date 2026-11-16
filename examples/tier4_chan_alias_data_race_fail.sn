@@ -1,0 +1,16 @@
+// Test Tier 4: Channel Move-on-Send Aliasing Data Race
+// When c1 is moved into a channel, its alias c2 must also be marked moved,
+// preventing data races.
+
+blueprint Counter {
+    int count = 0
+}
+
+fn main() {
+    chan<Counter> ch
+    new Counter c1()
+    c1.count = 10
+    Counter c2 = c1
+    ch.send(c1)
+    c2.count = 20
+}

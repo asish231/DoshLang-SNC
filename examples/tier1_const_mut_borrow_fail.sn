@@ -1,0 +1,5 @@
+const my_const = 42
+
+fn main() {
+    mut<int> m = address(my_const)
+}

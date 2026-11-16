@@ -208,11 +208,11 @@ impl Type {
         if matches!(other, Type::Any) {
             return matches!(self, Type::Any);
         }
-        // list is covariant: list<Animal> accepts list<Dog>
+        // list is invariant: list<Cat> cannot be used as list<Animal> (heap type safety)
         if let (Type::List(ta), Type::List(tb)) = (self, other) {
             // empty list placeholder (Type::Any) assigns to any list
             if matches!(**tb, Type::Any) { return true }
-            return ta.assignable_from(tb, bps);
+            return ta == tb;
         }
         if let (Type::Contract(c), Type::Blueprint(child)) = (self, other) {
             let mut cur = child.clone();
@@ -266,10 +266,10 @@ impl Type {
         // `address(x)` produces a shared borrow; a `mut<T>` binding takes the
         // exclusive form of the same borrow, which the checker validates.
         if let Type::Mut(inner) = self {
-            return matches!(other, Type::Ref(t) | Type::Mut(t) if **t == **inner || t.assignable_from(inner, bps));
+            return matches!(other, Type::Mut(t) if **t == **inner);
         }
         if let Type::Ref(inner) = self {
-            return matches!(other, Type::Mut(t) | Type::Ref(t) if **t == **inner || t.assignable_from(inner, bps));
+            return matches!(other, Type::Mut(t) | Type::Ref(t) if **t == **inner);
         }
         if let (Type::Pool(a), Type::Pool(b)) = (self, other) {
             return matches!(**b, Type::Any) || a == b || a.assignable_from(b, bps);
@@ -337,26 +337,11 @@ impl Type {
                     .zip(b.iter())
                     .all(|(l, r)| l.assignable_from(r, bps));
         }
-        if let (Type::List(a), Type::List(b)) = (self, other) {
-            if a == b {
-                return true;
-            }
-            if a.is_fixed_int() && (**b == Type::Int || b.is_fixed_int()) {
-                return true;
-            }
-            return a.assignable_from(b, bps);
-        }
         if let (Type::Map(k1, v1), Type::Map(k2, v2)) = (self, other) {
             if matches!(**k2, Type::Any) && matches!(**v2, Type::Any) {
                 return true;
             }
-            let k_ok = k1 == k2
-                || (k1.is_fixed_int() && (**k2 == Type::Int || k2.is_fixed_int()))
-                || k1.assignable_from(k2, bps);
-            let v_ok = v1 == v2
-                || (v1.is_fixed_int() && (**v2 == Type::Int || v2.is_fixed_int()))
-                || v1.assignable_from(v2, bps);
-            return k_ok && v_ok;
+            return k1 == k2 && v1 == v2;
         }
         // implicit widening: u8 -> int, u8 -> u16, i8 -> i32, int -> float, dec -> float, etc.
         if matches!(self, Type::Float) && matches!(other, Type::Dec(_)) {

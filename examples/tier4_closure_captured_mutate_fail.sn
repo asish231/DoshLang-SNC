@@ -1,0 +1,12 @@
+// Test Tier 4: Closure Captured Variable Mutation Discarded
+// Mutating captured variable inside closure mutates local stack copy and is discarded.
+// Compiler must reject assigning to captured outer local variable.
+
+fn main() {
+    int x = 10
+    fn mutate() {
+        x = 20
+    }
+    mutate()
+    print(x)
+}

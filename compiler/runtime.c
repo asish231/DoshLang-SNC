@@ -222,6 +222,12 @@ typedef struct BoxI64 {
     int64_t val;
 } BoxI64;
 
+typedef struct BoxF64 {
+    int64_t rc;
+    int64_t kind;
+    double val;
+} BoxF64;
+
 typedef struct Chan {
     int64_t rc;
     int64_t kind;
@@ -5665,6 +5671,19 @@ void *sn_box_i64(int64_t v) {
 int64_t sn_unbox_i64(void *p) {
     if (!p) return 0;
     return ((BoxI64 *)p)->val;
+}
+
+void *sn_box_f64(double v) {
+    BoxF64 *b = (BoxF64 *)xmalloc(sizeof(BoxF64));
+    b->rc = 1;
+    b->kind = KIND_BOX;
+    b->val = v;
+    return b;
+}
+
+double sn_unbox_f64(void *p) {
+    if (!p) return 0.0;
+    return ((BoxF64 *)p)->val;
 }
 
 int64_t sn_pow_i64(int64_t base, int64_t exp) {

@@ -1,0 +1,10 @@
+blueprint Node {
+    int v
+}
+
+fn get_node() -> Node {}
+
+fn main() {
+    Node n = get_node()
+    print(n.v)
+}

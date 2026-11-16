@@ -1,0 +1,10 @@
+blueprint Box<T> {
+    T val
+}
+
+fn main() {
+    new Box<float> b(val: 3.14)
+    print(b.val)
+    new Box<u8> b2(val: 255)
+    print(b2.val)
+}

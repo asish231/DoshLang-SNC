@@ -1,0 +1,12 @@
+blueprint Node {
+    int val
+}
+
+fn main() {
+    new Node n()
+    n.val = 42
+    Node? opt = n
+    print(opt?.val)
+    Node? empty = none
+    print(empty?.val)
+}

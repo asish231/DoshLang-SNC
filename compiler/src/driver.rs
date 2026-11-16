@@ -1,6 +1,5 @@
 use crate::ast::Program;
 use crate::cache;
-use crate::check::check_programs;
 use crate::diag::Diagnostics;
 use crate::ir::lower;
 use crate::llvm::emit_llvm;
@@ -30,6 +29,8 @@ pub struct CompileOptions {
     /// Emit per-statement `sn_cov_hit` counters. The test runner collects the
     /// resulting `SN_COVERAGE_OUT` dump and maps slots back to source lines.
     pub coverage: bool,
+    /// Compile in freestanding / bare-metal mode without GC or pthreads
+    pub freestanding: bool,
 }
 
 pub struct CompileResult {
@@ -158,7 +159,7 @@ pub fn compile(opts: &CompileOptions) -> Result<CompileResult, String> {
         opts.input.parent().unwrap_or(Path::new(".")),
     )?;
     let mut diag = Diagnostics::default();
-    let db = check_programs(&programs, &mut diag);
+    let db = crate::check::check_programs_opts(&programs, &mut diag, opts.freestanding);
     if !diag.is_empty() {
         return Err(diag.render(&files));
     }
@@ -191,7 +192,11 @@ pub fn compile(opts: &CompileOptions) -> Result<CompileResult, String> {
     let llvm_ir = emit_llvm(&ir, &triple);
     // Unique link libraries in declaration order; part of the cache key.
     let link_libs = link_libraries(&db, &opts.libs);
-    let runtime = runtime_c_path();
+    let runtime = if opts.freestanding {
+        runtime_freestanding_c_path()
+    } else {
+        runtime_c_path()
+    };
     let runtime_bytes = fs::read(&runtime).unwrap_or_default();
     // --poison changes the emitted IR; it must not collide with a cached
     // build of the same -O level (Wave 6, Impl-D).
@@ -279,10 +284,12 @@ pub fn compile(opts: &CompileOptions) -> Result<CompileResult, String> {
     // dropped the flag misparse it as `-o paque-pointers`, so a `--version`
     // check is not sufficient).
     push_opaque_pointer_flag(&mut cmd, &opts.clang);
-    if !triple.contains("windows") {
-        cmd.arg("-pthread");
-    } else {
-        cmd.arg("-lws2_32");
+    if !opts.freestanding {
+        if !triple.contains("windows") {
+            cmd.arg("-pthread");
+        } else {
+            cmd.arg("-lws2_32");
+        }
     }
     // Link the libraries named by `extern` blocks (`link_libs` is already
     // deduplicated in declaration order).
@@ -372,6 +379,29 @@ fn runtime_c_path() -> PathBuf {
         here
     } else {
         PathBuf::from("compiler/runtime.c")
+    }
+}
+
+fn runtime_freestanding_c_path() -> PathBuf {
+    let mut dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    for _ in 0..6 {
+        let d = match dir {
+            Some(d) => d,
+            None => break,
+        };
+        let cand = d.join("runtime_freestanding.c");
+        if cand.exists() {
+            return cand;
+        }
+        dir = d.parent().map(Path::to_path_buf);
+    }
+    let here = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("runtime_freestanding.c");
+    if here.exists() {
+        here
+    } else {
+        PathBuf::from("compiler/runtime_freestanding.c")
     }
 }
 
@@ -507,7 +537,7 @@ pub fn compile_debug(input: &Path, output: &Path, clang: &str) -> Result<(), Str
         input.parent().unwrap_or(Path::new(".")),
     )?;
     let mut diag = Diagnostics::default();
-    let db = check_programs(&programs, &mut diag);
+    let db = crate::check::check_programs_opts(&programs, &mut diag, false);
     if !diag.is_empty() {
         return Err(diag.render(&files));
     }

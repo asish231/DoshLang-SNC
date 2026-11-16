@@ -21,6 +21,7 @@ fn incremental_cache_reuses_identical_builds() {
         poison: false,
         libs: Vec::new(),
         coverage: false,
+        freestanding: false,
     };
 
     let first = compile(&opts("a.bin")).expect("cold build");

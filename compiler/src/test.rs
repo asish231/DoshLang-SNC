@@ -170,6 +170,7 @@ pub fn run(opts: &Options) -> Result<TestRun, String> {
             libs: Vec::new(),
             coverage: opts.coverage,
             poison: false,
+            freestanding: false,
         };
         match compile(&copts) {
             Err(e) => results.push(TestResult {

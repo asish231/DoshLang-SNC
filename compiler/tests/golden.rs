@@ -2775,3 +2775,211 @@ fn tape_extern_param_refused_verbatim() {
         "expected the verbatim E-TAPE extern-parameter refusal, got: {err}"
     );
 }
+
+#[test]
+fn tier1_list_covariance_rejected() {
+    let err = compile_err("examples/tier1_list_covariance_fail.sn");
+    assert!(
+        err.contains("expected list<Animal>, got list<Cat>"),
+        "expected list covariance rejection, got: {err}"
+    );
+}
+
+#[test]
+fn tier1_const_mut_borrow_rejected() {
+    let err = compile_err("examples/tier1_const_mut_borrow_fail.sn");
+    assert!(
+        err.contains("cannot mutably borrow const 'my_const'"),
+        "expected const mut borrow rejection, got: {err}"
+    );
+}
+
+#[test]
+fn tier1_variance_out_param_rejected() {
+    let err = compile_err("examples/tier1_variance_out_param_fail.sn");
+    assert!(
+        err.contains("covariant type parameter 'T' cannot appear in method parameter position"),
+        "expected variance error, got: {err}"
+    );
+}
+
+#[test]
+fn tier1_missing_return_rejected() {
+    let err = compile_err("examples/tier1_missing_return_fail.sn");
+    assert!(
+        err.contains("function 'get_node' must return a value of type 'Node' on all paths"),
+        "expected missing return error, got: {err}"
+    );
+}
+
+#[test]
+fn tier1_missing_return_empty_body_rejected() {
+    let err = compile_err("examples/tier1_missing_return_empty_body_fail.sn");
+    assert!(
+        err.contains("function 'get_node' must return a value of type 'Node' on all paths"),
+        "expected missing return error on empty body, got: {err}"
+    );
+}
+
+#[test]
+fn tier1_missing_return_match_no_default_rejected() {
+    let err = compile_err("examples/tier1_missing_return_match_no_default_fail.sn");
+    assert!(
+        err.contains("function 'get_node' must return a value of type 'Node' on all paths"),
+        "expected missing return error on match without default, got: {err}"
+    );
+}
+
+#[test]
+fn tier1_map_invariance_rejected() {
+    let err = compile_err("examples/tier1_map_invariance_fail.sn");
+    assert!(
+        err.contains("expected map<int, int>, got map<i8, i8>"),
+        "expected map invariance error, got: {err}"
+    );
+}
+
+#[test]
+fn tier1_memory_safety_ok() {
+    assert_out("examples/tier1_memory_safety_ok.sn", "1\n100\n77\n");
+}
+
+#[test]
+fn tier2_generic_mono_ok() {
+    assert_out("examples/tier2_generic_mono_ok.sn", "3.14\n255\n");
+}
+
+#[test]
+fn tier2_assign_func_rejected() {
+    let err = compile_err("examples/tier2_assign_func_fail.sn");
+    assert!(
+        err.contains("cannot assign to function 'foo'"),
+        "expected assign to func rejection, got: {err}"
+    );
+}
+
+#[test]
+fn tier2_assign_literal_rejected() {
+    let err = compile_err("examples/tier2_assign_literal_fail.sn");
+    assert!(
+        err.contains("invalid assignment target"),
+        "expected invalid assignment target rejection, got: {err}"
+    );
+}
+
+#[test]
+fn tier2_builtin_arity_rejected() {
+    let err = compile_err("examples/tier2_builtin_arity_fail.sn");
+    assert!(
+        err.contains("builtin 'get_async' expects 1 arguments, got 0"),
+        "expected builtin arity rejection, got: {err}"
+    );
+}
+
+#[test]
+fn tier3_optional_member_ok() {
+    assert_out("examples/tier3_optional_member_ok.sn", "42\nnone\n");
+}
+
+#[test]
+fn tier3_float_optional_ok() {
+    assert_out("examples/tier3_float_optional_ok.sn", "3.14\n2.71\n");
+}
+
+#[test]
+fn tier3_match_opt_ok() {
+    assert_out("examples/tier3_match_opt_ok.sn", "none\n42\nother\n");
+}
+
+#[test]
+fn tier3_recursive_closure_ok() {
+    assert_out("examples/tier3_recursive_closure_ok.sn", "120\n");
+}
+
+fn compile_run_freestanding(rel: &str) -> (i32, String, String) {
+    let root = repo_root();
+    let src = root.join(rel);
+    let out = std::env::temp_dir().join(format!(
+        "snc-test-{}-{}",
+        src.file_stem().unwrap().to_string_lossy(),
+        std::process::id()
+    ));
+    let compile = Command::new(snc_bin())
+        .arg("--freestanding")
+        .arg(&src)
+        .arg("-o")
+        .arg(&out)
+        .current_dir(&root)
+        .output()
+        .expect("run snc");
+    if !compile.status.success() {
+        return (
+            compile.status.code().unwrap_or(1),
+            String::new(),
+            String::from_utf8_lossy(&compile.stderr).into(),
+        );
+    }
+    let run = Command::new(&out).output().expect("run binary");
+    let _ = std::fs::remove_file(&out);
+    (
+        run.status.code().unwrap_or(1),
+        String::from_utf8_lossy(&run.stdout).into(),
+        String::from_utf8_lossy(&run.stderr).into(),
+    )
+}
+
+fn compile_err_freestanding(rel: &str) -> String {
+    let root = repo_root();
+    let src = root.join(rel);
+    let compile = Command::new(snc_bin())
+        .arg("--freestanding")
+        .arg(&src)
+        .arg("--emit-llvm")
+        .current_dir(&root)
+        .output()
+        .expect("run snc");
+    String::from_utf8_lossy(&compile.stderr).into()
+}
+
+#[test]
+fn tier4_chan_alias_data_race_rejected() {
+    let err = compile_err("examples/tier4_chan_alias_data_race_fail.sn");
+    assert!(
+        err.contains("use of moved value 'c2': value was transferred over channel"),
+        "expected channel alias move rejection, got: {err}"
+    );
+}
+
+#[test]
+fn tier4_closure_captured_mutate_rejected() {
+    let err = compile_err("examples/tier4_closure_captured_mutate_fail.sn");
+    assert!(
+        err.contains("cannot assign to captured outer variable 'x'"),
+        "expected closure captured mutation rejection, got: {err}"
+    );
+}
+
+#[test]
+fn tier4_closure_captured_borrow_rejected() {
+    let err = compile_err("examples/tier4_closure_captured_borrow_fail.sn");
+    assert!(
+        err.contains("cannot mutably borrow captured outer variable 'x'"),
+        "expected closure captured mutable borrow rejection, got: {err}"
+    );
+}
+
+#[test]
+fn tier4_freestanding_new_rejected() {
+    let err = compile_err_freestanding("examples/tier4_freestanding_new_fail.sn");
+    assert!(
+        err.contains("E-NO-GC-IN-FREESTANDING"),
+        "expected E-NO-GC-IN-FREESTANDING rejection, got: {err}"
+    );
+}
+
+#[test]
+fn tier4_freestanding_ok() {
+    let (code, stdout, stderr) = compile_run_freestanding("examples/tier4_freestanding_ok.sn");
+    assert_eq!(code, 0, "freestanding ok failed ({code}): {stderr}\n{stdout}");
+    assert_eq!(stdout, "30\n120\nFreestanding bare-metal execution successful\n");
+}

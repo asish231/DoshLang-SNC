@@ -1,0 +1,29 @@
+blueprint Animal {
+    int tag
+}
+
+blueprint Dog from Animal {
+    int bark_volume
+}
+
+fn make_list() -> list<Animal> {
+    list<Animal> l = []
+    new Animal a()
+    a.tag = 10
+    l.push(a)
+    return l
+}
+
+fn main() {
+    list<Animal> animals = make_list()
+    print(animals.length())
+
+    const c = 100
+    ref<int> r = address(c)
+    print(value(r))
+
+    int mutable_var = 50
+    mut<int> m = address(mutable_var)
+    set(m, 77)
+    print(mutable_var)
+}

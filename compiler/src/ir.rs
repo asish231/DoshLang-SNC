@@ -1633,8 +1633,44 @@ impl Cx<'_> {
                     let yes = self.l("my");
                     let no = self.l("mn");
                     let (p, _) = self.expr(pat);
-                    let eq = self.eq_vals(v.clone(), p, &vt);
-                    let c1 = self.as_i1(eq);
+                    let c1 = if let Type::Optional(inner) = &vt {
+                        if matches!(pat.kind, ExprKind::None) {
+                            let is_null = self.t();
+                            self.line(&format!("{is_null} = icmp eq ptr {v}, null"));
+                            is_null
+                        } else {
+                            let not_null = self.t();
+                            self.line(&format!("{not_null} = icmp ne ptr {v}, null"));
+                            let unbox_lbl = self.l("unbx");
+                            let skip_lbl = self.l("skp");
+                            let cmp_join = self.l("cj");
+                            self.line(&format!("br i1 {not_null}, label %{unbox_lbl}, label %{skip_lbl}"));
+                            self.raw(&format!("{unbox_lbl}:"));
+                            let unboxed = if inner.is_ptr() || matches!(inner.as_ref(), Type::Optional(_) | Type::Json) {
+                                v.clone()
+                            } else if inner.as_ref() == &Type::Float {
+                                let u = self.t();
+                                self.line(&format!("{u} = call double @sn_unbox_f64(ptr {v})"));
+                                u
+                            } else {
+                                let u = self.t();
+                                self.line(&format!("{u} = call i64 @sn_unbox_i64(ptr {v})"));
+                                u
+                            };
+                            let eq = self.eq_vals(unboxed, p, inner.as_ref());
+                            let eq_i1 = self.as_i1(eq);
+                            self.line(&format!("br label %{cmp_join}"));
+                            self.raw(&format!("{skip_lbl}:"));
+                            self.line(&format!("br label %{cmp_join}"));
+                            self.raw(&format!("{cmp_join}:"));
+                            let phi_res = self.t();
+                            self.line(&format!("{phi_res} = phi i1 [ {eq_i1}, %{unbox_lbl} ], [ false, %{skip_lbl} ]"));
+                            phi_res
+                        }
+                    } else {
+                        let eq = self.eq_vals(v.clone(), p, &vt);
+                        self.as_i1(eq)
+                    };
                     self.line(&format!("br i1 {c1}, label %{yes}, label %{no}"));
                     self.raw(&format!("{yes}:"));
                     for s in body {
@@ -1767,18 +1803,13 @@ impl Cx<'_> {
             }
             Stmt::New { ty, type_args, name, args, .. } => {
                 let resolved = if !type_args.is_empty() {
-                    let parts: Vec<String> = type_args.iter().map(|a| match a {
-                        TypeAst::Int => "int".into(),
-                        TypeAst::Str => "str".into(),
-                        TypeAst::Bool => "bool".into(),
-                        TypeAst::Named(n) => n.clone(),
-                        _ => "T".into(),
-                    }).collect();
-                    format!("{}_{}", ty, parts.join("_"))
+                    crate::check::mono_name(ty, type_args)
                 } else {
                     ty.clone()
                 };
-                let info = self.db.blueprints.get(&resolved).cloned().unwrap();
+                let info = self.db.blueprints.get(&resolved).cloned().unwrap_or_else(|| {
+                    panic!("unknown blueprint '{resolved}'");
+                });
                 let tid = info.type_id;
                 let obj = self.t();
                 self.line(&format!(
@@ -2047,7 +2078,7 @@ impl Cx<'_> {
             }
             Stmt::NestedFn(f) => {
                 let ret = f.ret.as_ref().map(ast_to_type).unwrap_or(Type::Void);
-                let clos = self.lower_closure(&f.params, &ret, &f.body);
+                let clos = self.lower_closure(&f.params, &ret, &f.body, Some(&f.name));
                 let an = format!("%v_{}_{}", f.name, self.l("lv"));
                 self.emit_alloca(&format!("{an} = alloca ptr"));
                 self.line(&format!("store ptr {clos}, ptr {an}"));
@@ -2565,7 +2596,7 @@ impl Cx<'_> {
             ExprKind::ForceUnwrap(inner) => self.expr_unwrap(inner),
             ExprKind::Lambda { params, ret, body } => {
                 let rt = ret.as_ref().map(ast_to_type).unwrap_or(Type::Void);
-                let c = self.lower_closure(params, &rt, body);
+                let c = self.lower_closure(params, &rt, body, None);
                 (
                     c,
                     Type::Fn {
@@ -2623,7 +2654,11 @@ impl Cx<'_> {
                 self.raw(&format!("{yes}:"));
                 let some = if matches!(lt, Type::Optional(ref i) if !i.is_ptr()) {
                     let u = self.t();
-                    self.line(&format!("{u} = call i64 @sn_unbox_i64(ptr {l})"));
+                    if matches!(lt, Type::Optional(ref i) if **i == Type::Float) {
+                        self.line(&format!("{u} = call double @sn_unbox_f64(ptr {l})"));
+                    } else {
+                        self.line(&format!("{u} = call i64 @sn_unbox_i64(ptr {l})"));
+                    }
                     u
                 } else {
                     l.clone()
@@ -3186,25 +3221,27 @@ impl Cx<'_> {
             }
             "file_read" => {
                 let r = self.t();
-                self.line(&format!("{r} = call ptr @sn_file_read(ptr {})", vs[0].0));
+                let a0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                self.line(&format!("{r} = call ptr @sn_file_read(ptr {a0})"));
                 (r, Type::Str)
             }
             "file_write" => {
                 let r = self.t();
+                let a0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                let a1 = vs.get(1).map(|x| x.0.clone()).unwrap_or("null".into());
                 self.line(&format!(
-                    "{r} = call i64 @sn_file_write(ptr {}, ptr {})",
-                    vs[0].0, vs[1].0
+                    "{r} = call i64 @sn_file_write(ptr {a0}, ptr {a1})"
                 ));
                 (r, Type::Bool)
             }
             "file_read_ex" => {
                 let body = self.t();
                 let err = self.t();
+                let a0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
                 self.emit_alloca(&format!("{body} = alloca ptr"));
                 self.emit_alloca(&format!("{err} = alloca ptr"));
                 self.line(&format!(
-                    "call void @sn_file_read_ex(ptr {}, ptr {body}, ptr {err})",
-                    vs[0].0
+                    "call void @sn_file_read_ex(ptr {a0}, ptr {body}, ptr {err})"
                 ));
                 let b = self.t();
                 let e = self.t();
@@ -3432,7 +3469,8 @@ impl Cx<'_> {
             }
             "get_async" => {
                 let r = self.t();
-                self.line(&format!("{r} = call ptr @sn_async_http_get(ptr {})", vs[0].0));
+                let a0 = vs.first().map(|x| x.0.clone()).unwrap_or("null".into());
+                self.line(&format!("{r} = call ptr @sn_async_http_get(ptr {a0})"));
                 (r, Type::Named("future".into()))
             }
             "future_data" => {
@@ -5191,6 +5229,10 @@ impl Cx<'_> {
                 sv.clone()
             } else if matches!(st, Type::Void) {
                 sv.clone()
+            } else if matches!(st, Type::Float) {
+                let boxed = self.t();
+                self.line(&format!("{boxed} = call ptr @sn_box_f64(double {sv})"));
+                boxed
             } else {
                 let boxed = self.t();
                 self.line(&format!("{boxed} = call ptr @sn_box_i64(i64 {sv})"));
@@ -5600,6 +5642,58 @@ impl Cx<'_> {
     }
 
     fn member(&mut self, base: &Expr, name: &str) -> (String, Type) {
+        if let ExprKind::OptionalChain(inner) = &base.kind {
+            let (b, bt) = self.expr(inner);
+            let bp_ty = match &bt {
+                Type::Optional(inner) => inner.as_ref().clone(),
+                other => other.clone(),
+            };
+            let yes = self.l("omy");
+            let no = self.l("omn");
+            let join = self.l("omj");
+            let c = self.t();
+            self.line(&format!("{c} = icmp ne ptr {b}, null"));
+            self.line(&format!("br i1 {c}, label %{yes}, label %{no}"));
+            self.raw(&format!("{yes}:"));
+            let dummy = Expr {
+                kind: ExprKind::Ident("__optbase".into()),
+                span: inner.span,
+            };
+            let an = format!("%v_optbase_{}", self.l("ob"));
+            self.emit_alloca(&format!("{an} = alloca ptr"));
+            self.line(&format!("store ptr {b}, ptr {an}"));
+            self.locals.insert("__optbase".into(), (an, bp_ty));
+            let (sv, st) = self.member(&dummy, name);
+            self.locals.remove("__optbase");
+            let some_v = if st.is_ptr() || matches!(st, Type::Optional(_) | Type::Json) {
+                sv.clone()
+            } else if matches!(st, Type::Void) {
+                sv.clone()
+            } else if matches!(st, Type::Float) {
+                let boxed = self.t();
+                self.line(&format!("{boxed} = call ptr @sn_box_f64(double {sv})"));
+                boxed
+            } else {
+                let boxed = self.t();
+                self.line(&format!("{boxed} = call ptr @sn_box_i64(i64 {sv})"));
+                boxed
+            };
+            self.line(&format!("br label %{join}"));
+            self.raw(&format!("{no}:"));
+            self.line(&format!("br label %{join}"));
+            self.raw(&format!("{join}:"));
+            if matches!(st, Type::Void) {
+                return ("0".into(), Type::Void);
+            }
+            let res_ty = if matches!(st, Type::Optional(_)) {
+                st
+            } else {
+                Type::Optional(Box::new(st))
+            };
+            let phi = self.t();
+            self.line(&format!("{phi} = phi ptr [ {some_v}, %{yes} ], [ null, %{no} ]"));
+            return (phi, res_ty);
+        }
         if let ExprKind::Ident(en) = &base.kind {
             if self.db.is_algebraic_enum(en) {
                 if let Some(vars) = self.db.enums.get(en).cloned() {
@@ -5676,6 +5770,51 @@ impl Cx<'_> {
                 }
                 (b, bt)
             }
+            (Type::Optional(inner), field) => {
+                let bp_ty = inner.as_ref().clone();
+                let yes = self.l("omy");
+                let no = self.l("omn");
+                let join = self.l("omj");
+                let c = self.t();
+                self.line(&format!("{c} = icmp ne ptr {b}, null"));
+                self.line(&format!("br i1 {c}, label %{yes}, label %{no}"));
+                self.raw(&format!("{yes}:"));
+                let dummy = Expr {
+                    kind: ExprKind::Ident("__optbase".into()),
+                    span: base.span,
+                };
+                let an = format!("%v_optbase_{}", self.l("ob"));
+                self.emit_alloca(&format!("{an} = alloca ptr"));
+                self.line(&format!("store ptr {b}, ptr {an}"));
+                self.locals.insert("__optbase".into(), (an, bp_ty));
+                let (sv, st) = self.member(&dummy, field);
+                self.locals.remove("__optbase");
+                let some_v = if st.is_ptr() || matches!(st, Type::Optional(_) | Type::Json) {
+                    sv.clone()
+                } else if matches!(st, Type::Void) {
+                    sv.clone()
+                } else if matches!(st, Type::Float) {
+                    let boxed = self.t();
+                    self.line(&format!("{boxed} = call ptr @sn_box_f64(double {sv})"));
+                    boxed
+                } else {
+                    let boxed = self.t();
+                    self.line(&format!("{boxed} = call ptr @sn_box_i64(i64 {sv})"));
+                    boxed
+                };
+                self.line(&format!("br label %{join}"));
+                self.raw(&format!("{no}:"));
+                self.line(&format!("br label %{join}"));
+                self.raw(&format!("{join}:"));
+                let res_ty = if matches!(st, Type::Optional(_)) {
+                    st
+                } else {
+                    Type::Optional(Box::new(st))
+                };
+                let phi = self.t();
+                self.line(&format!("{phi} = phi ptr [ {some_v}, %{yes} ], [ null, %{no} ]"));
+                (phi, res_ty)
+            }
             _ => (b, bt),
         }
     }
@@ -5717,30 +5856,31 @@ impl Cx<'_> {
                 self.raw(&format!("{n}:"));
                 if matches!(t, Type::Optional(inner) if !inner.is_ptr() && !matches!(**inner, Type::Optional(_) | Type::Json))
                 {
-                    let u = self.t();
-                    self.line(&format!("{u} = call i64 @sn_unbox_i64(ptr {v})"));
                     if let Type::Optional(inner) = t {
-                        match inner.as_ref() {
-                            Type::Dec(sc) => {
-                                let st = self.t();
-                                self.line(&format!("{st} = call ptr @sn_str_from_dec(i64 {u}, i64 {sc})"));
-                                self.line(&format!("call void @{ps}(ptr {st})"));
-                            }
-                            Type::Enum(_) => {
-                                let st = self.to_str(u, inner.as_ref());
-                                self.line(&format!("call void @{ps}(ptr {st})"));
-                            }
-                            Type::Bool => {
-                                self.line(&format!("call void @{pb}(i64 {u})"));
-                            }
-                            Type::Float => {
-                                let f = self.t();
-                                self.line(&format!("{f} = bitcast i64 {u} to double"));
-                                let pf = if nl { "sn_print_f64" } else { "sn_printn_f64" };
-                                self.line(&format!("call void @{pf}(double {f})"));
-                            }
-                            _ => {
-                                self.line(&format!("call void @{pi}(i64 {u})"));
+                        if inner.as_ref() == &Type::Float {
+                            let u = self.t();
+                            self.line(&format!("{u} = call double @sn_unbox_f64(ptr {v})"));
+                            let pf = if nl { "sn_print_f64" } else { "sn_printn_f64" };
+                            self.line(&format!("call void @{pf}(double {u})"));
+                        } else {
+                            let u = self.t();
+                            self.line(&format!("{u} = call i64 @sn_unbox_i64(ptr {v})"));
+                            match inner.as_ref() {
+                                Type::Dec(sc) => {
+                                    let st = self.t();
+                                    self.line(&format!("{st} = call ptr @sn_str_from_dec(i64 {u}, i64 {sc})"));
+                                    self.line(&format!("call void @{ps}(ptr {st})"));
+                                }
+                                Type::Enum(_) => {
+                                    let st = self.to_str(u, inner.as_ref());
+                                    self.line(&format!("call void @{ps}(ptr {st})"));
+                                }
+                                Type::Bool => {
+                                    self.line(&format!("call void @{pb}(i64 {u})"));
+                                }
+                                _ => {
+                                    self.line(&format!("call void @{pi}(i64 {u})"));
+                                }
                             }
                         }
                     }
@@ -5930,7 +6070,11 @@ impl Cx<'_> {
         if to.assignable_from(from, &self.db.blueprints) && from != to {
             if matches!(to, Type::Optional(inner) if !inner.is_ptr() && from != &Type::None) {
                 let b = self.t();
-                self.line(&format!("{b} = call ptr @sn_box_i64(i64 {v})"));
+                if matches!(to, Type::Optional(inner) if **inner == Type::Float) {
+                    self.line(&format!("{b} = call ptr @sn_box_f64(double {v})"));
+                } else {
+                    self.line(&format!("{b} = call ptr @sn_box_i64(i64 {v})"));
+                }
                 return (b, to.clone());
             }
             if from == &Type::None {
@@ -6022,7 +6166,11 @@ impl Cx<'_> {
                     return (v, to.clone());
                 }
                 let u = self.t();
-                self.line(&format!("{u} = call i64 @sn_unbox_i64(ptr {v})"));
+                if inner.as_ref() == &Type::Float {
+                    self.line(&format!("{u} = call double @sn_unbox_f64(ptr {v})"));
+                } else {
+                    self.line(&format!("{u} = call i64 @sn_unbox_i64(ptr {v})"));
+                }
                 return (u, to.clone());
             }
         }
@@ -6174,6 +6322,10 @@ impl Cx<'_> {
         self.raw(&format!("{ok}:"));
         if inner_ty.is_ptr() || matches!(inner_ty, Type::Optional(_) | Type::Json) {
             (v, inner_ty)
+        } else if inner_ty == Type::Float {
+            let u = self.t();
+            self.line(&format!("{u} = call double @sn_unbox_f64(ptr {v})"));
+            (u, inner_ty)
         } else {
             let u = self.t();
             self.line(&format!("{u} = call i64 @sn_unbox_i64(ptr {v})"));
@@ -6387,11 +6539,17 @@ impl Cx<'_> {
         c
     }
 
-    fn lower_closure(&mut self, params: &[Param], ret: &Type, body: &[Stmt]) -> String {
+    fn lower_closure(
+        &mut self,
+        params: &[Param],
+        ret: &Type,
+        body: &[Stmt],
+        self_name: Option<&str>,
+    ) -> String {
         let mut caps: Vec<String> = Vec::new();
         collect_idents(body, &mut caps);
         let pnames: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
-        caps.retain(|n| self.locals.contains_key(n) && !pnames.contains(n));
+        caps.retain(|n| self.locals.contains_key(n) && !pnames.contains(n) && self_name != Some(n.as_str()));
         caps.sort();
         caps.dedup();
         let id = self.l("lam");
@@ -6479,6 +6637,18 @@ impl Cx<'_> {
                 child.emit_alloca(&format!("{an} = alloca {}", llty(&t)));
                 child.line(&format!("store {} %p_{}, ptr {an}", llty(&t), p.name));
                 child.locals.insert(p.name.clone(), (an, t));
+            }
+            if let Some(sn) = self_name {
+                let c = child.t();
+                child.line(&format!("{c} = call ptr @sn_clos_new(ptr @{fname}, ptr %env)"));
+                let an = format!("%v_{sn}");
+                child.emit_alloca(&format!("{an} = alloca ptr"));
+                child.line(&format!("store ptr {c}, ptr {an}"));
+                let ty = Type::Fn {
+                    params: params.iter().map(|p| resolve_type_ast(&p.ty, child.db)).collect(),
+                    ret: Box::new(ret.clone()),
+                };
+                child.locals.insert(sn.to_string(), (an, ty));
             }
             for s in body {
                 child.stmt(s);
