@@ -4656,7 +4656,17 @@ fn check_tape_type(t: &Type, span: Span, diag: &mut Diagnostics) {
 }
 
 pub fn is_hashable_primitive_map_key(k: &Type) -> bool {
-    matches!(k, Type::Int | Type::Str | Type::Byte | Type::Ptr | Type::Any) || k.is_fixed_int()
+    matches!(
+        k,
+        Type::Int
+            | Type::Float
+            | Type::Bool
+            | Type::Str
+            | Type::Byte
+            | Type::Ptr
+            | Type::Any
+            | Type::Dec(_)
+    ) || k.is_fixed_int()
 }
 
 pub fn validate_map_keys(t: &Type, span: Span, diag: &mut Diagnostics) {

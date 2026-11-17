@@ -2997,7 +2997,7 @@ fn map_nonprimitive_key_rejected() {
 fn map_primitive_keys_ok() {
     let (code, stdout, stderr) = compile_run("examples/map_primitive_keys.sn");
     assert_eq!(code, 0, "map primitive keys ok failed ({code}): {stderr}\n{stdout}");
-    assert_eq!(stdout, "one\ntwo\n10\n20\n999\n");
+    assert_eq!(stdout, "one\ntwo\n10\n20\n999\ntruthy\nfalsy\none point five\n");
 }
 
 #[test]

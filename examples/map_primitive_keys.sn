@@ -10,4 +10,11 @@ fn main() {
     map<int, int> m3 = {}
     m3[100] = 999
     print(m3[100])
+
+    map<bool, str> m4 = {true: "truthy", false: "falsy"}
+    print(m4[true])
+    print(m4[false])
+
+    map<dec(2), str> m5 = {1.50: "one point five"}
+    print(m5[1.50])
 }

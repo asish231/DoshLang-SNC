@@ -1218,7 +1218,7 @@ OUT_MPK="/tmp/snc_map_prim_keys"
 rm -f "$OUT_MPK"
 if "$SNC" "$ROOT/examples/map_primitive_keys.sn" -o "$OUT_MPK"; then
     OUTPUT=$("$OUT_MPK")
-    EXPECTED=$(printf 'one\ntwo\n10\n20\n999')
+    EXPECTED=$(printf 'one\ntwo\n10\n20\n999\ntruthy\nfalsy\none point five')
     if [ "$OUTPUT" = "$EXPECTED" ]; then
         echo ">>> map_primitive_keys_ok: PASSED"
     else
