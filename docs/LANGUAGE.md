@@ -136,7 +136,30 @@ if (x > 100) {
 }
 ```
 
-### 6. Functions & Definite Return Reachability
+### 6. Guard Statements: `guard (cond) otherwise { ... }`
+
+SNlang supports Swift-style `guard` statements to keep execution paths flat and eliminate deeply nested `if` pyramids. When `cond` is false, the `otherwise` (or `else`) recovery block executes; when true, execution continues immediately past the guard:
+
+```sn
+fn process_age(int age) -> str {
+    guard (age >= 18) otherwise {
+        return "Underage: access denied"
+    }
+    // Execution continues with flat indentation
+    return "Access granted"
+}
+```
+
+### 7. Logical Operators & Short-Circuit Evaluation
+
+SNlang uses English keywords for boolean operations with strict short-circuit evaluation:
+* **`and`**: If the left operand evaluates to `false`, the right operand is **not evaluated**.
+* **`or`**: If the left operand evaluates to `true`, the right operand is **not evaluated**.
+* **`not`** (or `!`): Logical negation.
+* **`in`**: Membership operator testing whether an element exists in a `list` or substring in a `str` (`if (x in list)`).
+* **`otherwise`**: Optional/null fallback operator (`int val = opt otherwise 0`).
+
+### 8. Functions & Definite Return Reachability
 
 Functions are declared with `fn`. Functions with non-void return types specify `-> Type`:
 
@@ -154,7 +177,7 @@ fn compute(int x) -> int {
 > **Control-Flow Reachability Analysis (`[E-MISSING-RETURN]`):**
 > Every non-void function must return a value of its declared return type on all execution branches. An empty body, an `if` without an `else`, or a `match` without a `default` that fails to return on all paths is rejected at compile time with `function '{name}' must return a value of type '{T}' on all paths`. This guarantees that non-nullable references (`Blueprint`, `str`, `list<T>`) never return null pointers or cause runtime segmentation faults.
 
-### 7. Closures, Nested Functions & Capture Safety
+### 9. Closures, Nested Functions & Capture Safety
 
 Functions can be nested inside other functions or passed as first-class values:
 
@@ -219,8 +242,8 @@ match (nickname) {
     none {
         print("Anonymous user")
     }
-    str name {
-        print("Welcome, {name}")
+    default {
+        print("Welcome, {nickname}")
     }
 }
 ```
